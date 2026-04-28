@@ -1,4 +1,4 @@
-import type { CommandResult, EditorCommand, EngineStatus } from "@ai-video-editor/protocol";
+import type { CommandResult, EditorCommand, EngineStatus, ExportStatus, MediaMetadata, PreviewState } from "@ai-video-editor/protocol";
 
 type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -16,8 +16,31 @@ const browserEngineStatus: EngineStatus = {
   },
   gpu: {
     available: false,
+    nvencAvailable: false,
+    h264NvencAvailable: false,
+    hevcNvencAvailable: false,
+    av1NvencAvailable: false,
     message: "Running in browser preview. Launch Tauri to detect NVIDIA hardware."
   }
+};
+
+let browserExportStatus: ExportStatus = {
+  jobId: null,
+  state: "idle",
+  progress: 0,
+  logs: []
+};
+
+const browserPreviewState: PreviewState = {
+  attached: false,
+  state: "paused",
+  codec: "unknown",
+  decodeMode: "idle",
+  droppedFrames: 0,
+  previewFps: 0,
+  quality: "Proxy",
+  colorMode: "SDR",
+  hdrOutputAvailable: false
 };
 
 async function getInvoke(): Promise<TauriInvoke | null> {
@@ -39,6 +62,59 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
 
     if (method === "command.execute") {
       return { ok: true, commandId: `browser-${Date.now()}` } as T;
+    }
+
+    if (method === "media.probe") {
+      const path = (params as { path?: string } | undefined)?.path ?? "browser-preview.mp4";
+      return {
+        path,
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        durationUs: 8_000_000,
+        codec: "h264",
+        pixelFormat: "yuv420p",
+        colorTransfer: "bt709",
+        hdr: false,
+        hasAudio: true
+      } as MediaMetadata as T;
+    }
+
+    if (method.startsWith("preview.")) {
+      return browserPreviewState as T;
+    }
+
+    if (method === "export.start") {
+      browserExportStatus = {
+        ...browserExportStatus,
+        jobId: `browser-export-${Date.now()}`,
+        state: "running",
+        progress: 0.1,
+        logs: ["Browser preview accepted export settings."]
+      };
+      return browserExportStatus as T;
+    }
+
+    if (method === "export.cancel") {
+      browserExportStatus = {
+        ...browserExportStatus,
+        state: "cancelled",
+        logs: ["Browser preview export cancelled."]
+      };
+      return browserExportStatus as T;
+    }
+
+    if (method === "export.status") {
+      if (browserExportStatus.state === "running") {
+        const nextProgress = Math.min(1, browserExportStatus.progress + 0.12);
+        browserExportStatus = {
+          ...browserExportStatus,
+          state: nextProgress >= 1 ? "completed" : "running",
+          progress: nextProgress,
+          logs: [...browserExportStatus.logs, nextProgress >= 1 ? "Export completed." : `Progress ${Math.round(nextProgress * 100)}%`]
+        };
+      }
+      return browserExportStatus as T;
     }
 
     return {} as T;

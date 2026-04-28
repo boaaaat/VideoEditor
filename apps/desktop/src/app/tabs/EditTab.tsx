@@ -3,8 +3,8 @@ import {
   useRef,
   useState,
   type DragEvent as ReactDragEvent,
-  type MutableRefObject,
   type PointerEvent as ReactPointerEvent,
+  type RefObject,
   type WheelEvent as ReactWheelEvent
 } from "react";
 import {
@@ -28,7 +28,7 @@ import {
   ZoomIn,
   ZoomOut
 } from "lucide-react";
-import type { TimelineClip } from "@ai-video-editor/protocol";
+import type { PreviewState, ProjectSettings, TimelineClip } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { IconButton } from "../../components/IconButton";
 import { Panel } from "../../components/Panel";
@@ -36,9 +36,27 @@ import { Toggle } from "../../components/Toggle";
 import { executeCommand } from "../../features/commands/commandClient";
 import { isTypingTarget } from "../../features/commands/shortcuts";
 import { importMediaPaths, type ImportMediaResult } from "../../features/media/importMedia";
-import { getMediaDurationUs, getMediaSourceUrl, getMediaThumbnailDataUrl, isSupportedMediaPath, type MediaAsset } from "../../features/media/mediaTypes";
+import {
+  getMediaDurationUs,
+  getMediaPreviewFrameDataUrl,
+  getMediaSourceUrl,
+  getMediaThumbnailDataUrl,
+  isSupportedMediaPath,
+  type MediaAsset
+} from "../../features/media/mediaTypes";
 import { starterTimeline } from "../../features/timeline/mockTimeline";
-import { previewQualities, type PreviewQuality } from "../../features/playback/preview";
+import {
+  attachNativePreviewSurface,
+  elementToNativePreviewRect,
+  getNativePreviewStats,
+  pauseNativePreview,
+  playNativePreview,
+  previewQualities,
+  resizeNativePreviewSurface,
+  seekNativePreview,
+  setNativePreviewState,
+  type PreviewQuality
+} from "../../features/playback/preview";
 
 const timelineHeaderWidth = 128;
 const minTimelineZoom = 32;
@@ -53,6 +71,7 @@ const defaultAudioDurationUs = 12_000_000;
 interface EditTabProps {
   previewUrl?: string;
   mediaAssets: MediaAsset[];
+  projectSettings: ProjectSettings;
   onImportMedia: () => Promise<void>;
   onImportMediaResult: (result: ImportMediaResult | null) => void;
   setStatusMessage: (message: string) => void;
@@ -94,7 +113,7 @@ interface MediaDropPreviewState {
   invalid: boolean;
 }
 
-export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaResult, setStatusMessage }: EditTabProps) {
+export function EditTab({ previewUrl, mediaAssets, projectSettings, onImportMedia, onImportMediaResult, setStatusMessage }: EditTabProps) {
   const playbackFrameRef = useRef<number | null>(null);
   const lastPlaybackTimeRef = useRef<number | null>(null);
   const internalMediaDragRef = useRef(false);
@@ -717,7 +736,7 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
                 >
                   <MediaThumbnail asset={asset} />
                   <span>{asset.name}</span>
-                  <small>{asset.kind.toUpperCase()} - {asset.extension}</small>
+                  <small>{formatMediaAssetDetail(asset)}</small>
                 </button>
               ))}
             </div>
@@ -750,6 +769,8 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
               videoClip={activeVideoClip}
               audioAsset={activeAudioAsset}
               audioClip={activeAudioClip}
+              projectSettings={projectSettings}
+              previewQuality={previewQuality}
               playheadUs={playheadUs}
               playing={playing}
             />
@@ -834,7 +855,7 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
         <div className="media-drag-preview" style={{ transform: `translate(${mediaDragState.x + 14}px, ${mediaDragState.y + 14}px)` }}>
           <MediaThumbnail asset={mediaDragState.asset} />
           <span>{mediaDragState.asset.name}</span>
-          <small>{mediaDragState.asset.kind.toUpperCase()} - {mediaDragState.asset.extension}</small>
+          <small>{formatMediaAssetDetail(mediaDragState.asset)}</small>
         </div>
       ) : null}
     </div>
@@ -1247,6 +1268,8 @@ function PreviewSurface({
   videoClip,
   audioAsset,
   audioClip,
+  projectSettings,
+  previewQuality,
   playheadUs,
   playing
 }: {
@@ -1255,13 +1278,63 @@ function PreviewSurface({
   videoClip?: TimelineClip;
   audioAsset?: MediaAsset;
   audioClip?: TimelineClip;
+  projectSettings: ProjectSettings;
+  previewQuality: PreviewQuality;
   playheadUs: number;
   playing: boolean;
 }) {
+  const frameRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [videoSrc, setVideoSrc] = useState("");
   const [audioSrc, setAudioSrc] = useState("");
+  const [frameSrc, setFrameSrc] = useState("");
+  const [stats, setStats] = useState<PreviewState | null>(null);
+
+  useEffect(() => {
+    const element = frameRef.current;
+    if (!element || !videoAsset) {
+      return;
+    }
+
+    let cancelled = false;
+    let resizeObserver: ResizeObserver | null = null;
+
+    async function attach() {
+      const target = frameRef.current;
+      if (!target) {
+        return;
+      }
+
+      const nextStats = await attachNativePreviewSurface(elementToNativePreviewRect(target));
+      if (!cancelled) {
+        setStats(nextStats);
+      }
+    }
+
+    function resize() {
+      const target = frameRef.current;
+      if (!target) {
+        return;
+      }
+      void resizeNativePreviewSurface(elementToNativePreviewRect(target)).then((nextStats) => {
+        if (!cancelled) {
+          setStats(nextStats);
+        }
+      });
+    }
+
+    void attach();
+    resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(element);
+    window.addEventListener("resize", resize);
+
+    return () => {
+      cancelled = true;
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", resize);
+    };
+  }, [videoAsset]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1299,6 +1372,49 @@ function PreviewSurface({
     };
   }, [audioAsset, videoAsset]);
 
+  const previewFrameTimeUs = videoAsset && videoClip ? quantizePreviewFrameTime(getClipMediaTimeUs(videoClip, playheadUs)) : 0;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!videoAsset || !videoClip || playing) {
+      setFrameSrc("");
+      return;
+    }
+
+    void getMediaPreviewFrameDataUrl(videoAsset, previewFrameTimeUs).then((url) => {
+      if (!cancelled && url) {
+        setFrameSrc(url);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [playing, previewFrameTimeUs, videoAsset, videoClip]);
+
+  useEffect(() => {
+    void setNativePreviewState({
+      mediaId: videoAsset?.id ?? audioAsset?.id ?? "",
+      mediaPath: videoAsset?.path ?? audioAsset?.path ?? "",
+      codec: videoAsset?.metadata?.codec ?? audioAsset?.metadata?.codec ?? "unknown",
+      quality: previewQuality,
+      colorMode: projectSettings.colorMode,
+      fps: projectSettings.fps,
+      playheadUs,
+      inUs: videoClip?.inUs ?? audioClip?.inUs ?? 0,
+      outUs: videoClip?.outUs ?? audioClip?.outUs ?? 0,
+      playing
+    }).then(setStats).catch(() => undefined);
+  }, [audioAsset, audioClip, playheadUs, playing, previewQuality, projectSettings.colorMode, projectSettings.fps, videoAsset, videoClip]);
+
+  useEffect(() => {
+    void (playing ? playNativePreview() : pauseNativePreview()).then(setStats).catch(() => undefined);
+  }, [playing]);
+
+  useEffect(() => {
+    void seekNativePreview(playheadUs).then(setStats).catch(() => undefined);
+  }, [playheadUs]);
+
   useEffect(() => {
     syncMediaElement(videoRef, videoClip, playheadUs, playing);
   }, [videoClip, playheadUs, playing, videoSrc]);
@@ -1307,33 +1423,57 @@ function PreviewSurface({
     syncMediaElement(audioRef, audioClip, playheadUs, playing);
   }, [audioClip, playheadUs, playing, audioSrc]);
 
-  if (videoAsset && videoClip && videoSrc) {
-    return (
-      <div className="preview-frame has-media">
-        <video ref={videoRef} src={videoSrc} muted={false} playsInline />
-        <div className="preview-overlay">
-          <span>{videoAsset.name}</span>
-          <small>{formatTimelineTime(Math.max(0, Math.floor((playheadUs - videoClip.startUs) / 1_000_000)))}</small>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void getNativePreviewStats().then(setStats).catch(() => undefined);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, []);
 
-  if (audioAsset && audioClip && audioSrc) {
-    return (
-      <div className="preview-frame has-audio">
-        <audio ref={audioRef} src={audioSrc} />
-        <Music size={34} />
-        <span>{audioAsset.name}</span>
-        <small>{formatTimelineTime(Math.max(0, Math.floor((playheadUs - audioClip.startUs) / 1_000_000)))}</small>
-      </div>
-    );
-  }
+  const activeAsset = videoAsset ?? audioAsset;
+  const activeClip = videoClip ?? audioClip;
+  const activeTime = activeClip ? formatTimelineTime(Math.max(0, Math.floor((playheadUs - activeClip.startUs) / 1_000_000))) : "";
+  const nativePreviewActive = Boolean(stats?.childHwnd);
+  const displayedPreviewFps = playing ? Math.round(stats?.previewFps || projectSettings.fps) : Math.round(stats?.previewFps ?? 0);
+  const frameClassName = activeAsset
+    ? nativePreviewActive
+      ? "preview-frame has-native"
+      : videoAsset
+        ? "preview-frame has-media"
+        : "preview-frame has-audio"
+    : "preview-frame";
 
   return (
-    <div className="preview-frame">
-      <span>No clip at playhead</span>
-      <small>{previewUrl ?? "Import media, add it to the timeline, then press Space."}</small>
+    <div ref={frameRef} className={frameClassName}>
+      {nativePreviewActive ? <div className="native-preview-surface" /> : null}
+      {!nativePreviewActive && videoAsset && videoClip && videoSrc ? (
+        <video ref={videoRef} src={videoSrc} muted={false} playsInline onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, playheadUs, playing)} />
+      ) : null}
+      {!nativePreviewActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" /> : null}
+      {!nativePreviewActive && !videoAsset && audioAsset && audioClip && audioSrc ? (
+        <>
+          <audio ref={audioRef} src={audioSrc} onLoadedMetadata={() => syncMediaElement(audioRef, audioClip, playheadUs, playing)} />
+          <Music size={34} />
+        </>
+      ) : null}
+      {activeAsset && activeClip ? (
+        <div className="preview-overlay">
+          <span>{activeAsset.name}</span>
+          <small>{activeTime}</small>
+        </div>
+      ) : (
+        <div className="preview-empty-copy">
+          <span>No clip at playhead</span>
+          <small>{previewUrl ?? "Import media, add it to the timeline, then press Space."}</small>
+        </div>
+      )}
+      <div className="preview-stats">
+        <span>{stats?.codec ?? activeAsset?.metadata?.codec ?? "unknown"}</span>
+        <span>{stats?.decodeMode ?? "idle"}</span>
+        <span>{displayedPreviewFps} fps</span>
+        <span>{stats?.droppedFrames ?? 0} dropped</span>
+      </div>
+      {stats?.warning ? <div className="preview-warning">{stats.warning}</div> : null}
     </div>
   );
 }
@@ -1481,6 +1621,16 @@ function formatTimelineTime(totalSeconds: number) {
   return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
 }
 
+function formatMediaAssetDetail(asset: MediaAsset) {
+  if (!asset.metadata || asset.kind === "audio") {
+    return `${asset.kind.toUpperCase()} - ${asset.extension}`;
+  }
+
+  const fps = asset.metadata.fps > 0 ? `${Math.round(asset.metadata.fps)} fps` : "fps unknown";
+  const resolution = asset.metadata.width > 0 && asset.metadata.height > 0 ? `${asset.metadata.width}x${asset.metadata.height}` : "resolution unknown";
+  return `${resolution} - ${fps} - ${asset.metadata.hdr ? "HDR" : "SDR"}`;
+}
+
 function findActiveClip(timeline: typeof starterTimeline, playheadUs: number, kind: "video" | "audio") {
   return timeline.tracks
     .filter((track) => track.kind === kind && !track.locked && (kind === "audio" ? !track.muted : track.visible))
@@ -1488,8 +1638,16 @@ function findActiveClip(timeline: typeof starterTimeline, playheadUs: number, ki
     .find((clip) => playheadUs >= clip.startUs && playheadUs < clip.startUs + (clip.outUs - clip.inUs));
 }
 
-function syncMediaElement(
-  ref: MutableRefObject<HTMLVideoElement | HTMLAudioElement | null>,
+function getClipMediaTimeUs(clip: TimelineClip, playheadUs: number) {
+  return clamp(playheadUs - clip.startUs + clip.inUs, clip.inUs, Math.max(clip.inUs, clip.outUs - 1));
+}
+
+function quantizePreviewFrameTime(timeUs: number) {
+  return Math.max(0, Math.round(timeUs / 500_000) * 500_000);
+}
+
+function syncMediaElement<T extends HTMLVideoElement | HTMLAudioElement>(
+  ref: RefObject<T>,
   clip: TimelineClip | undefined,
   playheadUs: number,
   playing: boolean
@@ -1523,6 +1681,9 @@ function getTimelineDurationSeconds(durationUs: number) {
 }
 
 function getFallbackMediaDurationUs(asset: MediaAsset) {
+  if (asset.metadata?.durationUs && asset.metadata.durationUs > 0) {
+    return asset.metadata.durationUs;
+  }
   return asset.kind === "audio" ? defaultAudioDurationUs : defaultVideoDurationUs;
 }
 

@@ -26,6 +26,15 @@ target_link_libraries(ai-video-engine-core
     unofficial::sqlite3::sqlite3
 )
 
+if(WIN32)
+  target_link_libraries(ai-video-engine-core
+    PRIVATE
+      d3d11
+      dxgi
+      user32
+  )
+endif()
+
 if(MSVC)
   target_compile_options(ai-video-engine-core PRIVATE /W4 /permissive-)
 else()

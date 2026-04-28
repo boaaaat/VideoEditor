@@ -43,5 +43,8 @@ export interface GpuStatus {
   name?: string;
   rtx30SeriesOrNewer?: boolean;
   nvencAvailable?: boolean;
+  h264NvencAvailable?: boolean;
+  hevcNvencAvailable?: boolean;
+  av1NvencAvailable?: boolean;
   message?: string;
 }

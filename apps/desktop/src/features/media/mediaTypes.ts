@@ -1,3 +1,5 @@
+import type { MediaMetadata } from "@ai-video-editor/protocol";
+
 export type MediaKind = "video" | "audio";
 
 export interface MediaAsset {
@@ -7,6 +9,7 @@ export interface MediaAsset {
   kind: MediaKind;
   extension: string;
   importedAt: string;
+  metadata?: MediaMetadata;
 }
 
 export const supportedMediaExtensions = ["mp4", "mov", "mkv", "mp3"] as const;
@@ -16,7 +19,7 @@ export function isSupportedMediaPath(path: string) {
   return supportedMediaExtensions.includes(extension as (typeof supportedMediaExtensions)[number]);
 }
 
-export function pathToMediaAsset(path: string): MediaAsset {
+export function pathToMediaAsset(path: string, metadata?: MediaMetadata): MediaAsset {
   const name = getFileName(path);
   const extension = getExtension(path);
 
@@ -26,7 +29,8 @@ export function pathToMediaAsset(path: string): MediaAsset {
     path,
     extension,
     kind: extension === "mp3" ? "audio" : "video",
-    importedAt: new Date().toISOString()
+    importedAt: new Date().toISOString(),
+    metadata
   };
 }
 
@@ -61,7 +65,27 @@ export async function getMediaThumbnailDataUrl(asset: MediaAsset) {
   }
 }
 
+export async function getMediaPreviewFrameDataUrl(asset: MediaAsset, timeUs: number) {
+  if (asset.kind !== "video" || !("__TAURI_INTERNALS__" in window)) {
+    return "";
+  }
+
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return await invoke<string>("media_preview_frame_data_url", {
+      path: asset.path,
+      timeUs: Math.max(0, Math.round(timeUs))
+    });
+  } catch {
+    return "";
+  }
+}
+
 export async function getMediaDurationUs(asset: MediaAsset, fallbackUs: number) {
+  if (asset.metadata?.durationUs && asset.metadata.durationUs > 0) {
+    return asset.metadata.durationUs;
+  }
+
   try {
     const src = await getMediaSourceUrl(asset.path);
     const element = document.createElement(asset.kind === "audio" ? "audio" : "video");

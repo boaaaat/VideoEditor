@@ -11,14 +11,16 @@ import {
   Puzzle,
   WandSparkles
 } from "lucide-react";
-import type { EngineStatus } from "@ai-video-editor/protocol";
+import type { EngineStatus, MediaMetadata, ProjectSettings } from "@ai-video-editor/protocol";
 import { Tabs, type TabItem } from "../components/Tabs";
 import { Modal } from "../components/Modal";
+import { Button } from "../components/Button";
 import { getEngineStatus } from "../features/commands/commandClient";
 import { isTypingTarget, shortcutDefinitions } from "../features/commands/shortcuts";
 import { importMediaFiles, type ImportMediaResult } from "../features/media/importMedia";
 import type { MediaAsset } from "../features/media/mediaTypes";
 import { loadRecentProjects, saveRecentProject, type ActiveProject } from "../features/projects/projectActions";
+import { defaultProjectSettings, seedProjectSettingsFromMetadata } from "../features/settings";
 import { TopBar } from "./topbar/TopBar";
 import { HomeTab } from "./tabs/HomeTab";
 import { EditTab } from "./tabs/EditTab";
@@ -44,11 +46,26 @@ const workspaceTabs: TabItem<WorkspaceTab>[] = [
   { id: "future-ai", label: "Future AI", icon: <Bot size={16} /> }
 ];
 
+interface ProjectSettingsChange {
+  label: string;
+  from: string;
+  to: string;
+}
+
+interface ProjectSettingsProposal {
+  assetName: string;
+  metadata: MediaMetadata;
+  nextSettings: ProjectSettings;
+  changes: ProjectSettingsChange[];
+}
+
 export function AppShell() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>("edit");
   const [project, setProject] = useState<ActiveProject>({ name: "Untitled Project" });
   const [recentProjects, setRecentProjects] = useState<ActiveProject[]>([]);
   const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
+  const [projectSettings, setProjectSettings] = useState<ProjectSettings>(defaultProjectSettings);
+  const [settingsProposal, setSettingsProposal] = useState<ProjectSettingsProposal | null>(null);
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -107,6 +124,8 @@ export function AppShell() {
     setProject(nextProject);
     setRecentProjects(saveRecentProject(nextProject));
     setMediaAssets([]);
+    setProjectSettings(defaultProjectSettings);
+    setSettingsProposal(null);
     setStatusMessage(`Project open: ${nextProject.name}`);
     setActiveTab("edit");
   }
@@ -127,8 +146,25 @@ export function AppShell() {
       const newAssets = result.media.filter((asset) => !existingPaths.has(asset.path));
       return [...existing, ...newAssets];
     });
+    const importedVideo = result.media.find((asset) => asset.kind === "video" && asset.metadata);
+    if (importedVideo?.metadata) {
+      const proposal = createProjectSettingsProposal(importedVideo, projectSettings);
+      if (proposal.changes.length > 0) {
+        setSettingsProposal(proposal);
+      }
+    }
     setStatusMessage(`Imported ${result.media.length} media file${result.media.length === 1 ? "" : "s"}`);
     setActiveTab("edit");
+  }
+
+  function applySettingsProposal() {
+    if (!settingsProposal) {
+      return;
+    }
+
+    setProjectSettings(settingsProposal.nextSettings);
+    setSettingsProposal(null);
+    setStatusMessage(`Project settings updated from ${settingsProposal.assetName}`);
   }
 
   async function handleImportMedia() {
@@ -144,6 +180,7 @@ export function AppShell() {
           <EditTab
             previewUrl={engineStatus?.previewUrl}
             mediaAssets={mediaAssets}
+            projectSettings={projectSettings}
             onImportMedia={handleImportMedia}
             onImportMediaResult={applyImportedMedia}
             setStatusMessage={setStatusMessage}
@@ -160,13 +197,24 @@ export function AppShell() {
       case "plugins":
         return <PluginsTab />;
       case "export":
-        return <ExportTab setStatusMessage={setStatusMessage} />;
+        return (
+          <ExportTab
+            projectSettings={projectSettings}
+            onProjectSettingsChange={(settings) => {
+              setProjectSettings(settings);
+            }}
+            firstMediaMetadata={mediaAssets.find((asset) => asset.kind === "video" && asset.metadata)?.metadata}
+            mediaAssets={mediaAssets}
+            gpuStatus={engineStatus?.gpu ?? null}
+            setStatusMessage={setStatusMessage}
+          />
+        );
       case "future-ai":
         return <FutureAiTab />;
       default:
         return null;
     }
-  }, [activeTab, engineStatus, mediaAssets, recentProjects]);
+  }, [activeTab, engineStatus, mediaAssets, projectSettings, recentProjects]);
 
   return (
     <main className="app-shell">
@@ -221,6 +269,92 @@ export function AppShell() {
           </div>
         </div>
       </Modal>
+
+      <Modal title="Update Project Settings" open={Boolean(settingsProposal)} onClose={() => setSettingsProposal(null)}>
+        {settingsProposal ? (
+          <div className="project-settings-proposal">
+            <div className="proposal-source">
+              <strong>{settingsProposal.assetName}</strong>
+              <span>
+                {settingsProposal.metadata.width}x{settingsProposal.metadata.height} · {formatFps(settingsProposal.metadata.fps)} fps ·{" "}
+                {settingsProposal.metadata.hdr ? "HDR" : "SDR"}
+              </span>
+            </div>
+            <div className="settings-change-list">
+              {settingsProposal.changes.map((change) => (
+                <div key={change.label} className="settings-change-row">
+                  <span>{change.label}</span>
+                  <small>{change.from}</small>
+                  <strong>{change.to}</strong>
+                </div>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <Button onClick={() => setSettingsProposal(null)}>Keep Current</Button>
+              <Button variant="primary" onClick={applySettingsProposal}>
+                Apply Changes
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
     </main>
   );
+}
+
+function createProjectSettingsProposal(asset: MediaAsset, current: ProjectSettings): ProjectSettingsProposal {
+  const nextSettings = seedProjectSettingsFromMetadata(asset.metadata as MediaMetadata);
+  const changes = getProjectSettingsChanges(current, nextSettings);
+  return {
+    assetName: asset.name,
+    metadata: asset.metadata as MediaMetadata,
+    nextSettings,
+    changes
+  };
+}
+
+function getProjectSettingsChanges(current: ProjectSettings, next: ProjectSettings): ProjectSettingsChange[] {
+  const rows: Array<[string, string, string]> = [
+    ["Resolution mode", formatResolution(current), formatResolution(next)],
+    ["Width", `${current.width}px`, `${next.width}px`],
+    ["Height", `${current.height}px`, `${next.height}px`],
+    ["FPS", `${current.fps}`, `${next.fps}`],
+    ["Color", current.colorMode, next.colorMode],
+    ["Default codec", formatCodec(current.defaultCodec), formatCodec(next.defaultCodec)],
+    ["Default file type", current.defaultContainer.toUpperCase(), next.defaultContainer.toUpperCase()],
+    ["Audio", current.audioEnabled ? "Enabled" : "Disabled", next.audioEnabled ? "Enabled" : "Disabled"],
+    ["Medium bitrate", `${current.bitrateMbps} Mbps`, `${next.bitrateMbps} Mbps`]
+  ];
+
+  return rows
+    .filter(([, from, to]) => from !== to)
+    .map(([label, from, to]) => ({
+      label,
+      from,
+      to
+    }));
+}
+
+function formatResolution(settings: ProjectSettings) {
+  if (settings.resolution === "source") {
+    return `Source (${settings.width}x${settings.height})`;
+  }
+  if (settings.resolution === "custom") {
+    return `Custom (${settings.width}x${settings.height})`;
+  }
+  return `${settings.resolution} (${settings.width}x${settings.height})`;
+}
+
+function formatCodec(codec: ProjectSettings["defaultCodec"]) {
+  if (codec === "hevc_nvenc") {
+    return "H.265 NVENC";
+  }
+  if (codec === "av1_nvenc") {
+    return "AV1 NVENC";
+  }
+  return "H.264 NVENC";
+}
+
+function formatFps(fps: number) {
+  return Number.isFinite(fps) && fps > 0 ? fps.toFixed(Math.abs(fps - Math.round(fps)) < 0.01 ? 0 : 3) : "unknown";
 }

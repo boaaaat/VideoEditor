@@ -41,6 +41,25 @@
           "copyToProject": { "type": "boolean" }
         }
       }
+    },
+    {
+      "if": { "properties": { "type": { "const": "export_timeline" } } },
+      "then": {
+        "required": ["outputPath", "resolution", "width", "height", "fps", "codec", "container", "quality", "bitrateMbps", "audioEnabled", "colorMode"],
+        "properties": {
+          "outputPath": { "type": "string", "minLength": 1 },
+          "resolution": { "enum": ["source", "custom", "1080p", "1440p", "4k"] },
+          "width": { "type": "integer", "minimum": 1 },
+          "height": { "type": "integer", "minimum": 1 },
+          "fps": { "enum": [24, 25, 30, 50, 60] },
+          "codec": { "enum": ["h264_nvenc", "hevc_nvenc", "av1_nvenc"] },
+          "container": { "enum": ["mp4", "mkv"] },
+          "quality": { "enum": ["trash", "low", "medium", "high", "pro_max"] },
+          "bitrateMbps": { "type": "number", "minimum": 1 },
+          "audioEnabled": { "type": "boolean" },
+          "colorMode": { "enum": ["SDR", "HDR"] }
+        }
+      }
     }
   ],
   "additionalProperties": true

@@ -1,4 +1,5 @@
 import type { ColorAdjustment } from "./timeline";
+import type { ColorMode, ExportCodec, ExportContainer, ExportFps, ExportQuality, ExportResolution } from "./media";
 
 export type CommandType =
   | "import_media"
@@ -92,10 +93,16 @@ export interface ApplyLutCommand {
 export interface ExportTimelineCommand {
   type: "export_timeline";
   outputPath: string;
-  resolution: "1080p" | "1440p" | "4k";
-  fps: 24 | 25 | 30 | 50 | 60;
-  codec: "h264_nvenc";
+  resolution: ExportResolution;
+  width: number;
+  height: number;
+  fps: ExportFps;
+  codec: ExportCodec;
+  container: ExportContainer;
+  quality: ExportQuality;
   bitrateMbps: number;
+  audioEnabled: boolean;
+  colorMode: ColorMode;
 }
 
 export type EditorCommand =
@@ -122,4 +129,5 @@ export interface CommandResult {
   ok: boolean;
   commandId?: string;
   error?: string;
+  data?: unknown;
 }

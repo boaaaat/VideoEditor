@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import type { CommandResult } from "@ai-video-editor/protocol";
-import { executeCommand } from "../commands/commandClient";
+import type { CommandResult, MediaMetadata } from "@ai-video-editor/protocol";
+import { engineRpc, executeCommand } from "../commands/commandClient";
 import { isSupportedMediaPath, pathToMediaAsset, supportedMediaExtensions, type MediaAsset } from "./mediaTypes";
 
 export interface ImportMediaResult {
@@ -38,8 +38,25 @@ export async function importMediaPaths(paths: string[]): Promise<ImportMediaResu
       copyToProject: false
   });
 
+  const media = await Promise.all(
+    supportedPaths.map(async (path) => {
+      const metadata = await probeMediaPath(path).catch(() => undefined);
+      return pathToMediaAsset(path, metadata);
+    })
+  );
+
   return {
     command,
-    media: supportedPaths.map(pathToMediaAsset)
+    media
   };
+}
+
+export function probeMediaPath(path: string) {
+  if ("__TAURI_INTERNALS__" in window) {
+    return import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke<MediaMetadata>("media_probe", { path }))
+      .catch(() => engineRpc<MediaMetadata>("media.probe", { path }));
+  }
+
+  return engineRpc<MediaMetadata>("media.probe", { path });
 }
