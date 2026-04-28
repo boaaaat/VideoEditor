@@ -25,6 +25,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::engine_rpc,
             commands::engine_status,
+            commands::media_thumbnail_data_url,
             commands::preview_url
         ])
         .run(tauri::generate_context!())

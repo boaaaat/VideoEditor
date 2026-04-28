@@ -39,6 +39,51 @@ export function getProjectNameFromPath(path: string) {
   return getFileName(cleanPath) || "Untitled Project";
 }
 
+export async function getMediaSourceUrl(path: string) {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    return path;
+  }
+
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  return convertFileSrc(path);
+}
+
+export async function getMediaThumbnailDataUrl(asset: MediaAsset) {
+  if (asset.kind !== "video" || !("__TAURI_INTERNALS__" in window)) {
+    return "";
+  }
+
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return await invoke<string>("media_thumbnail_data_url", { path: asset.path });
+  } catch {
+    return "";
+  }
+}
+
+export async function getMediaDurationUs(asset: MediaAsset, fallbackUs: number) {
+  try {
+    const src = await getMediaSourceUrl(asset.path);
+    const element = document.createElement(asset.kind === "audio" ? "audio" : "video");
+    element.preload = "metadata";
+    element.src = src;
+
+    return await new Promise<number>((resolve) => {
+      const timeout = window.setTimeout(() => resolve(fallbackUs), 5000);
+      element.onloadedmetadata = () => {
+        window.clearTimeout(timeout);
+        resolve(Number.isFinite(element.duration) && element.duration > 0 ? Math.round(element.duration * 1_000_000) : fallbackUs);
+      };
+      element.onerror = () => {
+        window.clearTimeout(timeout);
+        resolve(fallbackUs);
+      };
+    });
+  } catch {
+    return fallbackUs;
+  }
+}
+
 function getExtension(path: string) {
   const name = getFileName(path);
   const dot = name.lastIndexOf(".");
