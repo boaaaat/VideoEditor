@@ -1,0 +1,22 @@
+{
+  "name": "ai-video-editor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows-first AI-ready video editor with a React/Tauri UI and C++ engine sidecar.",
+  "scripts": {
+    "dev": "powershell -ExecutionPolicy Bypass -File scripts/dev-desktop.ps1",
+    "build": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
+    "test": "corepack pnpm --filter @ai-video-editor/protocol test && corepack pnpm engine:test",
+    "typecheck": "corepack pnpm --filter @ai-video-editor/protocol typecheck && corepack pnpm --filter @ai-video-editor/desktop typecheck",
+    "engine:configure": "powershell -ExecutionPolicy Bypass -File scripts/configure-engine.ps1",
+    "engine:build": "powershell -ExecutionPolicy Bypass -File scripts/build-engine.ps1",
+    "engine:test": "powershell -ExecutionPolicy Bypass -File scripts/test-engine.ps1",
+    "setup": "powershell -ExecutionPolicy Bypass -File scripts/setup-dev.ps1",
+    "clean": "powershell -ExecutionPolicy Bypass -File scripts/clean.ps1"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

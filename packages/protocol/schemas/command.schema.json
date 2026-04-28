@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-video-editor.local/schemas/command.schema.json",
+  "type": "object",
+  "required": ["type"],
+  "properties": {
+    "type": {
+      "enum": [
+        "import_media",
+        "add_track",
+        "delete_track",
+        "add_clip",
+        "move_clip",
+        "trim_clip",
+        "split_clip",
+        "delete_clip",
+        "ripple_delete_clip",
+        "apply_color_adjustment",
+        "apply_lut",
+        "export_timeline"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "ripple_delete_clip" } } },
+      "then": {
+        "required": ["clipId", "trackMode"],
+        "properties": {
+          "clipId": { "type": "string", "minLength": 1 },
+          "trackMode": { "enum": ["selected_track", "all_tracks"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "import_media" } } },
+      "then": {
+        "required": ["paths"],
+        "properties": {
+          "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "copyToProject": { "type": "boolean" }
+        }
+      }
+    }
+  ],
+  "additionalProperties": true
+}

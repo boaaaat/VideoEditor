@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-video-editor.local/schemas/project-manifest.schema.json",
+  "type": "object",
+  "required": ["version", "name", "database", "createdWith"],
+  "properties": {
+    "version": { "const": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "database": { "const": "project.db" },
+    "createdWith": { "const": "AI Video Editor v0.1" }
+  },
+  "additionalProperties": false
+}

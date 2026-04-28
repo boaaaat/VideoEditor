@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Frontend builds
+dist/
+build/
+.vite/
+.logs/
+
+# Tauri/Rust
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
+# C++ builds
+engine/build/
+engine/out/
+CMakeUserPresets.json
+
+# Local tools and generated media
+tools/ffmpeg/bin/
+tools/ffmpeg/doc/
+tools/ffmpeg/presets/
+*.aivproj/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
