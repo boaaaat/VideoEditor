@@ -1,26 +1,19 @@
 import { Download, FolderPlus, Import, Redo2, Save, Search, Settings, Undo2 } from "lucide-react";
 import { Button } from "../../components/Button";
 import { IconButton } from "../../components/IconButton";
-import { importMediaFiles } from "../../features/media/importMedia";
 
 interface TopBarProps {
   projectName: string;
-  onImportComplete: (message: string) => void;
+  onImportMedia: () => Promise<void>;
+  onSave: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
   onOpenCommandPalette: () => void;
   onOpenSettings: () => void;
   onExport: () => void;
 }
 
-export function TopBar({ projectName, onImportComplete, onOpenCommandPalette, onOpenSettings, onExport }: TopBarProps) {
-  async function handleImport() {
-    const result = await importMediaFiles();
-    if (!result) {
-      return;
-    }
-
-    onImportComplete(result.ok ? `Import command accepted: ${result.commandId}` : result.error ?? "Import failed");
-  }
-
+export function TopBar({ projectName, onImportMedia, onSave, onUndo, onRedo, onOpenCommandPalette, onOpenSettings, onExport }: TopBarProps) {
   return (
     <header className="top-bar">
       <div className="project-title">
@@ -28,12 +21,12 @@ export function TopBar({ projectName, onImportComplete, onOpenCommandPalette, on
         <span>{projectName}</span>
       </div>
       <div className="top-actions">
-        <Button icon={<Import size={16} />} onClick={handleImport}>
+        <Button icon={<Import size={16} />} onClick={onImportMedia}>
           Import
         </Button>
-        <IconButton label="Save" icon={<Save size={17} />} />
-        <IconButton label="Undo" icon={<Undo2 size={17} />} />
-        <IconButton label="Redo" icon={<Redo2 size={17} />} />
+        <IconButton label="Save" icon={<Save size={17} />} onClick={onSave} />
+        <IconButton label="Undo" icon={<Undo2 size={17} />} onClick={onUndo} />
+        <IconButton label="Redo" icon={<Redo2 size={17} />} onClick={onRedo} />
         <Button icon={<Download size={16} />} variant="primary" onClick={onExport}>
           Export
         </Button>

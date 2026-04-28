@@ -45,6 +45,17 @@
   gap: 10px;
 }
 
+.media-drop-zone {
+  min-height: 100%;
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+
+.media-drop-zone.drag-over {
+  border-color: var(--accent);
+  background: rgba(47, 191, 159, 0.08);
+}
+
 .media-list button,
 .recent-list button,
 .command-palette button,
@@ -63,6 +74,14 @@
   grid-template-rows: auto auto;
   padding: 8px;
   text-align: left;
+}
+
+.media-list button span:not(.media-thumb),
+.recent-list button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .media-list small,
@@ -204,8 +223,10 @@
 }
 
 .recent-list button {
+  display: grid;
+  gap: 3px;
   min-height: 36px;
-  padding: 0 10px;
+  padding: 8px 10px;
   text-align: left;
 }
 
@@ -216,6 +237,15 @@
   gap: 10px;
   min-height: 120px;
   text-align: center;
+}
+
+.media-empty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  min-height: 180px;
+  color: var(--muted);
 }
 
 .progress-shell {
@@ -285,4 +315,60 @@
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 6px;
+}
+
+.shortcuts-workspace {
+  height: 100%;
+  padding: 12px;
+  overflow: auto;
+}
+
+.shortcut-table {
+  display: grid;
+  gap: 12px;
+}
+
+.shortcut-table-header,
+.shortcut-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(160px, 220px) minmax(110px, 140px);
+  align-items: center;
+  gap: 12px;
+}
+
+.shortcut-table-header {
+  min-height: 34px;
+  padding: 0 10px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+
+.shortcut-group {
+  display: grid;
+  gap: 6px;
+}
+
+.shortcut-group h3 {
+  margin: 4px 0;
+  font-size: 0.86rem;
+  color: var(--accent-2);
+}
+
+.shortcut-row {
+  min-height: 42px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #1b1b19;
+}
+
+.shortcut-row kbd {
+  width: fit-content;
+}
+
+.shortcut-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
 }

@@ -1,21 +1,21 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import type { CommandResult } from "@ai-video-editor/protocol";
 import { executeCommand } from "../commands/commandClient";
+import { isSupportedMediaPath, pathToMediaAsset, supportedMediaExtensions, type MediaAsset } from "./mediaTypes";
 
-const mediaExtensions = ["mp4", "mov", "mkv", "mp3"];
+export interface ImportMediaResult {
+  command: CommandResult;
+  media: MediaAsset[];
+}
 
-export async function importMediaFiles(): Promise<CommandResult | null> {
+export async function importMediaFiles(): Promise<ImportMediaResult | null> {
   if (!("__TAURI_INTERNALS__" in window)) {
-    return executeCommand({
-      type: "import_media",
-      paths: ["browser-preview.mp4"],
-      copyToProject: false
-    });
+    return importMediaPaths(["browser-preview.mp4"]);
   }
 
   const selection = await open({
     multiple: true,
-    filters: [{ name: "Media", extensions: mediaExtensions }]
+    filters: [{ name: "Media", extensions: [...supportedMediaExtensions] }]
   });
 
   if (!selection) {
@@ -23,13 +23,23 @@ export async function importMediaFiles(): Promise<CommandResult | null> {
   }
 
   const paths = Array.isArray(selection) ? selection : [selection];
-  if (paths.length === 0) {
+  return importMediaPaths(paths);
+}
+
+export async function importMediaPaths(paths: string[]): Promise<ImportMediaResult | null> {
+  const supportedPaths = paths.filter(isSupportedMediaPath);
+  if (supportedPaths.length === 0) {
     return null;
   }
 
-  return executeCommand({
-    type: "import_media",
-    paths,
-    copyToProject: false
+  const command = await executeCommand({
+      type: "import_media",
+      paths: supportedPaths,
+      copyToProject: false
   });
+
+  return {
+    command,
+    media: supportedPaths.map(pathToMediaAsset)
+  };
 }

@@ -2,25 +2,60 @@ import type { EngineStatus } from "@ai-video-editor/protocol";
 import { FolderOpen, FolderPlus, HardDrive, PlugZap } from "lucide-react";
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
+import { createProjectFromDialog, openProjectFromDialog, type ActiveProject } from "../../features/projects/projectActions";
 
 interface HomeTabProps {
   engineStatus: EngineStatus | null;
-  onProjectNameChange: (name: string) => void;
+  recentProjects: ActiveProject[];
+  onProjectOpen: (project: ActiveProject) => void;
+  setStatusMessage: (message: string) => void;
 }
 
-export function HomeTab({ engineStatus, onProjectNameChange }: HomeTabProps) {
+export function HomeTab({ engineStatus, recentProjects, onProjectOpen, setStatusMessage }: HomeTabProps) {
+  async function createProject() {
+    try {
+      const project = await createProjectFromDialog();
+      if (project) {
+        onProjectOpen(project);
+      }
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "New project failed");
+    }
+  }
+
+  async function openProject() {
+    try {
+      const project = await openProjectFromDialog();
+      if (project) {
+        onProjectOpen(project);
+      }
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Open project failed");
+    }
+  }
+
   return (
     <div className="home-grid">
       <Panel title="Project Dashboard">
         <div className="home-actions">
-          <Button icon={<FolderPlus size={17} />} variant="primary" onClick={() => onProjectNameChange("New Project")}>
+          <Button icon={<FolderPlus size={17} />} variant="primary" onClick={createProject}>
             New Project
           </Button>
-          <Button icon={<FolderOpen size={17} />}>Open Project</Button>
+          <Button icon={<FolderOpen size={17} />} onClick={openProject}>
+            Open Project
+          </Button>
         </div>
         <div className="recent-list">
-          <button type="button">Untitled Project</button>
-          <button type="button">Demo Rough Cut</button>
+          {recentProjects.length > 0 ? (
+            recentProjects.map((project) => (
+              <button type="button" key={project.manifestPath ?? project.path ?? project.name} onClick={() => onProjectOpen(project)}>
+                <span>{project.name}</span>
+                {project.path ? <small>{project.path}</small> : null}
+              </button>
+            ))
+          ) : (
+            <div className="empty-state">No recent projects.</div>
+          )}
         </div>
       </Panel>
 
