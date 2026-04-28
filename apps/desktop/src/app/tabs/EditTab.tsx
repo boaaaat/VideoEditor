@@ -45,6 +45,8 @@ const minTimelineZoom = 32;
 const maxTimelineZoom = 180;
 const timelineZoomStep = 8;
 const snapIntervalUs = 500_000;
+const snapThresholdPx = 18;
+const visualClipGapPx = 2;
 const defaultVideoDurationUs = 8_000_000;
 const defaultAudioDurationUs = 12_000_000;
 
@@ -84,6 +86,14 @@ interface MediaPointerDragState {
   active: boolean;
 }
 
+interface MediaDropPreviewState {
+  trackId: string;
+  startUs: number;
+  durationUs: number;
+  snapped: boolean;
+  invalid: boolean;
+}
+
 export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaResult, setStatusMessage }: EditTabProps) {
   const playbackFrameRef = useRef<number | null>(null);
   const lastPlaybackTimeRef = useRef<number | null>(null);
@@ -99,6 +109,7 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
   const [draggingMediaId, setDraggingMediaId] = useState<string | null>(null);
   const [mediaDropTrackId, setMediaDropTrackId] = useState<string | null>(null);
   const [mediaDragState, setMediaDragState] = useState<MediaPointerDragState | null>(null);
+  const [mediaDropPreview, setMediaDropPreview] = useState<MediaDropPreviewState | null>(null);
   const selectedClip = timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === selectedClipId);
   const activeVideoClip = findActiveClip(timeline, playheadUs, "video");
   const activeAudioClip = findActiveClip(timeline, playheadUs, "audio");
@@ -268,7 +279,7 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
       return;
     }
 
-    const nextStartUs = snapping ? snapTime(startUs) : Math.max(0, startUs);
+    const nextStartUs = snapping ? resolveTrackSnapStart(timeline, targetTrackId, startUs, timelineZoom, clipId, false).startUs : Math.max(0, startUs);
     const result = await executeCommand({
       type: "move_clip",
       clipId,
@@ -369,50 +380,69 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
       return;
     }
 
-    const fallbackDurationUs = asset.kind === "audio" ? defaultAudioDurationUs : defaultVideoDurationUs;
-    const durationUs = await getMediaDurationUs(asset, fallbackDurationUs);
-    const nextStartUs = snapping ? snapTime(startUs) : startUs;
+    const fallbackDurationUs = getFallbackMediaDurationUs(asset);
+    const nextStartUs = targetTrackId
+      ? Math.max(0, startUs)
+      : resolveMediaDropPlacement(timeline, asset, targetTrack.id, getTrackEndUs(targetTrack), timelineZoom, snapping).startUs;
     const clipId = `clip_${Date.now()}`;
-    const result = await executeCommand({
-      type: "add_clip",
+    const newClip = {
+      id: clipId,
       mediaId: asset.id,
       trackId: targetTrack.id,
       startUs: nextStartUs,
       inUs: 0,
-      outUs: durationUs
-    });
+      outUs: fallbackDurationUs,
+      color: {
+        brightness: 0,
+        contrast: 0,
+        saturation: 1,
+        temperature: 0,
+        tint: 0
+      }
+    };
 
     setTimeline((current) => ({
       ...current,
-      durationUs: Math.max(current.durationUs, nextStartUs + durationUs + 5_000_000),
+      durationUs: Math.max(current.durationUs, nextStartUs + fallbackDurationUs + 5_000_000),
       tracks: current.tracks.map((track) =>
         track.id === targetTrack.id
           ? {
               ...track,
-              clips: [
-                ...track.clips,
-                {
-                  id: clipId,
-                  mediaId: asset.id,
-                  trackId: targetTrack.id,
-                  startUs: nextStartUs,
-                  inUs: 0,
-                  outUs: durationUs,
-                  color: {
-                    brightness: 0,
-                    contrast: 0,
-                    saturation: 1,
-                    temperature: 0,
-                    tint: 0
-                  }
-                }
-              ].sort((left, right) => left.startUs - right.startUs)
+              clips: [...track.clips, newClip].sort((left, right) => left.startUs - right.startUs)
             }
           : track
       )
     }));
     setSelectedClipId(clipId);
-    setStatusMessage(result.ok ? `Added ${asset.name} to timeline` : result.error ?? "Add clip failed");
+    setStatusMessage(`Added ${asset.name} to timeline`);
+
+    void executeCommand({
+      type: "add_clip",
+      mediaId: asset.id,
+      trackId: targetTrack.id,
+      startUs: nextStartUs,
+      inUs: 0,
+      outUs: fallbackDurationUs
+    }).then((result) => {
+      if (!result.ok) {
+        setStatusMessage(result.error ?? "Add clip failed");
+      }
+    });
+
+    void getMediaDurationUs(asset, fallbackDurationUs).then((durationUs) => {
+      if (durationUs === fallbackDurationUs) {
+        return;
+      }
+
+      setTimeline((current) => ({
+        ...current,
+        durationUs: Math.max(current.durationUs, nextStartUs + durationUs + 5_000_000),
+        tracks: current.tracks.map((track) => ({
+          ...track,
+          clips: track.clips.map((clip) => (clip.id === clipId ? { ...clip, outUs: durationUs } : clip))
+        }))
+      }));
+    });
   }
 
   async function importDroppedPaths(paths: string[]) {
@@ -449,6 +479,7 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
     setMediaDragState(null);
     setDraggingMediaId(null);
     setMediaDropTrackId(null);
+    setMediaDropPreview(null);
     window.setTimeout(() => {
       internalMediaDragRef.current = false;
     }, 100);
@@ -483,6 +514,9 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
     const moved = Math.hypot(event.clientX - mediaDragState.originX, event.clientY - mediaDragState.originY) > 4;
     const active = mediaDragState.active || moved;
     const drop = active ? getMediaDropAtPoint(event.clientX, event.clientY, timelineZoom, getTimelineDurationSeconds(timeline.durationUs)) : null;
+    const preview = drop
+      ? resolveMediaDropPlacement(timeline, mediaDragState.asset, drop.trackId, drop.startUs, timelineZoom, snapping)
+      : null;
 
     setMediaDragState({
       ...mediaDragState,
@@ -492,6 +526,7 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
     });
     setDraggingMediaId(active ? mediaDragState.asset.id : null);
     setMediaDropTrackId(drop?.trackId ?? null);
+    setMediaDropPreview(preview);
   }
 
   function finishMediaPointerDrag(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -511,7 +546,8 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
     }
 
     const drop = getMediaDropAtPoint(event.clientX, event.clientY, timelineZoom, getTimelineDurationSeconds(timeline.durationUs));
-    const targetTrack = drop ? timeline.tracks.find((track) => track.id === drop.trackId) : undefined;
+    const placement = drop ? resolveMediaDropPlacement(timeline, mediaDragState.asset, drop.trackId, drop.startUs, timelineZoom, snapping) : null;
+    const targetTrack = placement ? timeline.tracks.find((track) => track.id === placement.trackId) : undefined;
     if (!drop || !targetTrack) {
       setStatusMessage(`Drop ${mediaDragState.asset.name} onto a ${mediaDragState.asset.kind} track`);
       clearMediaPointerDrag();
@@ -532,7 +568,7 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
 
     const asset = mediaDragState.asset;
     clearMediaPointerDrag();
-    void addMediaToTimeline(asset, targetTrack.id, drop.startUs);
+    void addMediaToTimeline(asset, targetTrack.id, placement?.startUs ?? drop.startUs);
   }
 
   function cancelMediaPointerDrag(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -774,6 +810,7 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
               playheadUs={playheadUs}
               onPlayheadChange={setPlayheadUs}
               zoomPxPerSecond={timelineZoom}
+              snapping={snapping}
               onZoom={zoomTimeline}
               onAddMediaToTimeline={addMediaToTimeline}
               onMoveClip={moveClip}
@@ -781,6 +818,7 @@ export function EditTab({ previewUrl, mediaAssets, onImportMedia, onImportMediaR
               onToggleTrack={toggleTrack}
               draggingMediaId={draggingMediaId}
               mediaDropTrackId={mediaDropTrackId}
+              mediaDropPreview={mediaDropPreview}
               onMediaDropTrackChange={setMediaDropTrackId}
               setStatusMessage={setStatusMessage}
             />
@@ -811,6 +849,7 @@ function TimelineSurface({
   playheadUs,
   onPlayheadChange,
   zoomPxPerSecond,
+  snapping,
   onZoom,
   onAddMediaToTimeline,
   onMoveClip,
@@ -818,6 +857,7 @@ function TimelineSurface({
   onToggleTrack,
   draggingMediaId,
   mediaDropTrackId,
+  mediaDropPreview,
   onMediaDropTrackChange,
   setStatusMessage
 }: {
@@ -828,6 +868,7 @@ function TimelineSurface({
   playheadUs: number;
   onPlayheadChange: (playheadUs: number) => void;
   zoomPxPerSecond: number;
+  snapping: boolean;
   onZoom: (direction: -1 | 1) => void;
   onAddMediaToTimeline: (asset: MediaAsset, targetTrackId?: string, startUs?: number) => Promise<void>;
   onMoveClip: (clipId: string, targetTrackId: string, startUs: number) => Promise<void>;
@@ -835,6 +876,7 @@ function TimelineSurface({
   onToggleTrack: (trackId: string, field: "locked" | "muted" | "visible") => void;
   draggingMediaId: string | null;
   mediaDropTrackId: string | null;
+  mediaDropPreview: MediaDropPreviewState | null;
   onMediaDropTrackChange: (trackId: string | null) => void;
   setStatusMessage: (message: string) => void;
 }) {
@@ -950,9 +992,13 @@ function TimelineSurface({
     event.stopPropagation();
     const deltaUs = Math.round(((event.clientX - clipInteraction.startClientX) / zoomPxPerSecond) * 1_000_000);
     if (clipInteraction.mode === "move") {
+      const rawStartUs = Math.max(0, clipInteraction.originalStartUs + deltaUs);
+      const resolved = snapping
+        ? resolveTrackSnapStart(timeline, clipInteraction.originalTrackId, rawStartUs, zoomPxPerSecond, clipInteraction.clipId, false)
+        : { startUs: rawStartUs, snapped: false };
       setPreviewClip({
         clipId: clipInteraction.clipId,
-        startUs: Math.max(0, clipInteraction.originalStartUs + deltaUs),
+        startUs: resolved.startUs,
         inUs: clipInteraction.originalInUs,
         outUs: clipInteraction.originalOutUs,
         trackId: clipInteraction.originalTrackId
@@ -1000,7 +1046,9 @@ function TimelineSurface({
     const deltaUs = Math.round(((event.clientX - clipInteraction.startClientX) / zoomPxPerSecond) * 1_000_000);
     if (clipInteraction.mode === "move") {
       const targetTrackId = getTrackIdAtPoint(event.clientX, event.clientY) ?? clipInteraction.originalTrackId;
-      void onMoveClip(clipInteraction.clipId, targetTrackId, Math.max(0, clipInteraction.originalStartUs + deltaUs));
+      const rawStartUs = Math.max(0, clipInteraction.originalStartUs + deltaUs);
+      const resolved = snapping ? resolveTrackSnapStart(timeline, targetTrackId, rawStartUs, zoomPxPerSecond, clipInteraction.clipId, false) : { startUs: rawStartUs, snapped: false };
+      void onMoveClip(clipInteraction.clipId, targetTrackId, resolved.startUs);
     } else {
       void onTrimClip(clipInteraction.clipId, clipInteraction.mode === "trim-start" ? "start" : "end", deltaUs);
     }
@@ -1071,7 +1119,13 @@ function TimelineSurface({
             </div>
             <div
               data-track-id={track.id}
-              className={mediaDropTrackId === track.id ? "track-lane media-drop-target" : "track-lane"}
+              className={[
+                "track-lane",
+                mediaDropTrackId === track.id ? "media-drop-target" : "",
+                mediaDropPreview?.trackId === track.id && mediaDropPreview.invalid ? "media-drop-invalid" : ""
+              ]
+                .filter(Boolean)
+                .join(" ")}
               style={{ width: `${timelineWidth}px` }}
               onDragOver={(event) => {
                 event.preventDefault();
@@ -1100,14 +1154,35 @@ function TimelineSurface({
 
                 const rect = event.currentTarget.getBoundingClientRect();
                 const x = event.clientX - rect.left;
-                const startUs = Math.round(clamp(x / zoomPxPerSecond, 0, durationSeconds) * 1_000_000);
-                void onAddMediaToTimeline(asset, track.id, startUs);
+                const rawStartUs = Math.round(clamp(x / zoomPxPerSecond, 0, durationSeconds) * 1_000_000);
+                const placement = resolveMediaDropPlacement(timeline, asset, track.id, rawStartUs, zoomPxPerSecond, snapping);
+                void onAddMediaToTimeline(asset, track.id, placement.startUs);
               }}
             >
+              {mediaDropPreview?.trackId === track.id && !mediaDropPreview.invalid ? (
+                <>
+                  {mediaDropPreview.snapped ? (
+                    <span className="timeline-snap-line" style={{ left: `${(mediaDropPreview.startUs / 1_000_000) * zoomPxPerSecond}px` }} />
+                  ) : null}
+                  <div
+                    className={["timeline-clip", "media-drop-preview-clip", track.kind, mediaDropPreview.snapped ? "snapped" : ""]
+                      .filter(Boolean)
+                      .join(" ")}
+                    style={{
+                      left: `${getClipVisualLeft(mediaDropPreview.startUs, zoomPxPerSecond)}px`,
+                      width: `${getClipVisualWidth(mediaDropPreview.durationUs, zoomPxPerSecond)}px`
+                    }}
+                  >
+                    <span>{mediaAssets.find((asset) => asset.id === draggingMediaId)?.name ?? "New clip"}</span>
+                    {track.kind === "audio" ? <VolumeX size={13} /> : null}
+                  </div>
+                </>
+              ) : null}
               {track.clips.map((clip) => {
                 const displayClip = previewClip?.clipId === clip.id ? { ...clip, ...previewClip } : clip;
-                const start = (displayClip.startUs / 1_000_000) * zoomPxPerSecond;
-                const width = Math.max(((displayClip.outUs - displayClip.inUs) / 1_000_000) * zoomPxPerSecond, 8);
+                const durationUs = displayClip.outUs - displayClip.inUs;
+                const start = getClipVisualLeft(displayClip.startUs, zoomPxPerSecond);
+                const width = getClipVisualWidth(durationUs, zoomPxPerSecond);
                 const mediaName = mediaAssets.find((asset) => asset.id === clip.mediaId)?.name ?? clip.mediaId;
                 return (
                   <button
@@ -1445,6 +1520,103 @@ function syncMediaElement(
 
 function getTimelineDurationSeconds(durationUs: number) {
   return Math.max(60, Math.ceil(durationUs / 1_000_000));
+}
+
+function getFallbackMediaDurationUs(asset: MediaAsset) {
+  return asset.kind === "audio" ? defaultAudioDurationUs : defaultVideoDurationUs;
+}
+
+function getTrackEndUs(track: (typeof starterTimeline.tracks)[number], excludedClipId = "") {
+  return track.clips
+    .filter((clip) => clip.id !== excludedClipId)
+    .reduce((endUs, clip) => Math.max(endUs, clip.startUs + (clip.outUs - clip.inUs)), 0);
+}
+
+function getClipVisualLeft(startUs: number, zoomPxPerSecond: number) {
+  return (startUs / 1_000_000) * zoomPxPerSecond + visualClipGapPx / 2;
+}
+
+function getClipVisualWidth(durationUs: number, zoomPxPerSecond: number) {
+  const rawWidth = Math.max((durationUs / 1_000_000) * zoomPxPerSecond, 8);
+  return Math.max(rawWidth - visualClipGapPx, 8);
+}
+
+function resolveMediaDropPlacement(
+  timeline: typeof starterTimeline,
+  asset: MediaAsset,
+  trackId: string,
+  rawStartUs: number,
+  zoomPxPerSecond: number,
+  snappingEnabled: boolean
+): MediaDropPreviewState {
+  const targetTrack = timeline.tracks.find((track) => track.id === trackId);
+  const invalid = !targetTrack || targetTrack.locked || targetTrack.kind !== asset.kind;
+  const durationUs = getFallbackMediaDurationUs(asset);
+  if (!targetTrack || invalid) {
+    return {
+      trackId,
+      startUs: Math.max(0, rawStartUs),
+      durationUs,
+      snapped: false,
+      invalid
+    };
+  }
+
+  const resolved = snappingEnabled
+    ? resolveTrackSnapStart(timeline, trackId, rawStartUs, zoomPxPerSecond, "", true)
+    : { startUs: Math.max(0, rawStartUs), snapped: false };
+
+  return {
+    trackId,
+    startUs: resolved.startUs,
+    durationUs,
+    snapped: resolved.snapped,
+    invalid: false
+  };
+}
+
+function resolveTrackSnapStart(
+  timeline: typeof starterTimeline,
+  trackId: string,
+  rawStartUs: number,
+  zoomPxPerSecond: number,
+  excludedClipId: string,
+  preferTrackEnd: boolean
+) {
+  const targetTrack = timeline.tracks.find((track) => track.id === trackId);
+  const startUs = Math.max(0, rawStartUs);
+  if (!targetTrack) {
+    return { startUs, snapped: false };
+  }
+
+  const snapThresholdUs = Math.round((snapThresholdPx / zoomPxPerSecond) * 1_000_000);
+  const candidates = targetTrack.clips
+    .filter((clip) => clip.id !== excludedClipId)
+    .flatMap((clip) => [clip.startUs, clip.startUs + (clip.outUs - clip.inUs)]);
+
+  if (candidates.length === 0) {
+    const gridStartUs = snapTime(startUs);
+    return { startUs: gridStartUs, snapped: gridStartUs !== startUs };
+  }
+
+  const nearest = candidates.reduce(
+    (best, candidate) => {
+      const distance = Math.abs(candidate - startUs);
+      return distance < best.distance ? { startUs: candidate, distance } : best;
+    },
+    { startUs, distance: Number.POSITIVE_INFINITY }
+  );
+
+  if (nearest.distance <= snapThresholdUs) {
+    return { startUs: Math.max(0, nearest.startUs), snapped: true };
+  }
+
+  if (preferTrackEnd) {
+    return { startUs: getTrackEndUs(targetTrack, excludedClipId), snapped: true };
+  }
+
+  const gridStartUs = snapTime(startUs);
+  return { startUs: gridStartUs, snapped: gridStartUs !== startUs };
 }
 
 function getMediaDropAtPoint(clientX: number, clientY: number, zoomPxPerSecond: number, durationSeconds: number) {
