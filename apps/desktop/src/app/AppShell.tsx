@@ -24,6 +24,7 @@ import type { MediaAsset } from "../features/media/mediaTypes";
 import {
   loadProjectSnapshot,
   loadRecentProjects,
+  removePathlessProjectStorage,
   saveProjectSnapshot,
   saveRecentProject,
   validateMediaPaths,
@@ -75,8 +76,8 @@ interface ProjectSettingsProposal {
 }
 
 export function AppShell() {
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>("edit");
-  const [project, setProject] = useState<ActiveProject>({ name: "Untitled Project" });
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>("home");
+  const [project, setProject] = useState<ActiveProject>({ name: "No Project" });
   const [recentProjects, setRecentProjects] = useState<ActiveProject[]>([]);
   const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
   const [timeline, setTimeline] = useState<Timeline>(starterTimeline);
@@ -107,6 +108,7 @@ export function AppShell() {
   const loadingProjectRef = useRef(false);
   const applyingHistoryRef = useRef(false);
   const lastMissingMediaKeyRef = useRef("");
+  const hasActiveProject = Boolean(project.path);
 
   useEffect(() => {
     projectRef.current = project;
@@ -214,6 +216,7 @@ export function AppShell() {
   }, [mediaAssets]);
 
   useEffect(() => {
+    removePathlessProjectStorage();
     setRecentProjects(loadRecentProjects());
 
     getEngineStatus()
@@ -227,7 +230,6 @@ export function AppShell() {
             gpu: status.gpu.name ?? status.gpu.message ?? "unknown"
           }
         });
-        void refreshEngineState("startup");
       })
       .catch((error) => {
         logStatus(error instanceof Error ? error.message : "Engine status failed", { level: "error", source: "engine" });
@@ -351,6 +353,12 @@ export function AppShell() {
   }, [aiProposals, autosaveState, mediaAssets, projectSettings, redoStack, shortcuts, timeline, undoStack]);
 
   async function applyProject(nextProject: ActiveProject) {
+    if (!nextProject.path) {
+      logStatus("Choose or create a project folder before editing", { level: "warning", source: "project", details: { project: nextProject } });
+      setActiveTab("home");
+      return;
+    }
+
     loadingProjectRef.current = true;
     const openedProject = { ...nextProject, lastOpenedAt: new Date().toISOString() };
     setProject(openedProject);
@@ -467,6 +475,12 @@ export function AppShell() {
   }
 
   async function handleImportMedia() {
+    if (!projectRef.current.path) {
+      logStatus("Create or open a project before importing media", { level: "warning", source: "project" });
+      setActiveTab("home");
+      return;
+    }
+
     try {
       logStatus("Import media requested", { source: "media" });
       applyImportedMedia(await importMediaFiles());
@@ -640,6 +654,14 @@ export function AppShell() {
 
   async function saveProject(reason: "manual" | "autosave") {
     const activeProject = projectRef.current;
+    if (!activeProject.path) {
+      if (reason === "manual") {
+        logStatus("Create or open a project before saving", { level: "warning", source: "project" });
+        setActiveTab("home");
+      }
+      return;
+    }
+
     const savedAt = new Date().toISOString();
     const snapshot = createProjectSnapshot({ ...activeProject, lastSavedAt: savedAt }, savedAt);
 
@@ -684,6 +706,12 @@ export function AppShell() {
     reason: string
   ) {
     const activeProject = projectRef.current;
+    if (!activeProject.path) {
+      logStatus("Create or open a project before saving changes", { level: "warning", source: "project", details: { reason } });
+      setActiveTab("home");
+      return;
+    }
+
     const savedAt = new Date().toISOString();
     const snapshot: ProjectSnapshot = {
       version: 1,
@@ -857,6 +885,12 @@ export function AppShell() {
   }
 
   function openWorkspaceTab(nextTab: WorkspaceTab) {
+    if (!projectRef.current.path && nextTab !== "home") {
+      setActiveTab("home");
+      logStatus("Create or open a project before opening editor workspaces", { level: "warning", source: "project", details: { tab: nextTab } });
+      return;
+    }
+
     setActiveTab(nextTab);
     recordLog(`Opened ${workspaceTabs.find((tab) => tab.id === nextTab)?.label ?? nextTab} workspace`, { source: "ui", details: { tab: nextTab } }, false);
   }
@@ -1023,6 +1057,7 @@ export function AppShell() {
     <main className="app-shell" aria-busy={savingProject || autosaveState === "saving"}>
       <TopBar
         projectName={`${project.name}${projectDirty ? " *" : ""}`}
+        hasProject={hasActiveProject}
         onImportMedia={handleImportMedia}
         onSave={() => void saveProject("manual")}
         onUndo={undoProjectState}
@@ -1045,7 +1080,7 @@ export function AppShell() {
           <span>{statusMessage}</span>
         </button>
         <span className="status-pill">
-          {projectStatusLabel(projectDirty, savingProject, autosaveState, lastSavedAt)}
+          {projectStatusLabel(hasActiveProject, projectDirty, savingProject, autosaveState, lastSavedAt)}
         </span>
         <span className="status-pill">
           Undo {undoStack.length} / Redo {redoStack.length}
@@ -1258,7 +1293,10 @@ function serializeProjectState(projectSettings: ProjectSettings, mediaAssets: Me
   });
 }
 
-function projectStatusLabel(dirty: boolean, saving: boolean, autosaveState: string, lastSavedAt: string | null) {
+function projectStatusLabel(hasProject: boolean, dirty: boolean, saving: boolean, autosaveState: string, lastSavedAt: string | null) {
+  if (!hasProject) {
+    return "No project open";
+  }
   if (saving || autosaveState === "saving") {
     return "Saving";
   }

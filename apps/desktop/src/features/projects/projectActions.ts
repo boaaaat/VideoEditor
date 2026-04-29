@@ -24,7 +24,7 @@ export interface ProjectSnapshot {
 
 export async function createProjectFromDialog(): Promise<ActiveProject | null> {
   if (!("__TAURI_INTERNALS__" in window)) {
-    return { name: "Browser Project", path: "browser-project" };
+    throw new Error("Project folders require the desktop app.");
   }
 
   const folder = await open({
@@ -49,7 +49,7 @@ export async function createProjectFromDialog(): Promise<ActiveProject | null> {
 
 export async function openProjectFromDialog(): Promise<ActiveProject | null> {
   if (!("__TAURI_INTERNALS__" in window)) {
-    return { name: "Browser Project", path: "browser-project", manifestPath: "browser-project/project.aivproj" };
+    throw new Error("Project folders require the desktop app.");
   }
 
   const selection = await open({
@@ -72,8 +72,7 @@ export async function openProjectFromDialog(): Promise<ActiveProject | null> {
 
 export async function saveProjectSnapshot(project: ActiveProject, snapshot: ProjectSnapshot) {
   if (!project.path) {
-    saveBrowserProjectSnapshot(project, snapshot);
-    return;
+    throw new Error("Choose or create a project folder before saving.");
   }
 
   if (!("__TAURI_INTERNALS__" in window)) {
@@ -87,7 +86,11 @@ export async function saveProjectSnapshot(project: ActiveProject, snapshot: Proj
 
 export async function loadProjectSnapshot(project: ActiveProject): Promise<ProjectSnapshot | null> {
   let snapshot: ProjectSnapshot | null;
-  if (!project.path || !("__TAURI_INTERNALS__" in window)) {
+  if (!project.path) {
+    return null;
+  }
+
+  if (!("__TAURI_INTERNALS__" in window)) {
     snapshot = loadBrowserProjectSnapshot(project);
   } else {
     const { invoke } = await import("@tauri-apps/api/core");
@@ -108,13 +111,22 @@ export async function validateMediaPaths(paths: string[], projectPath?: string):
 
 export function loadRecentProjects(): ActiveProject[] {
   try {
-    return JSON.parse(localStorage.getItem("ai-video-editor.recentProjects") ?? "[]") as ActiveProject[];
+    const projects = JSON.parse(localStorage.getItem("ai-video-editor.recentProjects") ?? "[]") as ActiveProject[];
+    const validProjects = projects.filter(hasValidProjectPath);
+    if (validProjects.length !== projects.length) {
+      localStorage.setItem("ai-video-editor.recentProjects", JSON.stringify(validProjects));
+    }
+    return validProjects;
   } catch {
     return [];
   }
 }
 
 export function saveRecentProject(project: ActiveProject) {
+  if (!hasValidProjectPath(project)) {
+    return loadRecentProjects();
+  }
+
   const existing = loadRecentProjects();
   const key = project.manifestPath ?? project.path ?? project.name;
   const next = [project, ...existing.filter((item) => (item.manifestPath ?? item.path ?? item.name) !== key)].slice(0, 8);
@@ -137,6 +149,27 @@ function loadBrowserProjectSnapshot(project: ActiveProject): ProjectSnapshot | n
 
 function browserSnapshotKey(project: ActiveProject) {
   return `ai-video-editor.projectSnapshot.${project.manifestPath ?? project.path ?? project.name}`;
+}
+
+export function removePathlessProjectStorage() {
+  const staleSnapshotKeys = [
+    "ai-video-editor.projectSnapshot.Untitled Project",
+    "ai-video-editor.projectSnapshot.Browser Project",
+    "ai-video-editor.projectSnapshot.browser-project",
+    "ai-video-editor.projectSnapshot.browser-project/project.aivproj",
+    "ai-video-editor.projectSnapshot.null",
+    "ai-video-editor.projectSnapshot.undefined"
+  ];
+
+  for (const key of staleSnapshotKeys) {
+    localStorage.removeItem(key);
+  }
+  localStorage.setItem("ai-video-editor.recentProjects", JSON.stringify(loadRecentProjects()));
+}
+
+function hasValidProjectPath(project: ActiveProject) {
+  const path = project.path?.trim();
+  return Boolean(path && path !== "browser-project" && path.toLowerCase() !== "null" && path.toLowerCase() !== "undefined");
 }
 
 function normalizeSnapshotMediaPaths(snapshot: ProjectSnapshot, projectPath?: string): ProjectSnapshot {

@@ -8,6 +8,7 @@ interface TopBarProps {
   onSave: () => void;
   onUndo: () => void;
   onRedo: () => void;
+  hasProject?: boolean;
   canUndo?: boolean;
   canRedo?: boolean;
   onOpenCommandPalette: () => void;
@@ -15,7 +16,7 @@ interface TopBarProps {
   onExport: () => void;
 }
 
-export function TopBar({ projectName, onImportMedia, onSave, onUndo, onRedo, canUndo = true, canRedo = true, onOpenCommandPalette, onOpenSettings, onExport }: TopBarProps) {
+export function TopBar({ projectName, onImportMedia, onSave, onUndo, onRedo, hasProject = true, canUndo = true, canRedo = true, onOpenCommandPalette, onOpenSettings, onExport }: TopBarProps) {
   return (
     <header className="top-bar">
       <div className="project-title">
@@ -23,13 +24,13 @@ export function TopBar({ projectName, onImportMedia, onSave, onUndo, onRedo, can
         <span>{projectName}</span>
       </div>
       <div className="top-actions">
-        <Button icon={<Import size={16} />} onClick={onImportMedia}>
+        <Button icon={<Import size={16} />} onClick={onImportMedia} disabled={!hasProject}>
           Import
         </Button>
-        <IconButton label="Save" icon={<Save size={17} />} onClick={onSave} />
+        <IconButton label="Save" icon={<Save size={17} />} onClick={onSave} disabled={!hasProject} />
         <IconButton label="Undo" icon={<Undo2 size={17} />} onClick={onUndo} disabled={!canUndo} />
         <IconButton label="Redo" icon={<Redo2 size={17} />} onClick={onRedo} disabled={!canRedo} />
-        <Button icon={<Download size={16} />} variant="primary" onClick={onExport}>
+        <Button icon={<Download size={16} />} variant="primary" onClick={onExport} disabled={!hasProject}>
           Export
         </Button>
         <IconButton label="Command search" icon={<Search size={17} />} onClick={onOpenCommandPalette} />
