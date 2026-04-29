@@ -130,6 +130,10 @@ nlohmann::json EngineApp::executeCommand(const nlohmann::json& params) {
     return session_.importMedia(params, ffprobeService_);
   }
 
+  if (params.value("type", std::string{}) == "remove_media") {
+    return session_.removeMedia(params);
+  }
+
   return session_.executeCommand(params);
 }
 

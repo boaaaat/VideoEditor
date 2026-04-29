@@ -154,6 +154,35 @@ class EditorSession {
     return commandResult("import_media", {{"media", imported}, {"mediaIndex", mediaIndexJson()}, {"timeline", timelineJson()}});
   }
 
+  nlohmann::json removeMedia(const nlohmann::json& command) {
+    const auto mediaId = command.value("mediaId", std::string{});
+    if (mediaId.empty()) {
+      throw std::runtime_error("remove_media requires mediaId");
+    }
+
+    const auto media = findMedia(mediaId);
+    if (!media) {
+      throw std::runtime_error("media not found: " + mediaId);
+    }
+
+    media_.erase(std::remove_if(media_.begin(), media_.end(), [&](const IndexedMedia& item) {
+                   return item.id == mediaId;
+                 }),
+                 media_.end());
+
+    for (auto& track : timeline_.tracks) {
+      track.clips.erase(std::remove_if(track.clips.begin(), track.clips.end(), [&](const Clip& clip) {
+                          return clip.mediaId == mediaId;
+                        }),
+                        track.clips.end());
+    }
+
+    recalculateTimelineDuration();
+    saveMedia();
+    saveTimeline();
+    return commandResult("remove_media", {{"mediaIndex", mediaIndexJson()}, {"timeline", timelineJson()}});
+  }
+
   nlohmann::json executeCommand(const nlohmann::json& command) {
     const auto type = command.value("type", std::string{});
     if (type == "add_track") {
@@ -835,9 +864,9 @@ class EditorSession {
     } catch (...) {
       return {
           {"path", path},
-          {"width", kind == "video" ? 1920 : 0},
-          {"height", kind == "video" ? 1080 : 0},
-          {"fps", kind == "video" ? 30.0 : 0.0},
+          {"width", 0},
+          {"height", 0},
+          {"fps", 0.0},
           {"durationUs", kind == "audio" ? 12'000'000 : 8'000'000},
           {"codec", "unknown"},
           {"pixelFormat", "unknown"},

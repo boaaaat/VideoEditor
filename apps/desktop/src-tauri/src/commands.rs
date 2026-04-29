@@ -194,6 +194,22 @@ pub fn media_preview_frame_data_url(path: String, time_us: i64) -> Result<String
     ))
 }
 
+#[tauri::command]
+pub fn reveal_media_path(path: String) -> Result<(), String> {
+    let media_path = PathBuf::from(path);
+    let target = if media_path.is_file() {
+        media_path
+    } else {
+        media_path
+            .parent()
+            .map(Path::to_path_buf)
+            .filter(|parent| parent.exists())
+            .ok_or_else(|| "media path does not exist".to_string())?
+    };
+
+    reveal_path(&target)
+}
+
 fn parent_hwnd(window: &tauri::Window) -> Result<String, String> {
     #[cfg(windows)]
     {
@@ -229,6 +245,28 @@ fn selected_media_context(media_index: &Value, media_ids: &[String]) -> Value {
         .unwrap_or_default();
 
     json!(rows)
+}
+
+fn reveal_path(path: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let selector = if path.is_file() {
+            format!("/select,{}", path.display())
+        } else {
+            path.display().to_string()
+        };
+        Command::new("explorer.exe")
+            .arg(selector)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("failed to reveal media path: {error}"))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err("reveal in file manager is only supported on Windows".to_string())
+    }
 }
 
 fn run_ffmpeg_thumbnail(

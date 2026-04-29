@@ -4,6 +4,7 @@ import {
   useState,
   type Dispatch,
   type DragEvent as ReactDragEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
   type SetStateAction,
@@ -13,6 +14,7 @@ import {
   Eye,
   EyeOff,
   Film,
+  FolderOpen,
   Import,
   Lock,
   Magnet,
@@ -20,6 +22,7 @@ import {
   Music,
   Pause,
   Play,
+  Plus,
   Scissors,
   StepBack,
   StepForward,
@@ -32,6 +35,7 @@ import {
 } from "lucide-react";
 import type { PreviewState, ProjectSettings, Timeline, TimelineClip } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
+import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 import { IconButton } from "../../components/IconButton";
 import { Panel } from "../../components/Panel";
 import { Toggle } from "../../components/Toggle";
@@ -78,6 +82,7 @@ interface EditTabProps {
   projectSettings: ProjectSettings;
   onImportMedia: () => Promise<void>;
   onImportMediaResult: (result: ImportMediaResult | null) => void;
+  onRemoveMediaAsset: (assetId: string, data?: unknown) => void;
   setStatusMessage: (message: string) => void;
 }
 
@@ -117,7 +122,31 @@ interface MediaDropPreviewState {
   invalid: boolean;
 }
 
-export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projectSettings, onImportMedia, onImportMediaResult, setStatusMessage }: EditTabProps) {
+type EditContextMenuState =
+  | {
+      kind: "media";
+      assetId: string;
+      x: number;
+      y: number;
+    }
+  | {
+      kind: "clip";
+      clipId: string;
+      x: number;
+      y: number;
+    };
+
+export function EditTab({
+  previewUrl,
+  mediaAssets,
+  timeline,
+  setTimeline,
+  projectSettings,
+  onImportMedia,
+  onImportMediaResult,
+  onRemoveMediaAsset,
+  setStatusMessage
+}: EditTabProps) {
   const playbackFrameRef = useRef<number | null>(null);
   const lastPlaybackTimeRef = useRef<number | null>(null);
   const internalMediaDragRef = useRef(false);
@@ -132,7 +161,10 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
   const [mediaDropTrackId, setMediaDropTrackId] = useState<string | null>(null);
   const [mediaDragState, setMediaDragState] = useState<MediaPointerDragState | null>(null);
   const [mediaDropPreview, setMediaDropPreview] = useState<MediaDropPreviewState | null>(null);
+  const [contextMenu, setContextMenu] = useState<EditContextMenuState | null>(null);
   const selectedClip = timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === selectedClipId);
+  const contextMediaAsset = contextMenu?.kind === "media" ? mediaAssets.find((asset) => asset.id === contextMenu.assetId) : undefined;
+  const contextClip = contextMenu?.kind === "clip" ? timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === contextMenu.clipId) : undefined;
   const activeVideoClip = findActiveClip(timeline, playheadUs, "video");
   const activeAudioClip = findActiveClip(timeline, playheadUs, "audio");
   const activeVideoAsset = activeVideoClip ? mediaAssets.find((asset) => asset.id === activeVideoClip.mediaId) : undefined;
@@ -147,14 +179,28 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
     return false;
   }
 
-  async function splitAtPlayhead() {
-    const result = await executeCommand({ type: "split_clip", playheadUs });
+  function lockedTrackNameForClip(clip: TimelineClip) {
+    const track = timeline.tracks.find((item) => item.id === clip.trackId);
+    return track?.locked ? track.name : "";
+  }
+
+  async function splitAtPlayhead(targetClip?: TimelineClip) {
+    const clip = targetClip ?? selectedClip;
+    if (clip) {
+      const lockedTrackName = lockedTrackNameForClip(clip);
+      if (lockedTrackName) {
+        setStatusMessage(`${lockedTrackName} is locked`);
+        return;
+      }
+    }
+
+    const result = await executeCommand({ type: "split_clip", clipId: targetClip?.id, playheadUs });
     const usedEngineTimeline = applyEngineTimeline(result.data);
-    if (!usedEngineTimeline && selectedClip && playheadUs > selectedClip.startUs && playheadUs < selectedClip.startUs + (selectedClip.outUs - selectedClip.inUs)) {
-      const firstOutUs = selectedClip.inUs + (playheadUs - selectedClip.startUs);
-      const secondDurationUs = selectedClip.outUs - firstOutUs;
+    if (!usedEngineTimeline && clip && playheadUs > clip.startUs && playheadUs < clip.startUs + (clip.outUs - clip.inUs)) {
+      const firstOutUs = clip.inUs + (playheadUs - clip.startUs);
+      const secondDurationUs = clip.outUs - firstOutUs;
       const secondClip = {
-        ...selectedClip,
+        ...clip,
         id: `clip_${Date.now()}`,
         startUs: playheadUs,
         inUs: firstOutUs,
@@ -164,10 +210,10 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
       setTimeline((current) => ({
         ...current,
         tracks: current.tracks.map((track) =>
-          track.id === selectedClip.trackId
+          track.id === clip.trackId
             ? {
                 ...track,
-                clips: track.clips.flatMap((clip) => (clip.id === selectedClip.id ? [{ ...clip, outUs: firstOutUs }, secondClip] : [clip]))
+                clips: track.clips.flatMap((item) => (item.id === clip.id ? [{ ...item, outUs: firstOutUs }, secondClip] : [item]))
               }
             : track
         )
@@ -210,19 +256,26 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
     }));
   }
 
-  async function deleteSelectedClip() {
-    if (!selectedClip) {
+  async function deleteSelectedClip(targetClip?: TimelineClip) {
+    const clip = targetClip ?? selectedClip;
+    if (!clip) {
       setStatusMessage("No clip selected");
       return;
     }
 
-    const result = await executeCommand({ type: "delete_clip", clipId: selectedClip.id });
+    const lockedTrackName = lockedTrackNameForClip(clip);
+    if (lockedTrackName) {
+      setStatusMessage(`${lockedTrackName} is locked`);
+      return;
+    }
+
+    const result = await executeCommand({ type: "delete_clip", clipId: clip.id });
     if (!applyEngineTimeline(result.data)) {
       setTimeline((current) => ({
         ...current,
         tracks: current.tracks.map((track) => ({
           ...track,
-          clips: track.clips.filter((clip) => clip.id !== selectedClip.id)
+          clips: track.clips.filter((item) => item.id !== clip.id)
         }))
       }));
     }
@@ -230,24 +283,31 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
     setStatusMessage(result.ok ? "Delete command accepted" : result.error ?? "Delete failed");
   }
 
-  async function rippleDelete() {
-    if (!selectedClip) {
+  async function rippleDelete(targetClip?: TimelineClip) {
+    const clip = targetClip ?? selectedClip;
+    if (!clip) {
       setStatusMessage("No clip selected");
       return;
     }
 
-    const result = await executeCommand({ type: "ripple_delete_clip", clipId: selectedClip.id, trackMode: "selected_track" });
+    const lockedTrackName = lockedTrackNameForClip(clip);
+    if (lockedTrackName) {
+      setStatusMessage(`${lockedTrackName} is locked`);
+      return;
+    }
+
+    const result = await executeCommand({ type: "ripple_delete_clip", clipId: clip.id, trackMode: "selected_track" });
     if (!applyEngineTimeline(result.data)) {
-      const deletedDuration = selectedClip.outUs - selectedClip.inUs;
+      const deletedDuration = clip.outUs - clip.inUs;
       setTimeline((current) => ({
         ...current,
         tracks: current.tracks.map((track) =>
-          track.id === selectedClip.trackId
+          track.id === clip.trackId
             ? {
                 ...track,
                 clips: track.clips
-                  .filter((clip) => clip.id !== selectedClip.id)
-                  .map((clip) => (clip.startUs > selectedClip.startUs ? { ...clip, startUs: Math.max(0, clip.startUs - deletedDuration) } : clip))
+                  .filter((item) => item.id !== clip.id)
+                  .map((item) => (item.startUs > clip.startUs ? { ...item, startUs: Math.max(0, item.startUs - deletedDuration) } : item))
               }
             : track
         )
@@ -276,17 +336,24 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
     lastPlaybackTimeRef.current = null;
   }
 
-  async function nudgeSelectedClip(direction: -1 | 1) {
-    if (!selectedClip) {
+  async function nudgeSelectedClip(direction: -1 | 1, targetClip?: TimelineClip) {
+    const clip = targetClip ?? selectedClip;
+    if (!clip) {
       setStatusMessage("No clip selected");
+      return;
+    }
+
+    const lockedTrackName = lockedTrackNameForClip(clip);
+    if (lockedTrackName) {
+      setStatusMessage(`${lockedTrackName} is locked`);
       return;
     }
 
     const result = await executeCommand({
       type: "move_clip",
-      clipId: selectedClip.id,
-      trackId: selectedClip.trackId,
-      startUs: Math.max(0, selectedClip.startUs + direction * 100_000),
+      clipId: clip.id,
+      trackId: clip.trackId,
+      startUs: Math.max(0, clip.startUs + direction * 100_000),
       snapping
     });
     if (!applyEngineTimeline(result.data)) {
@@ -294,7 +361,7 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
         ...current,
         tracks: current.tracks.map((track) => ({
           ...track,
-          clips: track.clips.map((clip) => (clip.id === selectedClip.id ? { ...clip, startUs: Math.max(0, clip.startUs + direction * 100_000) } : clip))
+          clips: track.clips.map((item) => (item.id === clip.id ? { ...item, startUs: Math.max(0, item.startUs + direction * 100_000) } : item))
         }))
       }));
     }
@@ -610,6 +677,130 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
     clearMediaPointerDrag();
   }
 
+  function openMediaContextMenu(event: ReactMouseEvent<HTMLButtonElement>, asset: MediaAsset) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearMediaPointerDrag();
+    setContextMenu({
+      kind: "media",
+      assetId: asset.id,
+      x: event.clientX,
+      y: event.clientY
+    });
+  }
+
+  function openClipContextMenu(event: ReactMouseEvent, clip: TimelineClip) {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedClipId(clip.id);
+    setContextMenu({
+      kind: "clip",
+      clipId: clip.id,
+      x: event.clientX,
+      y: event.clientY
+    });
+  }
+
+  async function revealMediaInExplorer(asset: MediaAsset) {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      setStatusMessage("Reveal in Explorer is available in the desktop app");
+      return;
+    }
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("reveal_media_path", { path: asset.path });
+      setStatusMessage(`Revealed ${asset.name} in Explorer`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Reveal in Explorer failed");
+    }
+  }
+
+  async function removeMediaFromBin(asset: MediaAsset) {
+    const removedClipCount = timeline.tracks.reduce((count, track) => count + track.clips.filter((clip) => clip.mediaId === asset.id).length, 0);
+    const result = await executeCommand({ type: "remove_media", mediaId: asset.id });
+    if (!result.ok) {
+      setStatusMessage(result.error ?? "Remove media failed");
+      return;
+    }
+
+    onRemoveMediaAsset(asset.id, result.data);
+    if (selectedClip?.mediaId === asset.id) {
+      setSelectedClipId("");
+    }
+
+    const suffix = removedClipCount > 0 ? ` and ${removedClipCount} timeline clip${removedClipCount === 1 ? "" : "s"}` : "";
+    setStatusMessage(`Removed ${asset.name} from bin${suffix}`);
+  }
+
+  function contextMenuItems(): ContextMenuItem[] {
+    if (contextMenu?.kind === "media" && contextMediaAsset) {
+      const canReveal = "__TAURI_INTERNALS__" in window;
+      return [
+        {
+          id: "add-to-timeline",
+          label: "Add to Timeline",
+          icon: <Plus size={15} />,
+          onSelect: () => void addMediaToTimeline(contextMediaAsset)
+        },
+        {
+          id: "reveal-in-explorer",
+          label: "Reveal in Explorer",
+          icon: <FolderOpen size={15} />,
+          disabled: !canReveal,
+          onSelect: () => void revealMediaInExplorer(contextMediaAsset)
+        },
+        {
+          id: "remove-from-bin",
+          label: "Remove From Bin",
+          icon: <Trash2 size={15} />,
+          danger: true,
+          onSelect: () => void removeMediaFromBin(contextMediaAsset)
+        }
+      ];
+    }
+
+    if (contextMenu?.kind === "clip" && contextClip) {
+      const playheadInsideClip = isPlayheadInsideClip(contextClip, playheadUs);
+      return [
+        {
+          id: "split-at-playhead",
+          label: "Split at Playhead",
+          icon: <Scissors size={15} />,
+          disabled: !playheadInsideClip,
+          onSelect: () => void splitAtPlayhead(contextClip)
+        },
+        {
+          id: "delete-clip",
+          label: "Delete Clip",
+          icon: <Trash2 size={15} />,
+          onSelect: () => void deleteSelectedClip(contextClip)
+        },
+        {
+          id: "ripple-delete",
+          label: "Ripple Delete",
+          icon: <Trash2 size={15} />,
+          danger: true,
+          onSelect: () => void rippleDelete(contextClip)
+        },
+        {
+          id: "nudge-left",
+          label: "Nudge Left",
+          icon: <StepBack size={15} />,
+          onSelect: () => void nudgeSelectedClip(-1, contextClip)
+        },
+        {
+          id: "nudge-right",
+          label: "Nudge Right",
+          icon: <StepForward size={15} />,
+          onSelect: () => void nudgeSelectedClip(1, contextClip)
+        }
+      ];
+    }
+
+    return [];
+  }
+
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) {
       return;
@@ -745,6 +936,7 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
                   onPointerMove={updateMediaPointerDrag}
                   onPointerUp={finishMediaPointerDrag}
                   onPointerCancel={cancelMediaPointerDrag}
+                  onContextMenu={(event) => openMediaContextMenu(event, asset)}
                   onDoubleClick={() => addMediaToTimeline(asset)}
                 >
                   <MediaThumbnail asset={asset} />
@@ -789,13 +981,13 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
             />
             <div className="transport">
               <IconButton label={playing ? "Pause" : "Play"} icon={playing ? <Pause size={18} /> : <Play size={18} />} onClick={() => setPlaying((value) => !value)} />
-              <Button icon={<Scissors size={16} />} onClick={splitAtPlayhead}>
+              <Button icon={<Scissors size={16} />} onClick={() => void splitAtPlayhead()}>
                 Split
               </Button>
-              <Button icon={<Trash2 size={16} />} onClick={deleteSelectedClip}>
+              <Button icon={<Trash2 size={16} />} onClick={() => void deleteSelectedClip()}>
                 Delete
               </Button>
-              <Button icon={<Trash2 size={16} />} variant="danger" onClick={rippleDelete}>
+              <Button icon={<Trash2 size={16} />} variant="danger" onClick={() => void rippleDelete()}>
                 Ripple Delete
               </Button>
               <Toggle label="Snapping" checked={snapping} onChange={(event) => setSnapping(event.target.checked)} />
@@ -821,13 +1013,13 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
               <Button icon={<Music size={16} />} onClick={() => addTrack("audio")}>
                 Audio Track
               </Button>
-              <Button icon={<Scissors size={16} />} onClick={splitAtPlayhead}>
+              <Button icon={<Scissors size={16} />} onClick={() => void splitAtPlayhead()}>
                 Split
               </Button>
-              <Button icon={<Trash2 size={16} />} onClick={deleteSelectedClip}>
+              <Button icon={<Trash2 size={16} />} onClick={() => void deleteSelectedClip()}>
                 Delete
               </Button>
-              <Button icon={<Trash2 size={16} />} variant="danger" onClick={rippleDelete}>
+              <Button icon={<Trash2 size={16} />} variant="danger" onClick={() => void rippleDelete()}>
                 Ripple
               </Button>
               <IconButton label="Nudge left" icon={<StepBack size={17} />} onClick={() => nudgeSelectedClip(-1)} />
@@ -849,6 +1041,7 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
               onAddMediaToTimeline={addMediaToTimeline}
               onMoveClip={moveClip}
               onTrimClip={trimClip}
+              onOpenClipContextMenu={openClipContextMenu}
               onToggleTrack={toggleTrack}
               draggingMediaId={draggingMediaId}
               mediaDropTrackId={mediaDropTrackId}
@@ -871,6 +1064,8 @@ export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projec
           <small>{formatMediaAssetDetail(mediaDragState.asset)}</small>
         </div>
       ) : null}
+
+      {contextMenu ? <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenuItems()} onClose={() => setContextMenu(null)} /> : null}
     </div>
   );
 }
@@ -888,6 +1083,7 @@ function TimelineSurface({
   onAddMediaToTimeline,
   onMoveClip,
   onTrimClip,
+  onOpenClipContextMenu,
   onToggleTrack,
   draggingMediaId,
   mediaDropTrackId,
@@ -907,6 +1103,7 @@ function TimelineSurface({
   onAddMediaToTimeline: (asset: MediaAsset, targetTrackId?: string, startUs?: number) => Promise<void>;
   onMoveClip: (clipId: string, targetTrackId: string, startUs: number) => Promise<void>;
   onTrimClip: (clipId: string, edge: "start" | "end", deltaUs: number) => Promise<void>;
+  onOpenClipContextMenu: (event: ReactMouseEvent, clip: TimelineClip) => void;
   onToggleTrack: (trackId: string, field: "locked" | "muted" | "visible") => void;
   draggingMediaId: string | null;
   mediaDropTrackId: string | null;
@@ -986,15 +1183,21 @@ function TimelineSurface({
   }
 
   function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
-    if (!event.shiftKey) {
+    event.preventDefault();
+    if (event.shiftKey || event.ctrlKey) {
+      onZoom(event.deltaY > 0 ? -1 : 1);
       return;
     }
 
-    event.preventDefault();
-    onZoom(event.deltaY > 0 ? -1 : 1);
+    const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+    event.currentTarget.scrollLeft += horizontalDelta;
   }
 
   function beginClipInteraction(event: ReactPointerEvent<HTMLElement>, clip: TimelineClip, mode: ClipInteraction["mode"]) {
+    if (event.button !== 0) {
+      return;
+    }
+
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -1240,6 +1443,7 @@ function TimelineSurface({
                       setClipInteraction(null);
                       setPreviewClip(null);
                     }}
+                    onContextMenu={(event) => onOpenClipContextMenu(event, clip)}
                     onClick={() => onSelectClip(clip.id)}
                   >
                     <span
@@ -1653,6 +1857,10 @@ function findActiveClip(timeline: typeof starterTimeline, playheadUs: number, ki
 
 function getClipMediaTimeUs(clip: TimelineClip, playheadUs: number) {
   return clamp(playheadUs - clip.startUs + clip.inUs, clip.inUs, Math.max(clip.inUs, clip.outUs - 1));
+}
+
+function isPlayheadInsideClip(clip: TimelineClip, playheadUs: number) {
+  return playheadUs > clip.startUs && playheadUs < clip.startUs + (clip.outUs - clip.inUs);
 }
 
 function quantizePreviewFrameTime(timeUs: number) {

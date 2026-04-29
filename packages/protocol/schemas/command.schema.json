@@ -7,6 +7,7 @@
     "type": {
       "enum": [
         "import_media",
+        "remove_media",
         "add_track",
         "delete_track",
         "add_clip",
@@ -29,6 +30,15 @@
         "properties": {
           "clipId": { "type": "string", "minLength": 1 },
           "trackMode": { "enum": ["selected_track", "all_tracks"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "remove_media" } } },
+      "then": {
+        "required": ["mediaId"],
+        "properties": {
+          "mediaId": { "type": "string", "minLength": 1 }
         }
       }
     },

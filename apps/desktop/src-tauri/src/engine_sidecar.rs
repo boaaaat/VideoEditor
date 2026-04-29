@@ -14,12 +14,17 @@ pub struct EngineSidecar {
 
 impl EngineSidecar {
     pub fn start() -> Result<Self, String> {
+        let repo_root =
+            repo_root().ok_or_else(|| "could not resolve repository root".to_string())?;
         let exe = find_engine_executable().ok_or_else(|| {
             "could not find ai-video-engine.exe; run pnpm engine:build first".to_string()
         })?;
+        let ffmpeg_dir = repo_root.join("tools/ffmpeg/bin");
 
         let mut child = Command::new(&exe)
             .arg("--stdio")
+            .current_dir(&repo_root)
+            .env("AI_VIDEO_FFMPEG_DIR", &ffmpeg_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -98,11 +103,7 @@ fn find_engine_executable() -> Option<PathBuf> {
         }
     }
 
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .parent()?
-        .parent()?
-        .to_path_buf();
+    let repo_root = repo_root()?;
 
     let candidates = [
         repo_root.join("engine/build/Release/ai-video-engine.exe"),
@@ -116,4 +117,12 @@ fn find_engine_executable() -> Option<PathBuf> {
             .map(|meta| meta.is_file())
             .unwrap_or(false)
     })
+}
+
+fn repo_root() -> Option<PathBuf> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .parent()?
+        .parent()
+        .map(PathBuf::from)
 }

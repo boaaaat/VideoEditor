@@ -42,15 +42,14 @@ export async function importMediaPaths(paths: string[]): Promise<ImportMediaResu
       copyToProject: false
   });
 
+  const probedMetadata = await probeMediaPaths(supportedPaths);
   const data = command.data as ImportMediaCommandData | undefined;
   const media = Array.isArray(data?.media)
-    ? data.media
-    : await Promise.all(
-        supportedPaths.map(async (path) => {
-          const metadata = await probeMediaPath(path).catch(() => undefined);
-          return pathToMediaAsset(path, metadata);
-        })
-      );
+    ? data.media.map((asset) => ({
+        ...asset,
+        metadata: probedMetadata.get(asset.path) ?? asset.metadata
+      }))
+    : supportedPaths.map((path) => pathToMediaAsset(path, probedMetadata.get(path)));
 
   return {
     command,
@@ -66,4 +65,15 @@ export function probeMediaPath(path: string) {
   }
 
   return engineRpc<MediaMetadata>("media.probe", { path });
+}
+
+async function probeMediaPaths(paths: string[]) {
+  const results = await Promise.all(
+    paths.map(async (path) => {
+      const metadata = await probeMediaPath(path).catch(() => undefined);
+      return [path, metadata] as const;
+    })
+  );
+
+  return new Map(results.filter((entry): entry is readonly [string, MediaMetadata] => Boolean(entry[1])));
 }

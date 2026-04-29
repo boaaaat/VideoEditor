@@ -32,7 +32,8 @@ fn main() {
             commands::media_thumbnail_data_url,
             commands::preview_attach,
             commands::preview_resize,
-            commands::preview_url
+            commands::preview_url,
+            commands::reveal_media_path
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AI Video Editor");

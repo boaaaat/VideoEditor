@@ -3,6 +3,7 @@ import type { ColorMode, ExportCodec, ExportContainer, ExportFps, ExportQuality,
 
 export type CommandType =
   | "import_media"
+  | "remove_media"
   | "add_track"
   | "delete_track"
   | "add_clip"
@@ -22,6 +23,11 @@ export interface ImportMediaCommand {
   type: "import_media";
   paths: string[];
   copyToProject?: boolean;
+}
+
+export interface RemoveMediaCommand {
+  type: "remove_media";
+  mediaId: string;
 }
 
 export interface AddTrackCommand {
@@ -108,6 +114,7 @@ export interface ExportTimelineCommand {
 
 export type EditorCommand =
   | ImportMediaCommand
+  | RemoveMediaCommand
   | AddTrackCommand
   | DeleteTrackCommand
   | AddClipCommand
