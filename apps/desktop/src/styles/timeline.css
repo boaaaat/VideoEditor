@@ -273,6 +273,46 @@
   background: linear-gradient(180deg, #7bb65f, #4d7a3b);
 }
 
+.timeline-clip-waveform {
+  position: absolute;
+  inset: 5px 4px;
+  z-index: 0;
+  width: calc(100% - 8px);
+  height: calc(100% - 10px);
+  object-fit: cover;
+  opacity: 0.38;
+  pointer-events: none;
+}
+
+.timeline-clip-waveform.fallback {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  align-items: center;
+  gap: 2px;
+}
+
+.timeline-clip-waveform.fallback span {
+  display: block;
+  min-width: 0;
+  height: 45%;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.timeline-clip-waveform.fallback span:nth-child(2n) {
+  height: 72%;
+}
+
+.timeline-clip-waveform.fallback span:nth-child(3n) {
+  height: 28%;
+}
+
+.timeline-clip-label,
+.timeline-clip svg {
+  position: relative;
+  z-index: 1;
+}
+
 .timeline-clip.selected {
   outline: 2px solid var(--accent-2);
   outline-offset: 1px;
