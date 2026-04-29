@@ -566,10 +566,36 @@
   background: #171716;
 }
 
+.waveform-preview-large {
+  min-height: 220px;
+}
+
+.waveform-preview img {
+  width: 100%;
+  max-height: 190px;
+  object-fit: contain;
+}
+
 .waveform-preview span {
   width: 5px;
   border-radius: 3px;
   background: var(--audio);
+}
+
+.audio-clip-picker {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.audio-clip-picker span {
+  color: var(--muted);
+}
+
+.audio-action-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .feature-list span,

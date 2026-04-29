@@ -683,16 +683,17 @@ export function AppShell() {
     setMediaAssets(snapshot.mediaAssets ?? []);
     setTimeline(snapshot.timeline ?? starterTimeline);
     setAiProposals(snapshot.aiProposals ?? []);
-    setProjectSettings(snapshot.projectSettings ?? defaultProjectSettings);
+    const restoredSettings = { ...defaultProjectSettings, ...(snapshot.projectSettings ?? {}) };
+    setProjectSettings(restoredSettings);
     lastSavedStateRef.current = serializeProjectState(
-      snapshot.projectSettings ?? defaultProjectSettings,
+      restoredSettings,
       snapshot.mediaAssets ?? [],
       snapshot.timeline ?? starterTimeline,
       snapshot.aiProposals ?? []
     );
     resetCommandHistory(
       restoredProject,
-      snapshot.projectSettings ?? defaultProjectSettings,
+      restoredSettings,
       snapshot.mediaAssets ?? [],
       snapshot.timeline ?? starterTimeline,
       snapshot.aiProposals ?? []
@@ -738,12 +739,13 @@ export function AppShell() {
 
   function restoreHistorySnapshot(snapshot: ProjectSnapshot) {
     applyingHistoryRef.current = true;
-    setProjectSettings(snapshot.projectSettings ?? defaultProjectSettings);
+    const restoredSettings = { ...defaultProjectSettings, ...(snapshot.projectSettings ?? {}) };
+    setProjectSettings(restoredSettings);
     setMediaAssets(snapshot.mediaAssets ?? []);
     setTimeline(snapshot.timeline ?? starterTimeline);
     setAiProposals(snapshot.aiProposals ?? []);
     const stateHash = serializeProjectState(
-      snapshot.projectSettings ?? defaultProjectSettings,
+      restoredSettings,
       snapshot.mediaAssets ?? [],
       snapshot.timeline ?? starterTimeline,
       snapshot.aiProposals ?? []
@@ -858,7 +860,19 @@ export function AppShell() {
           />
         );
       case "audio":
-        return <AudioTab />;
+        return (
+          <AudioTab
+            timeline={timeline}
+            setTimeline={setTimeline}
+            mediaAssets={mediaAssets}
+            projectSettings={projectSettings}
+            onProjectSettingsChange={(settings) => {
+              setProjectSettings(settings);
+              logStatus("Project audio settings changed", { source: "project", details: { settings } });
+            }}
+            setStatusMessage={makeStatusLogger("audio")}
+          />
+        );
       case "color":
         return <ColorTab />;
       case "effects":
@@ -1028,6 +1042,9 @@ function getProjectSettingsChanges(current: ProjectSettings, next: ProjectSettin
     ["Default codec", formatCodec(current.defaultCodec), formatCodec(next.defaultCodec)],
     ["Default file type", current.defaultContainer.toUpperCase(), next.defaultContainer.toUpperCase()],
     ["Audio", current.audioEnabled ? "Enabled" : "Disabled", next.audioEnabled ? "Enabled" : "Disabled"],
+    ["Master gain", `${current.masterGainDb ?? 0} dB`, `${next.masterGainDb ?? 0} dB`],
+    ["Normalize audio", current.normalizeAudio ? "Enabled" : "Disabled", next.normalizeAudio ? "Enabled" : "Disabled"],
+    ["Audio cleanup", current.cleanupAudio ? "Enabled" : "Disabled", next.cleanupAudio ? "Enabled" : "Disabled"],
     ["Medium bitrate", `${current.bitrateMbps} Mbps`, `${next.bitrateMbps} Mbps`]
   ];
 
@@ -1067,6 +1084,9 @@ function formatFps(fps: number) {
 function commandSource(commandType: string): AppLogSource {
   if (commandType.includes("media")) {
     return "media";
+  }
+  if (commandType.includes("audio")) {
+    return "audio";
   }
   if (commandType.includes("color") || commandType.includes("lut")) {
     return "timeline";

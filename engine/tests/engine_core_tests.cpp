@@ -127,13 +127,19 @@ int runTests() {
   timelineExportJob.quality = "medium";
   timelineExportJob.audioEnabled = true;
   timelineExportJob.bitrateMbps = 16;
+  timelineExportJob.masterGainDb = -3;
+  timelineExportJob.normalizeAudio = true;
   timelineExportJob.timeline.media.push_back({"media_a", "C:\\media\\clip-a.mp4", "video", true});
-  timelineExportJob.timeline.clips.push_back({"media_a", "v1", "video", 1, true, false, 1'000'000, 500'000, 3'500'000});
+  timelineExportJob.timeline.clips.push_back({"media_a", "v1", "video", 1, true, false, 1'000'000, 500'000, 3'500'000, 4, false, 250'000, 500'000, true, true});
   const auto timelineCommand = ai_editor::ExportEngine::buildFfmpegCommand(timelineExportJob);
   assert(timelineCommand.find("C:\\media\\clip-a.mp4") != std::string::npos);
   assert(timelineCommand.find("filter_complex") != std::string::npos);
   assert(timelineCommand.find("concat=n=3") != std::string::npos);
   assert(timelineCommand.find("atrim=start=0.500") != std::string::npos);
+  assert(timelineCommand.find("volume=4.00dB") != std::string::npos);
+  assert(timelineCommand.find("volume=-3.00dB") != std::string::npos);
+  assert(timelineCommand.find("afade=t=in") != std::string::npos);
+  assert(timelineCommand.find("loudnorm") != std::string::npos);
 
   ai_editor::GpuStatus gpu;
   gpu.nvencAvailable = true;

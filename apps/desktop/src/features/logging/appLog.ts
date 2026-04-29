@@ -1,6 +1,6 @@
 export type AppLogLevel = "info" | "success" | "warning" | "error" | "debug";
 
-export type AppLogSource = "app" | "ui" | "project" | "media" | "timeline" | "export" | "engine" | "ai" | "plugin";
+export type AppLogSource = "app" | "ui" | "project" | "media" | "timeline" | "audio" | "export" | "engine" | "ai" | "plugin";
 
 export interface AppLogEntry {
   id: string;

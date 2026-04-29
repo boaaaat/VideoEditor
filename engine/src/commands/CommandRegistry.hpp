@@ -52,6 +52,7 @@ class CommandRegistry {
         "delete_clip",
         "ripple_delete_clip",
         "apply_color_adjustment",
+        "apply_audio_adjustment",
         "apply_lut",
         "export_timeline",
     };

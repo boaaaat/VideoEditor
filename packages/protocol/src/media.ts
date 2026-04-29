@@ -57,6 +57,9 @@ export interface ProjectSettings {
   defaultCodec: ExportCodec;
   defaultContainer: ExportContainer;
   audioEnabled: boolean;
+  masterGainDb: number;
+  normalizeAudio: boolean;
+  cleanupAudio: boolean;
 }
 
 export interface PreviewState {

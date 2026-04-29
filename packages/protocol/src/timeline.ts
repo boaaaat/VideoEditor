@@ -27,6 +27,7 @@ export interface TimelineClip {
   inUs: number;
   outUs: number;
   color: ColorAdjustment;
+  audio?: AudioAdjustment;
   lut?: ClipLut;
 }
 
@@ -43,10 +44,28 @@ export interface ClipLut {
   strength: number;
 }
 
+export interface AudioAdjustment {
+  gainDb: number;
+  muted: boolean;
+  fadeInUs: number;
+  fadeOutUs: number;
+  normalize: boolean;
+  cleanup: boolean;
+}
+
 export const defaultColorAdjustment: ColorAdjustment = {
   brightness: 0,
   contrast: 0,
   saturation: 1,
   temperature: 0,
   tint: 0
+};
+
+export const defaultAudioAdjustment: AudioAdjustment = {
+  gainDb: 0,
+  muted: false,
+  fadeInUs: 0,
+  fadeOutUs: 0,
+  normalize: false,
+  cleanup: false
 };

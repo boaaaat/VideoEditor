@@ -22,7 +22,10 @@ export const defaultProjectSettings: ProjectSettings = {
   bitrateMbps: 16,
   defaultCodec: "h264_nvenc",
   defaultContainer: "mp4",
-  audioEnabled: true
+  audioEnabled: true,
+  masterGainDb: 0,
+  normalizeAudio: false,
+  cleanupAudio: false
 };
 
 export function seedProjectSettingsFromMetadata(metadata: MediaMetadata): ProjectSettings {
@@ -35,7 +38,10 @@ export function seedProjectSettingsFromMetadata(metadata: MediaMetadata): Projec
     bitrateMbps: defaultProjectSettings.bitrateMbps,
     defaultCodec: metadata.hdr ? "hevc_nvenc" : "h264_nvenc",
     defaultContainer: "mp4",
-    audioEnabled: metadata.hasAudio
+    audioEnabled: metadata.hasAudio,
+    masterGainDb: defaultProjectSettings.masterGainDb,
+    normalizeAudio: defaultProjectSettings.normalizeAudio,
+    cleanupAudio: defaultProjectSettings.cleanupAudio
   };
 
   return {

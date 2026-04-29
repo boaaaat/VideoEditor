@@ -62,6 +62,9 @@ class ExportEngine {
     job.bitrateMbps = request.bitrateMbps > 0 ? request.bitrateMbps : calculateBitrateMbps(request);
     job.audioEnabled = request.audioEnabled;
     job.colorMode = request.colorMode;
+    job.masterGainDb = request.masterGainDb;
+    job.normalizeAudio = request.normalizeAudio;
+    job.cleanupAudio = request.cleanupAudio;
     job.timeline = request.timeline;
     job.ffmpegCommand = buildFfmpegCommand(job);
     return job;
@@ -100,7 +103,7 @@ class ExportEngine {
     job.logs.push_back("Export started");
     job.logs.push_back("Render duration: " + formatSeconds(job.durationUs));
     if (hasRenderableTimeline(job)) {
-      job.logs.push_back("Rendering timeline media clips: " + std::to_string(countRenderableVideoClips(job)));
+      job.logs.push_back("Rendering timeline media clips: " + std::to_string(countRenderableVideoClips(job)) + " video, " + std::to_string(countRenderableAudioClips(job)) + " audio");
     } else {
       job.logs.push_back("Timeline has no visible video clips; rendering black output");
     }
@@ -165,6 +168,9 @@ class ExportEngine {
     request.audioEnabled = params.value("audioEnabled", true);
     request.colorMode = params.value("colorMode", std::string{"SDR"});
     request.overwrite = params.value("overwrite", false);
+    request.masterGainDb = params.value("masterGainDb", 0.0);
+    request.normalizeAudio = params.value("normalizeAudio", false);
+    request.cleanupAudio = params.value("cleanupAudio", false);
     request.timeline = timelineFromJson(params);
     if (request.bitrateMbps <= 0) {
       request.bitrateMbps = calculateBitrateMbps(request);
@@ -301,6 +307,7 @@ class ExportEngine {
 
   [[nodiscard]] static std::string buildTimelineFfmpegCommand(const ExportJob& job, const std::string& ffmpegPath, const std::string& progressPath, bool overwrite) {
     const auto segments = buildTimelineSegments(job);
+    const auto audioClips = collectAudioClips(job);
     std::vector<std::string> args = {
         ffmpegPath.empty() ? "ffmpeg" : ffmpegPath,
         "-hide_banner",
@@ -318,12 +325,6 @@ class ExportEngine {
                                  "color=c=black:s=" + std::to_string(job.width) + "x" + std::to_string(job.height) + ":r=" + std::to_string(job.fps)});
         filters.push_back("[" + std::to_string(inputIndex) + ":v]setpts=PTS-STARTPTS,setsar=1,format=yuv420p[v" + std::to_string(segmentIndex) + "]");
         inputIndex += 1;
-
-        if (job.audioEnabled) {
-          args.insert(args.end(), {"-f", "lavfi", "-t", durationSeconds, "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"});
-          filters.push_back("[" + std::to_string(inputIndex) + ":a]asetpts=PTS-STARTPTS[a" + std::to_string(segmentIndex) + "]");
-          inputIndex += 1;
-        }
       } else {
         const auto* media = findMedia(job.timeline.media, segment.clip->mediaId);
         args.insert(args.end(), {"-i", media ? media->path : std::string{}});
@@ -334,27 +335,18 @@ class ExportEngine {
                           ":force_original_aspect_ratio=decrease,pad=" + std::to_string(job.width) + ":" + std::to_string(job.height) +
                           ":(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v" + std::to_string(segmentIndex) + "]");
         inputIndex += 1;
-
-        if (job.audioEnabled) {
-          if (media && media->hasAudio) {
-            filters.push_back("[" + input + ":a]atrim=start=" + formatSeconds(segment.sourceInUs) + ":duration=" + durationSeconds +
-                              ",asetpts=PTS-STARTPTS,aresample=48000[a" + std::to_string(segmentIndex) + "]");
-          } else {
-            args.insert(args.end(), {"-f", "lavfi", "-t", durationSeconds, "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"});
-            filters.push_back("[" + std::to_string(inputIndex) + ":a]asetpts=PTS-STARTPTS[a" + std::to_string(segmentIndex) + "]");
-            inputIndex += 1;
-          }
-        }
       }
 
       concatInputs.push_back("[v" + std::to_string(segmentIndex) + "]");
-      if (job.audioEnabled) {
-        concatInputs.push_back("[a" + std::to_string(segmentIndex) + "]");
-      }
       segmentIndex += 1;
     }
 
-    filters.push_back(join(concatInputs, "") + "concat=n=" + std::to_string(segments.size()) + ":v=1:a=" + (job.audioEnabled ? "1[outv][outa]" : "0[outv]"));
+    filters.push_back(join(concatInputs, "") + "concat=n=" + std::to_string(segments.size()) + ":v=1:a=0[outv]");
+
+    if (job.audioEnabled) {
+      appendAudioMixGraph(job, audioClips, args, filters, inputIndex);
+    }
+
     args.insert(args.end(), {"-filter_complex", join(filters, ";"), "-map", "[outv]"});
     if (job.audioEnabled) {
       args.insert(args.end(), {"-map", "[outa]"});
@@ -391,6 +383,100 @@ class ExportEngine {
 
     args.push_back(job.outputPath);
     return joinQuoted(args);
+  }
+
+  static void appendAudioMixGraph(
+      const ExportJob& job,
+      const std::vector<const ExportTimelineClip*>& clips,
+      std::vector<std::string>& args,
+      std::vector<std::string>& filters,
+      int& inputIndex) {
+    if (clips.empty()) {
+      args.insert(args.end(), {"-f", "lavfi", "-t", formatSeconds(job.durationUs), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"});
+      filters.push_back("[" + std::to_string(inputIndex) + ":a]asetpts=PTS-STARTPTS[outa]");
+      inputIndex += 1;
+      return;
+    }
+
+    std::vector<std::string> audioInputs;
+    for (std::size_t index = 0; index < clips.size(); ++index) {
+      const auto* clip = clips.at(index);
+      const auto* media = findMedia(job.timeline.media, clip->mediaId);
+      if (!media) {
+        continue;
+      }
+
+      const auto durationUs = clip->outUs - clip->inUs;
+      const auto delayMs = std::max<std::int64_t>(0, clip->startUs / 1000);
+      const auto label = "aud" + std::to_string(index);
+      args.insert(args.end(), {"-i", media->path});
+      filters.push_back("[" + std::to_string(inputIndex) + ":a]" + audioFilterChain(*clip, durationUs, delayMs, label));
+      audioInputs.push_back("[" + label + "]");
+      inputIndex += 1;
+    }
+
+    if (audioInputs.empty()) {
+      args.insert(args.end(), {"-f", "lavfi", "-t", formatSeconds(job.durationUs), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"});
+      filters.push_back("[" + std::to_string(inputIndex) + ":a]asetpts=PTS-STARTPTS[outa]");
+      inputIndex += 1;
+      return;
+    }
+
+    const auto finalFilter = finalAudioFilterChain(job);
+    if (audioInputs.size() == 1) {
+      filters.push_back(audioInputs.front() + finalFilter + "[outa]");
+    } else {
+      filters.push_back(join(audioInputs, "") + "amix=inputs=" + std::to_string(audioInputs.size()) + ":duration=longest:dropout_transition=0:normalize=0," + finalFilter + "[outa]");
+    }
+  }
+
+  [[nodiscard]] static std::string audioFilterChain(const ExportTimelineClip& clip, std::int64_t durationUs, std::int64_t delayMs, const std::string& outputLabel) {
+    std::vector<std::string> filters = {
+        "atrim=start=" + formatSeconds(clip.inUs) + ":duration=" + formatSeconds(durationUs),
+        "asetpts=PTS-STARTPTS",
+        "aresample=48000",
+    };
+
+    if (std::abs(clip.audioGainDb) > 0.001) {
+      filters.push_back("volume=" + formatDb(clip.audioGainDb));
+    }
+    if (clip.audioFadeInUs > 0) {
+      filters.push_back("afade=t=in:st=0:d=" + formatSeconds(std::min(clip.audioFadeInUs, durationUs)));
+    }
+    if (clip.audioFadeOutUs > 0) {
+      const auto fadeDurationUs = std::min(clip.audioFadeOutUs, durationUs);
+      filters.push_back("afade=t=out:st=" + formatSeconds(std::max<std::int64_t>(0, durationUs - fadeDurationUs)) + ":d=" + formatSeconds(fadeDurationUs));
+    }
+    if (clip.audioCleanup) {
+      filters.push_back("highpass=f=80");
+      filters.push_back("afftdn=nf=-25");
+    }
+    if (clip.audioNormalize) {
+      filters.push_back("loudnorm=I=-16:TP=-1.5:LRA=11");
+    }
+    if (delayMs > 0) {
+      filters.push_back("adelay=" + std::to_string(delayMs) + "|" + std::to_string(delayMs));
+    }
+    filters.push_back("apad");
+    filters.push_back("atrim=duration=" + formatSeconds(durationUs + delayMs * 1000));
+    return join(filters, ",") + "[" + outputLabel + "]";
+  }
+
+  [[nodiscard]] static std::string finalAudioFilterChain(const ExportJob& job) {
+    std::vector<std::string> filters;
+    if (job.cleanupAudio) {
+      filters.push_back("highpass=f=60");
+      filters.push_back("afftdn=nf=-30");
+    }
+    if (std::abs(job.masterGainDb) > 0.001) {
+      filters.push_back("volume=" + formatDb(job.masterGainDb));
+    }
+    if (job.normalizeAudio) {
+      filters.push_back("loudnorm=I=-16:TP=-1.5:LRA=11");
+    }
+    filters.push_back("atrim=duration=" + formatSeconds(job.durationUs));
+    filters.push_back("asetpts=PTS-STARTPTS");
+    return join(filters, ",");
   }
 
   static void prepareDestination(const ExportRequest& request) {
@@ -587,6 +673,15 @@ class ExportEngine {
         clip.startUs = item.value("startUs", 0LL);
         clip.inUs = item.value("inUs", 0LL);
         clip.outUs = item.value("outUs", clip.inUs);
+        if (item.contains("audio") && item.at("audio").is_object()) {
+          const auto& audio = item.at("audio");
+          clip.audioGainDb = audio.value("gainDb", 0.0);
+          clip.audioMuted = audio.value("muted", false);
+          clip.audioFadeInUs = audio.value("fadeInUs", 0LL);
+          clip.audioFadeOutUs = audio.value("fadeOutUs", 0LL);
+          clip.audioNormalize = audio.value("normalize", false);
+          clip.audioCleanup = audio.value("cleanup", false);
+        }
         if (!clip.mediaId.empty()) {
           timeline.clips.push_back(clip);
         }
@@ -603,13 +698,23 @@ class ExportEngine {
   }
 
   [[nodiscard]] static bool hasRenderableTimeline(const ExportJob& job) {
-    return countRenderableVideoClips(job) > 0;
+    return countRenderableVideoClips(job) > 0 || countRenderableAudioClips(job) > 0;
   }
 
   [[nodiscard]] static std::size_t countRenderableVideoClips(const ExportJob& job) {
     return static_cast<std::size_t>(std::count_if(job.timeline.clips.begin(), job.timeline.clips.end(), [&](const ExportTimelineClip& clip) {
       const auto* media = findMedia(job.timeline.media, clip.mediaId);
       return media && media->kind == "video" && clip.trackKind == "video" && clip.trackVisible && clip.outUs > clip.inUs;
+    }));
+  }
+
+  [[nodiscard]] static std::size_t countRenderableAudioClips(const ExportJob& job) {
+    return static_cast<std::size_t>(std::count_if(job.timeline.clips.begin(), job.timeline.clips.end(), [&](const ExportTimelineClip& clip) {
+      const auto* media = findMedia(job.timeline.media, clip.mediaId);
+      if (!media || !media->hasAudio || clip.audioMuted || clip.trackMuted || clip.outUs <= clip.inUs) {
+        return false;
+      }
+      return clip.trackKind != "video" || clip.trackVisible;
     }));
   }
 
@@ -656,6 +761,28 @@ class ExportEngine {
       segments.push_back({nullptr, 0, 0, job.durationUs, true});
     }
     return segments;
+  }
+
+  [[nodiscard]] static std::vector<const ExportTimelineClip*> collectAudioClips(const ExportJob& job) {
+    std::vector<const ExportTimelineClip*> clips;
+    for (const auto& clip : job.timeline.clips) {
+      const auto* media = findMedia(job.timeline.media, clip.mediaId);
+      if (!media || !media->hasAudio || clip.audioMuted || clip.trackMuted || clip.outUs <= clip.inUs) {
+        continue;
+      }
+      if (clip.trackKind == "video" && !clip.trackVisible) {
+        continue;
+      }
+      clips.push_back(&clip);
+    }
+
+    std::sort(clips.begin(), clips.end(), [](const ExportTimelineClip* left, const ExportTimelineClip* right) {
+      if (left->startUs != right->startUs) {
+        return left->startUs < right->startUs;
+      }
+      return left->trackIndex < right->trackIndex;
+    });
+    return clips;
   }
 
   [[nodiscard]] static double qualityMultiplier(const std::string& quality) {
@@ -724,6 +851,14 @@ class ExportEngine {
     stream.setf(std::ios::fixed);
     stream.precision(3);
     stream << static_cast<double>(std::max<std::int64_t>(1, durationUs)) / 1'000'000.0;
+    return stream.str();
+  }
+
+  [[nodiscard]] static std::string formatDb(double gainDb) {
+    std::ostringstream stream;
+    stream.setf(std::ios::fixed);
+    stream.precision(2);
+    stream << gainDb << "dB";
     return stream.str();
   }
 

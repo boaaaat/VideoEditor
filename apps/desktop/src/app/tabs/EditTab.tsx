@@ -6,6 +6,7 @@ import {
   type CSSProperties,
   type Dispatch,
   type DragEvent as ReactDragEvent,
+  type MutableRefObject,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
@@ -44,7 +45,7 @@ import {
   ZoomIn,
   ZoomOut
 } from "lucide-react";
-import type { CommandResult, EditorCommand, PreviewState, ProjectSettings, Timeline, TimelineClip } from "@ai-video-editor/protocol";
+import { defaultAudioAdjustment, type AudioAdjustment, type CommandResult, type EditorCommand, type PreviewState, type ProjectSettings, type Timeline, type TimelineClip } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 import { IconButton } from "../../components/IconButton";
@@ -91,6 +92,13 @@ const snapThresholdPx = 18;
 const visualClipGapPx = 2;
 const defaultVideoDurationUs = 8_000_000;
 const defaultAudioDurationUs = 12_000_000;
+
+interface MediaAudioGraph {
+  element: HTMLMediaElement;
+  context: AudioContext;
+  source: MediaElementAudioSourceNode;
+  gain: GainNode;
+}
 
 interface EditTabProps {
   previewUrl?: string;
@@ -2129,6 +2137,8 @@ function PreviewSurface({
   const frameRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const videoAudioGraphRef = useRef<MediaAudioGraph | null>(null);
+  const audioAudioGraphRef = useRef<MediaAudioGraph | null>(null);
   const [videoSrc, setVideoSrc] = useState("");
   const [audioSrc, setAudioSrc] = useState("");
   const [frameSrc, setFrameSrc] = useState("");
@@ -2261,11 +2271,13 @@ function PreviewSurface({
 
   useEffect(() => {
     syncMediaElement(videoRef, videoClip, playheadUs, playing);
-  }, [videoClip, playheadUs, playing, videoSrc]);
+    applyMediaElementAudio(videoRef, videoAudioGraphRef, videoClip, projectSettings, playheadUs, playing);
+  }, [videoClip, playheadUs, playing, videoSrc, projectSettings]);
 
   useEffect(() => {
     syncMediaElement(audioRef, audioClip, playheadUs, playing);
-  }, [audioClip, playheadUs, playing, audioSrc]);
+    applyMediaElementAudio(audioRef, audioAudioGraphRef, audioClip, projectSettings, playheadUs, playing);
+  }, [audioClip, playheadUs, playing, audioSrc, projectSettings]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -2758,6 +2770,103 @@ function syncMediaElement<T extends HTMLVideoElement | HTMLAudioElement>(
   } else {
     element.pause();
   }
+}
+
+function applyMediaElementAudio<T extends HTMLVideoElement | HTMLAudioElement>(
+  ref: RefObject<T>,
+  graphRef: MutableRefObject<MediaAudioGraph | null>,
+  clip: TimelineClip | undefined,
+  projectSettings: ProjectSettings,
+  playheadUs: number,
+  playing: boolean
+) {
+  const element = ref.current;
+  if (!element) {
+    return;
+  }
+
+  if (!clip || !projectSettings.audioEnabled) {
+    setMediaElementGain(element, graphRef, 0, playing);
+    return;
+  }
+
+  const audio = normalizeAudioAdjustment(clip.audio);
+  const clipTimeUs = clamp(playheadUs - clip.startUs, 0, clip.outUs - clip.inUs);
+  const fadeMultiplier = audioFadeMultiplier(audio, clipTimeUs, clip.outUs - clip.inUs);
+  const linearGain = dbToLinear((projectSettings.masterGainDb ?? 0) + audio.gainDb) * fadeMultiplier;
+  setMediaElementGain(element, graphRef, audio.muted ? 0 : linearGain, playing);
+}
+
+function setMediaElementGain(
+  element: HTMLMediaElement,
+  graphRef: MutableRefObject<MediaAudioGraph | null>,
+  linearGain: number,
+  playing: boolean
+) {
+  const gain = clamp(linearGain, 0, 4);
+  const graph = ensureMediaAudioGraph(element, graphRef);
+  if (graph) {
+    graph.gain.gain.value = gain;
+    element.muted = false;
+    element.volume = 1;
+    if (playing && graph.context.state === "suspended") {
+      void graph.context.resume().catch(() => undefined);
+    }
+    return;
+  }
+
+  element.muted = gain <= 0.001;
+  element.volume = clamp(gain, 0, 1);
+}
+
+function ensureMediaAudioGraph(
+  element: HTMLMediaElement,
+  graphRef: MutableRefObject<MediaAudioGraph | null>
+): MediaAudioGraph | null {
+  if (graphRef.current?.element === element) {
+    return graphRef.current;
+  }
+
+  try {
+    const AudioContextCtor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) {
+      return null;
+    }
+    const context = new AudioContextCtor();
+    const source = context.createMediaElementSource(element);
+    const gain = context.createGain();
+    source.connect(gain);
+    gain.connect(context.destination);
+    graphRef.current = { element, context, source, gain };
+    return graphRef.current;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAudioAdjustment(value?: Partial<AudioAdjustment>): AudioAdjustment {
+  return {
+    ...defaultAudioAdjustment,
+    ...value
+  };
+}
+
+function audioFadeMultiplier(audio: AudioAdjustment, clipTimeUs: number, durationUs: number) {
+  let multiplier = 1;
+  if (audio.fadeInUs > 0 && clipTimeUs < audio.fadeInUs) {
+    multiplier *= clamp(clipTimeUs / audio.fadeInUs, 0, 1);
+  }
+  if (audio.fadeOutUs > 0) {
+    const fadeOutStartUs = Math.max(0, durationUs - audio.fadeOutUs);
+    if (clipTimeUs > fadeOutStartUs) {
+      multiplier *= clamp((durationUs - clipTimeUs) / audio.fadeOutUs, 0, 1);
+    }
+  }
+  return multiplier;
+}
+
+function dbToLinear(gainDb: number) {
+  return Math.pow(10, gainDb / 20);
 }
 
 function getTimelineDurationSeconds(durationUs: number) {

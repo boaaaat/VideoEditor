@@ -33,6 +33,12 @@ struct ExportTimelineClip {
   std::int64_t startUs = 0;
   std::int64_t inUs = 0;
   std::int64_t outUs = 0;
+  double audioGainDb = 0.0;
+  bool audioMuted = false;
+  std::int64_t audioFadeInUs = 0;
+  std::int64_t audioFadeOutUs = 0;
+  bool audioNormalize = false;
+  bool audioCleanup = false;
 };
 
 struct ExportTimelineSegment {
@@ -62,6 +68,9 @@ struct ExportRequest {
   bool audioEnabled = true;
   std::string colorMode = "SDR";
   bool overwrite = false;
+  double masterGainDb = 0.0;
+  bool normalizeAudio = false;
+  bool cleanupAudio = false;
   ExportRequestTimeline timeline;
 };
 
@@ -83,6 +92,9 @@ struct ExportJob {
   int bitrateMbps = 20;
   bool audioEnabled = true;
   std::string colorMode = "SDR";
+  double masterGainDb = 0.0;
+  bool normalizeAudio = false;
+  bool cleanupAudio = false;
   std::string ffmpegCommand;
   std::vector<std::string> logs;
   bool cancelled = false;
@@ -105,6 +117,9 @@ struct ExportJob {
         {"bitrateMbps", bitrateMbps},
         {"audioEnabled", audioEnabled},
         {"colorMode", colorMode},
+        {"masterGainDb", masterGainDb},
+        {"normalizeAudio", normalizeAudio},
+        {"cleanupAudio", cleanupAudio},
         {"ffmpegCommand", ffmpegCommand},
         {"logs", logs},
         {"cancelled", cancelled},

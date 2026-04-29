@@ -203,6 +203,8 @@ class EditorSession {
       deleteTrack(command);
     } else if (type == "apply_color_adjustment" || type == "apply_lut") {
       applyClipLook(command);
+    } else if (type == "apply_audio_adjustment") {
+      applyClipAudio(command);
     } else {
       throw std::runtime_error("unknown command type: " + type);
     }
@@ -352,9 +354,11 @@ class EditorSession {
         start_us INTEGER NOT NULL,
         in_us INTEGER NOT NULL,
         out_us INTEGER NOT NULL,
-        color_json TEXT NOT NULL
+        color_json TEXT NOT NULL,
+        audio_json TEXT NOT NULL DEFAULT '{}'
       );
     )sql");
+    ensureColumn("timeline_clips", "audio_json", "TEXT NOT NULL DEFAULT '{}'");
     exec(R"sql(
       CREATE TABLE IF NOT EXISTS ai_proposals (
         id TEXT PRIMARY KEY,
@@ -416,7 +420,7 @@ class EditorSession {
 
   void loadClips() {
     sqlite3_stmt* statement = nullptr;
-    prepare("SELECT id,media_id,track_id,start_us,in_us,out_us,color_json FROM timeline_clips ORDER BY start_us ASC;", &statement);
+    prepare("SELECT id,media_id,track_id,start_us,in_us,out_us,color_json,audio_json FROM timeline_clips ORDER BY start_us ASC;", &statement);
     while (sqlite3_step(statement) == SQLITE_ROW) {
       Clip clip;
       clip.id = columnText(statement, 0);
@@ -431,6 +435,13 @@ class EditorSession {
       clip.color.saturation = color.value("saturation", 1.0);
       clip.color.temperature = color.value("temperature", 0.0);
       clip.color.tint = color.value("tint", 0.0);
+      const auto audio = parseJson(columnText(statement, 7), defaultAudioJson());
+      clip.audioGainDb = audio.value("gainDb", 0.0);
+      clip.audioMuted = audio.value("muted", false);
+      clip.audioFadeInUs = audio.value("fadeInUs", 0LL);
+      clip.audioFadeOutUs = audio.value("fadeOutUs", 0LL);
+      clip.audioNormalize = audio.value("normalize", false);
+      clip.audioCleanup = audio.value("cleanup", false);
       auto* track = findTrack(clip.trackId);
       if (track) {
         track->clips.push_back(clip);
@@ -489,7 +500,7 @@ class EditorSession {
 
       for (const auto& clip : track.clips) {
         sqlite3_stmt* clipStatement = nullptr;
-        prepare("INSERT INTO timeline_clips(id,media_id,track_id,start_us,in_us,out_us,color_json) VALUES(?,?,?,?,?,?,?);", &clipStatement);
+        prepare("INSERT INTO timeline_clips(id,media_id,track_id,start_us,in_us,out_us,color_json,audio_json) VALUES(?,?,?,?,?,?,?,?);", &clipStatement);
         bindText(clipStatement, 1, clip.id);
         bindText(clipStatement, 2, clip.mediaId);
         bindText(clipStatement, 3, clip.trackId);
@@ -497,6 +508,7 @@ class EditorSession {
         sqlite3_bind_int64(clipStatement, 5, clip.inUs);
         sqlite3_bind_int64(clipStatement, 6, clip.outUs);
         bindText(clipStatement, 7, colorJson(clip).dump());
+        bindText(clipStatement, 8, audioJson(clip).dump());
         stepDone(clipStatement);
       }
     }
@@ -637,6 +649,22 @@ class EditorSession {
     }
   }
 
+  void applyClipAudio(const nlohmann::json& command) {
+    auto* clip = findClip(command.value("clipId", std::string{}));
+    if (!clip) {
+      throw std::runtime_error("clip not found");
+    }
+    if (command.contains("adjustment")) {
+      const auto adjustment = command.at("adjustment");
+      clip->audioGainDb = adjustment.value("gainDb", clip->audioGainDb);
+      clip->audioMuted = adjustment.value("muted", clip->audioMuted);
+      clip->audioFadeInUs = adjustment.value("fadeInUs", clip->audioFadeInUs);
+      clip->audioFadeOutUs = adjustment.value("fadeOutUs", clip->audioFadeOutUs);
+      clip->audioNormalize = adjustment.value("normalize", clip->audioNormalize);
+      clip->audioCleanup = adjustment.value("cleanup", clip->audioCleanup);
+    }
+  }
+
   [[nodiscard]] nlohmann::json tracksJson() const {
     auto rows = nlohmann::json::array();
     for (const auto& track : timeline_.tracks) {
@@ -650,6 +678,7 @@ class EditorSession {
             {"inUs", clip.inUs},
             {"outUs", clip.outUs},
             {"color", colorJson(clip)},
+            {"audio", audioJson(clip)},
         });
       }
       rows.push_back({
@@ -790,8 +819,23 @@ class EditorSession {
     };
   }
 
+  static nlohmann::json audioJson(const Clip& clip) {
+    return {
+        {"gainDb", clip.audioGainDb},
+        {"muted", clip.audioMuted},
+        {"fadeInUs", clip.audioFadeInUs},
+        {"fadeOutUs", clip.audioFadeOutUs},
+        {"normalize", clip.audioNormalize},
+        {"cleanup", clip.audioCleanup},
+    };
+  }
+
   static nlohmann::json defaultColorJson() {
     return {{"brightness", 0}, {"contrast", 0}, {"saturation", 1}, {"temperature", 0}, {"tint", 0}};
+  }
+
+  static nlohmann::json defaultAudioJson() {
+    return {{"gainDb", 0}, {"muted", false}, {"fadeInUs", 0}, {"fadeOutUs", 0}, {"normalize", false}, {"cleanup", false}};
   }
 
   static nlohmann::json probeOrFallback(const std::string& path, const std::string& kind, const FfprobeService& ffprobeService) {
@@ -919,6 +963,25 @@ class EditorSession {
       const std::string message = error ? error : "unknown sqlite error";
       sqlite3_free(error);
       throw std::runtime_error("sqlite error: " + message);
+    }
+  }
+
+  void ensureColumn(const std::string& table, const std::string& column, const std::string& definition) {
+    sqlite3_stmt* statement = nullptr;
+    const auto sql = "PRAGMA table_info(" + table + ");";
+    prepare(sql.c_str(), &statement);
+    bool exists = false;
+    while (sqlite3_step(statement) == SQLITE_ROW) {
+      if (columnText(statement, 1) == column) {
+        exists = true;
+        break;
+      }
+    }
+    sqlite3_finalize(statement);
+
+    if (!exists) {
+      const auto alter = "ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition + ";";
+      exec(alter.c_str());
     }
   }
 
