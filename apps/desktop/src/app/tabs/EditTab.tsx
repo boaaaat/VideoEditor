@@ -2,9 +2,11 @@ import {
   useEffect,
   useRef,
   useState,
+  type Dispatch,
   type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
+  type SetStateAction,
   type WheelEvent as ReactWheelEvent
 } from "react";
 import {
@@ -28,7 +30,7 @@ import {
   ZoomIn,
   ZoomOut
 } from "lucide-react";
-import type { PreviewState, ProjectSettings, TimelineClip } from "@ai-video-editor/protocol";
+import type { PreviewState, ProjectSettings, Timeline, TimelineClip } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { IconButton } from "../../components/IconButton";
 import { Panel } from "../../components/Panel";
@@ -71,6 +73,8 @@ const defaultAudioDurationUs = 12_000_000;
 interface EditTabProps {
   previewUrl?: string;
   mediaAssets: MediaAsset[];
+  timeline: Timeline;
+  setTimeline: Dispatch<SetStateAction<Timeline>>;
   projectSettings: ProjectSettings;
   onImportMedia: () => Promise<void>;
   onImportMediaResult: (result: ImportMediaResult | null) => void;
@@ -113,12 +117,11 @@ interface MediaDropPreviewState {
   invalid: boolean;
 }
 
-export function EditTab({ previewUrl, mediaAssets, projectSettings, onImportMedia, onImportMediaResult, setStatusMessage }: EditTabProps) {
+export function EditTab({ previewUrl, mediaAssets, timeline, setTimeline, projectSettings, onImportMedia, onImportMediaResult, setStatusMessage }: EditTabProps) {
   const playbackFrameRef = useRef<number | null>(null);
   const lastPlaybackTimeRef = useRef<number | null>(null);
   const internalMediaDragRef = useRef(false);
   const [selectedClipId, setSelectedClipId] = useState("");
-  const [timeline, setTimeline] = useState(starterTimeline);
   const [mediaDragOver, setMediaDragOver] = useState(false);
   const [snapping, setSnapping] = useState(true);
   const [playing, setPlaying] = useState(false);
@@ -135,9 +138,19 @@ export function EditTab({ previewUrl, mediaAssets, projectSettings, onImportMedi
   const activeVideoAsset = activeVideoClip ? mediaAssets.find((asset) => asset.id === activeVideoClip.mediaId) : undefined;
   const activeAudioAsset = activeAudioClip ? mediaAssets.find((asset) => asset.id === activeAudioClip.mediaId) : undefined;
 
+  function applyEngineTimeline(data: unknown) {
+    const nextTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
+    if (nextTimeline?.tracks) {
+      setTimeline(nextTimeline);
+      return true;
+    }
+    return false;
+  }
+
   async function splitAtPlayhead() {
     const result = await executeCommand({ type: "split_clip", playheadUs });
-    if (selectedClip && playheadUs > selectedClip.startUs && playheadUs < selectedClip.startUs + (selectedClip.outUs - selectedClip.inUs)) {
+    const usedEngineTimeline = applyEngineTimeline(result.data);
+    if (!usedEngineTimeline && selectedClip && playheadUs > selectedClip.startUs && playheadUs < selectedClip.startUs + (selectedClip.outUs - selectedClip.inUs)) {
       const firstOutUs = selectedClip.inUs + (playheadUs - selectedClip.startUs);
       const secondDurationUs = selectedClip.outUs - firstOutUs;
       const secondClip = {
@@ -167,24 +180,26 @@ export function EditTab({ previewUrl, mediaAssets, projectSettings, onImportMedi
 
   async function addTrack(kind: "video" | "audio") {
     const result = await executeCommand({ type: "add_track", kind });
-    setTimeline((current) => {
-      const trackCount = current.tracks.filter((track) => track.kind === kind).length + 1;
-      const track = {
-        id: `${kind[0]}${Date.now()}`,
-        name: `${kind === "video" ? "Video" : "Audio"} ${trackCount}`,
-        kind,
-        index: current.tracks.length,
-        locked: false,
-        muted: false,
-        visible: true,
-        clips: []
-      };
+    if (!applyEngineTimeline(result.data)) {
+      setTimeline((current) => {
+        const trackCount = current.tracks.filter((track) => track.kind === kind).length + 1;
+        const track = {
+          id: `${kind[0]}${Date.now()}`,
+          name: `${kind === "video" ? "Video" : "Audio"} ${trackCount}`,
+          kind,
+          index: current.tracks.length,
+          locked: false,
+          muted: false,
+          visible: true,
+          clips: []
+        };
 
-      return {
-        ...current,
-        tracks: [...current.tracks, track]
-      };
-    });
+        return {
+          ...current,
+          tracks: [...current.tracks, track]
+        };
+      });
+    }
     setStatusMessage(result.ok ? `Add ${kind} track command accepted` : result.error ?? "Add track failed");
   }
 
@@ -202,13 +217,15 @@ export function EditTab({ previewUrl, mediaAssets, projectSettings, onImportMedi
     }
 
     const result = await executeCommand({ type: "delete_clip", clipId: selectedClip.id });
-    setTimeline((current) => ({
-      ...current,
-      tracks: current.tracks.map((track) => ({
-        ...track,
-        clips: track.clips.filter((clip) => clip.id !== selectedClip.id)
-      }))
-    }));
+    if (!applyEngineTimeline(result.data)) {
+      setTimeline((current) => ({
+        ...current,
+        tracks: current.tracks.map((track) => ({
+          ...track,
+          clips: track.clips.filter((clip) => clip.id !== selectedClip.id)
+        }))
+      }));
+    }
     setSelectedClipId("");
     setStatusMessage(result.ok ? "Delete command accepted" : result.error ?? "Delete failed");
   }
@@ -220,20 +237,22 @@ export function EditTab({ previewUrl, mediaAssets, projectSettings, onImportMedi
     }
 
     const result = await executeCommand({ type: "ripple_delete_clip", clipId: selectedClip.id, trackMode: "selected_track" });
-    const deletedDuration = selectedClip.outUs - selectedClip.inUs;
-    setTimeline((current) => ({
-      ...current,
-      tracks: current.tracks.map((track) =>
-        track.id === selectedClip.trackId
-          ? {
-              ...track,
-              clips: track.clips
-                .filter((clip) => clip.id !== selectedClip.id)
-                .map((clip) => (clip.startUs > selectedClip.startUs ? { ...clip, startUs: Math.max(0, clip.startUs - deletedDuration) } : clip))
-            }
-          : track
-      )
-    }));
+    if (!applyEngineTimeline(result.data)) {
+      const deletedDuration = selectedClip.outUs - selectedClip.inUs;
+      setTimeline((current) => ({
+        ...current,
+        tracks: current.tracks.map((track) =>
+          track.id === selectedClip.trackId
+            ? {
+                ...track,
+                clips: track.clips
+                  .filter((clip) => clip.id !== selectedClip.id)
+                  .map((clip) => (clip.startUs > selectedClip.startUs ? { ...clip, startUs: Math.max(0, clip.startUs - deletedDuration) } : clip))
+              }
+            : track
+        )
+      }));
+    }
     setSelectedClipId("");
     setStatusMessage(result.ok ? "Ripple delete command accepted" : result.error ?? "Ripple delete failed");
   }
@@ -270,13 +289,15 @@ export function EditTab({ previewUrl, mediaAssets, projectSettings, onImportMedi
       startUs: Math.max(0, selectedClip.startUs + direction * 100_000),
       snapping
     });
-    setTimeline((current) => ({
-      ...current,
-      tracks: current.tracks.map((track) => ({
-        ...track,
-        clips: track.clips.map((clip) => (clip.id === selectedClip.id ? { ...clip, startUs: Math.max(0, clip.startUs + direction * 100_000) } : clip))
-      }))
-    }));
+    if (!applyEngineTimeline(result.data)) {
+      setTimeline((current) => ({
+        ...current,
+        tracks: current.tracks.map((track) => ({
+          ...track,
+          clips: track.clips.map((clip) => (clip.id === selectedClip.id ? { ...clip, startUs: Math.max(0, clip.startUs + direction * 100_000) } : clip))
+        }))
+      }));
+    }
     setStatusMessage(result.ok ? "Nudge command accepted" : result.error ?? "Nudge failed");
   }
 
@@ -306,30 +327,31 @@ export function EditTab({ previewUrl, mediaAssets, projectSettings, onImportMedi
       startUs: nextStartUs,
       snapping
     });
+    if (!applyEngineTimeline(result.data)) {
+      setTimeline((current) => {
+        let movedClip = current.tracks.flatMap((track) => track.clips).find((item) => item.id === clipId);
+        if (!movedClip) {
+          return current;
+        }
 
-    setTimeline((current) => {
-      let movedClip = current.tracks.flatMap((track) => track.clips).find((item) => item.id === clipId);
-      if (!movedClip) {
-        return current;
-      }
-
-      movedClip = { ...movedClip, trackId: targetTrackId, startUs: nextStartUs };
-      return {
-        ...current,
-        durationUs: Math.max(current.durationUs, nextStartUs + (movedClip.outUs - movedClip.inUs) + 5_000_000),
-        tracks: current.tracks.map((track) =>
-          track.id === targetTrackId
-            ? {
-                ...track,
-                clips: [...track.clips.filter((item) => item.id !== clipId), movedClip].sort((left, right) => left.startUs - right.startUs)
-              }
-            : {
-                ...track,
-                clips: track.clips.filter((item) => item.id !== clipId)
-              }
-        )
-      };
-    });
+        movedClip = { ...movedClip, trackId: targetTrackId, startUs: nextStartUs };
+        return {
+          ...current,
+          durationUs: Math.max(current.durationUs, nextStartUs + (movedClip.outUs - movedClip.inUs) + 5_000_000),
+          tracks: current.tracks.map((track) =>
+            track.id === targetTrackId
+              ? {
+                  ...track,
+                  clips: [...track.clips.filter((item) => item.id !== clipId), movedClip].sort((left, right) => left.startUs - right.startUs)
+                }
+              : {
+                  ...track,
+                  clips: track.clips.filter((item) => item.id !== clipId)
+                }
+          )
+        };
+      });
+    }
     setSelectedClipId(clipId);
     setStatusMessage(result.ok ? "Moved clip" : result.error ?? "Move clip failed");
   }
@@ -366,15 +388,16 @@ export function EditTab({ previewUrl, mediaAssets, projectSettings, onImportMedi
       edge,
       timeUs: edge === "start" ? nextClip.startUs : nextClip.outUs
     });
-
-    setTimeline((current) => ({
-      ...current,
-      durationUs: Math.max(current.durationUs, nextClip.startUs + (nextClip.outUs - nextClip.inUs) + 5_000_000),
-      tracks: current.tracks.map((track) => ({
-        ...track,
-        clips: track.clips.map((item) => (item.id === clipId ? nextClip : item))
-      }))
-    }));
+    if (!applyEngineTimeline(result.data)) {
+      setTimeline((current) => ({
+        ...current,
+        durationUs: Math.max(current.durationUs, nextClip.startUs + (nextClip.outUs - nextClip.inUs) + 5_000_000),
+        tracks: current.tracks.map((track) => ({
+          ...track,
+          clips: track.clips.map((item) => (item.id === clipId ? nextClip : item))
+        }))
+      }));
+    }
     setSelectedClipId(clipId);
     setStatusMessage(result.ok ? "Trimmed clip" : result.error ?? "Trim failed");
   }
@@ -437,6 +460,7 @@ export function EditTab({ previewUrl, mediaAssets, projectSettings, onImportMedi
 
     void executeCommand({
       type: "add_clip",
+      clipId,
       mediaId: asset.id,
       trackId: targetTrack.id,
       startUs: nextStartUs,
@@ -445,23 +469,12 @@ export function EditTab({ previewUrl, mediaAssets, projectSettings, onImportMedi
     }).then((result) => {
       if (!result.ok) {
         setStatusMessage(result.error ?? "Add clip failed");
-      }
-    });
-
-    void getMediaDurationUs(asset, fallbackDurationUs).then((durationUs) => {
-      if (durationUs === fallbackDurationUs) {
         return;
       }
-
-      setTimeline((current) => ({
-        ...current,
-        durationUs: Math.max(current.durationUs, nextStartUs + durationUs + 5_000_000),
-        tracks: current.tracks.map((track) => ({
-          ...track,
-          clips: track.clips.map((clip) => (clip.id === clipId ? { ...clip, outUs: durationUs } : clip))
-        }))
-      }));
+      applyEngineTimeline(result.data);
     });
+
+    void getMediaDurationUs(asset, fallbackDurationUs);
   }
 
   async function importDroppedPaths(paths: string[]) {

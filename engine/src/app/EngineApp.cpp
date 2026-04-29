@@ -32,6 +32,30 @@ nlohmann::json EngineApp::handleRequest(const nlohmann::json& request) {
     return probeMedia(params);
   }
 
+  if (method == "media.index") {
+    return session_.mediaIndexJson();
+  }
+
+  if (method == "timeline.state") {
+    return session_.timelineJson();
+  }
+
+  if (method == "ai.proposals") {
+    return session_.proposalsJson();
+  }
+
+  if (method == "ai.proposal.generate") {
+    return generateProposal(params);
+  }
+
+  if (method == "ai.proposal.apply") {
+    return applyProposal(params);
+  }
+
+  if (method == "ai.proposal.reject") {
+    return rejectProposal(params);
+  }
+
   if (method == "preview.attach") {
     return previewController_.attach(params, gpuDetector_.detect());
   }
@@ -84,6 +108,7 @@ nlohmann::json EngineApp::status() const {
       {"appName", "AI Video Editor"},
       {"version", "0.1.0"},
       {"previewUrl", previewServer_.url()},
+      {"session", session_.sessionInfo()},
       {"ffmpeg", ffmpeg.toJson()},
       {"ffprobe", ffprobe.toJson()},
       {"gpu", gpu.toJson()},
@@ -97,7 +122,11 @@ nlohmann::json EngineApp::executeCommand(const nlohmann::json& params) {
     return result;
   }
 
-  return commandRegistry_.execute(params);
+  if (params.value("type", std::string{}) == "import_media") {
+    return session_.importMedia(params, ffprobeService_);
+  }
+
+  return session_.executeCommand(params);
 }
 
 nlohmann::json EngineApp::createProject(const nlohmann::json& params) {
@@ -119,6 +148,18 @@ nlohmann::json EngineApp::probeMedia(const nlohmann::json& params) const {
   }
 
   return ffprobeService_.probe(path).toJson();
+}
+
+nlohmann::json EngineApp::generateProposal(const nlohmann::json& params) {
+  return session_.generateProposal(params);
+}
+
+nlohmann::json EngineApp::applyProposal(const nlohmann::json& params) {
+  return session_.applyProposal(params);
+}
+
+nlohmann::json EngineApp::rejectProposal(const nlohmann::json& params) {
+  return session_.rejectProposal(params);
 }
 
 }  // namespace ai_editor

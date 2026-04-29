@@ -4,9 +4,27 @@
 #include "timeline/TimelineService.hpp"
 
 #include <cassert>
+#include <filesystem>
 #include <iostream>
+#include <stdexcept>
 
-int main() {
+#undef assert
+#define assert(expr)                                                                                                    \
+  do {                                                                                                                  \
+    if (!(expr)) {                                                                                                      \
+      throw std::runtime_error(std::string("assertion failed: ") + #expr);                                             \
+    }                                                                                                                   \
+  } while (false)
+
+int runTests() {
+  const auto testDb = std::filesystem::absolute("engine-session-test.db");
+  std::filesystem::remove(testDb);
+#ifdef _WIN32
+  _putenv_s("AI_VIDEO_SESSION_DB", testDb.string().c_str());
+#else
+  setenv("AI_VIDEO_SESSION_DB", testDb.string().c_str(), 1);
+#endif
+
   ai_editor::EngineApp app;
   const auto status = app.status();
   assert(status.at("appName") == "AI Video Editor");
@@ -107,6 +125,75 @@ int main() {
   const auto av1Errors = ai_editor::ExportEngine::validate(request, gpu);
   assert(!av1Errors.empty());
 
+  const auto importResult = app.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 2},
+      {"method", "command.execute"},
+      {"params",
+       {
+           {"type", "import_media"},
+           {"paths", {"sample-a.mp4", "sample-b.mp4"}},
+       }},
+  });
+  assert(importResult.at("ok") == true);
+  assert(importResult.at("data").at("media").size() == 2);
+  const auto mediaId = importResult.at("data").at("media").at(0).at("id").get<std::string>();
+  assert(importResult.at("data").at("media").at(0).at("intelligence").at("transcript").at("status") == "placeholder");
+  assert(importResult.at("data").at("media").at(0).at("intelligence").at("sceneCuts").at("status") == "placeholder");
+
+  const auto addClipResult = app.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 3},
+      {"method", "command.execute"},
+      {"params",
+       {
+           {"type", "add_clip"},
+           {"mediaId", mediaId},
+           {"trackId", "v1"},
+           {"startUs", 0},
+           {"inUs", 0},
+           {"outUs", 5000000},
+       }},
+  });
+  assert(addClipResult.at("ok") == true);
+  const auto timelineState = app.handleRequest({{"jsonrpc", "2.0"}, {"id", 4}, {"method", "timeline.state"}});
+  assert(timelineState.at("tracks").at(1).at("clips").size() == 1);
+
+  ai_editor::EngineApp reloadedApp;
+  const auto reloadedTimeline = reloadedApp.handleRequest({{"jsonrpc", "2.0"}, {"id", 5}, {"method", "timeline.state"}});
+  assert(reloadedTimeline.at("tracks").at(1).at("clips").size() == 1);
+
+  const auto proposal = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 6},
+      {"method", "ai.proposal.generate"},
+      {"params",
+       {
+           {"goal", "make a 10 second YouTube intro cut"},
+           {"mediaIds", {mediaId}},
+       }},
+  });
+  assert(proposal.at("status") == "pending");
+  assert(proposal.at("commands").is_array());
+  assert(!proposal.at("commands").empty());
+
+  const auto appliedProposal = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 7},
+      {"method", "ai.proposal.apply"},
+      {"params", {{"proposalId", proposal.at("id")}}},
+  });
+  assert(appliedProposal.at("status") == "applied");
+
   std::cout << "engine core tests passed\n";
   return 0;
+}
+
+int main() {
+  try {
+    return runTests();
+  } catch (const std::exception& error) {
+    std::cerr << "engine core tests failed: " << error.what() << '\n';
+    return 1;
+  }
 }

@@ -1,6 +1,11 @@
 # Dependencies
 node_modules/
 .pnpm-store/
+.cargo-home/
+.vcpkg/
+.vcpkg-cache/
+.vcpkg-downloads/
+.tmp/
 
 # Frontend builds
 dist/

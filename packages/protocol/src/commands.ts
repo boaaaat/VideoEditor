@@ -38,6 +38,7 @@ export interface DeleteTrackCommand {
 
 export interface AddClipCommand {
   type: "add_clip";
+  clipId?: string;
   mediaId: string;
   trackId: string;
   startUs: number;

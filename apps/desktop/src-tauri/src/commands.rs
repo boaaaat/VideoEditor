@@ -57,7 +57,10 @@ pub fn preview_attach(
 }
 
 #[tauri::command]
-pub fn preview_resize(state: State<'_, AppState>, rect: PreviewSurfaceRect) -> Result<Value, String> {
+pub fn preview_resize(
+    state: State<'_, AppState>,
+    rect: PreviewSurfaceRect,
+) -> Result<Value, String> {
     send_engine_request(
         state,
         "preview.resize".to_string(),
@@ -270,7 +273,8 @@ fn parse_media_metadata(path: &str, root: &Value) -> Value {
     }
 
     if duration_us <= 0 {
-        duration_us = parse_duration_us(root.get("format").and_then(|format| format.get("duration")));
+        duration_us =
+            parse_duration_us(root.get("format").and_then(|format| format.get("duration")));
     }
 
     json!({

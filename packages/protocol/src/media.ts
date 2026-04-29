@@ -18,6 +18,35 @@ export interface MediaMetadata {
   hasAudio: boolean;
 }
 
+export interface MediaIntelligence {
+  summary: {
+    durationUs: number;
+    codec: string;
+    resolution: {
+      width: number;
+      height: number;
+    };
+    fps: number;
+    hdr: boolean;
+    hasAudio: boolean;
+  };
+  thumbnails: {
+    status: "ready-on-demand" | "not-applicable" | "placeholder";
+  };
+  previewFrames: {
+    status: "ready-on-demand" | "not-applicable" | "placeholder";
+  };
+  transcript: {
+    status: "placeholder" | "pending" | "ready" | "failed";
+    text: string;
+    language: string;
+  };
+  sceneCuts: {
+    status: "placeholder" | "pending" | "ready" | "failed";
+    cuts: number[];
+  };
+}
+
 export interface ProjectSettings {
   resolution: ExportResolution;
   width: number;

@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "powershell -ExecutionPolicy Bypass -File scripts/dev-desktop.ps1",
     "build": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
-    "test": "corepack pnpm --filter @ai-video-editor/protocol test && corepack pnpm engine:test",
+    "test": "node scripts/check-playback-config.mjs && corepack pnpm --filter @ai-video-editor/protocol test && corepack pnpm engine:test",
     "typecheck": "corepack pnpm --filter @ai-video-editor/protocol typecheck && corepack pnpm --filter @ai-video-editor/desktop typecheck",
     "engine:configure": "powershell -ExecutionPolicy Bypass -File scripts/configure-engine.ps1",
     "engine:build": "powershell -ExecutionPolicy Bypass -File scripts/build-engine.ps1",

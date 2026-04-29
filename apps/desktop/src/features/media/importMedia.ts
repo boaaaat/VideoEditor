@@ -8,6 +8,10 @@ export interface ImportMediaResult {
   media: MediaAsset[];
 }
 
+interface ImportMediaCommandData {
+  media?: MediaAsset[];
+}
+
 export async function importMediaFiles(): Promise<ImportMediaResult | null> {
   if (!("__TAURI_INTERNALS__" in window)) {
     return importMediaPaths(["browser-preview.mp4"]);
@@ -38,12 +42,15 @@ export async function importMediaPaths(paths: string[]): Promise<ImportMediaResu
       copyToProject: false
   });
 
-  const media = await Promise.all(
-    supportedPaths.map(async (path) => {
-      const metadata = await probeMediaPath(path).catch(() => undefined);
-      return pathToMediaAsset(path, metadata);
-    })
-  );
+  const data = command.data as ImportMediaCommandData | undefined;
+  const media = Array.isArray(data?.media)
+    ? data.media
+    : await Promise.all(
+        supportedPaths.map(async (path) => {
+          const metadata = await probeMediaPath(path).catch(() => undefined);
+          return pathToMediaAsset(path, metadata);
+        })
+      );
 
   return {
     command,

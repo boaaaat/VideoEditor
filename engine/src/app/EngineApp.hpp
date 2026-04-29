@@ -1,5 +1,6 @@
 #pragma once
 
+#include "app/EditorSession.hpp"
 #include "commands/CommandRegistry.hpp"
 #include "ipc/PreviewServer.hpp"
 #include "media/FfprobeService.hpp"
@@ -25,6 +26,9 @@ class EngineApp {
   nlohmann::json executeCommand(const nlohmann::json& params);
   nlohmann::json createProject(const nlohmann::json& params);
   nlohmann::json probeMedia(const nlohmann::json& params) const;
+  nlohmann::json generateProposal(const nlohmann::json& params);
+  nlohmann::json applyProposal(const nlohmann::json& params);
+  nlohmann::json rejectProposal(const nlohmann::json& params);
 
   FfmpegLocator ffmpegLocator_;
   GpuDetector gpuDetector_;
@@ -35,6 +39,7 @@ class EngineApp {
   ProjectManager projectManager_;
   MediaImporter mediaImporter_;
   CommandRegistry commandRegistry_;
+  EditorSession session_;
 };
 
 }  // namespace ai_editor

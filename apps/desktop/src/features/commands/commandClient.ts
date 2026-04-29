@@ -1,4 +1,4 @@
-import type { CommandResult, EditorCommand, EngineStatus, ExportStatus, MediaMetadata, PreviewState } from "@ai-video-editor/protocol";
+import type { AiEditProposal, CommandResult, EditorCommand, EngineStatus, ExportStatus, MediaMetadata, PreviewState, Timeline } from "@ai-video-editor/protocol";
 
 type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -43,6 +43,20 @@ const browserPreviewState: PreviewState = {
   hdrOutputAvailable: false
 };
 
+const browserTimeline: Timeline = {
+  id: "timeline_main",
+  name: "Main Timeline",
+  fps: 30,
+  durationUs: 60_000_000,
+  tracks: [
+    { id: "v2", name: "Video 2", kind: "video", index: 0, locked: false, muted: false, visible: true, clips: [] },
+    { id: "v1", name: "Video 1", kind: "video", index: 1, locked: false, muted: false, visible: true, clips: [] },
+    { id: "a1", name: "Audio 1", kind: "audio", index: 2, locked: false, muted: false, visible: true, clips: [] }
+  ]
+};
+
+let browserProposals: AiEditProposal[] = [];
+
 async function getInvoke(): Promise<TauriInvoke | null> {
   if (!("__TAURI_INTERNALS__" in window)) {
     return null;
@@ -62,6 +76,38 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
 
     if (method === "command.execute") {
       return { ok: true, commandId: `browser-${Date.now()}` } as T;
+    }
+
+    if (method === "media.index") {
+      return { media: [] } as T;
+    }
+
+    if (method === "timeline.state") {
+      return browserTimeline as T;
+    }
+
+    if (method === "ai.proposals") {
+      return { proposals: browserProposals } as T;
+    }
+
+    if (method === "ai.proposal.generate") {
+      const proposal: AiEditProposal = {
+        id: `browser-proposal-${Date.now()}`,
+        goal: (params as { goal?: string } | undefined)?.goal ?? "make a rough cut",
+        status: "pending",
+        explanation: "Browser preview created a placeholder proposal. Launch Tauri for engine-backed proposals.",
+        commands: [],
+        createdAt: new Date().toISOString()
+      };
+      browserProposals = [proposal, ...browserProposals];
+      return proposal as T;
+    }
+
+    if (method === "ai.proposal.apply" || method === "ai.proposal.reject") {
+      const proposalId = (params as { proposalId?: string } | undefined)?.proposalId ?? "";
+      const status = method === "ai.proposal.apply" ? "applied" : "rejected";
+      browserProposals = browserProposals.map((proposal) => (proposal.id === proposalId ? { ...proposal, status } : proposal));
+      return (browserProposals.find((proposal) => proposal.id === proposalId) ?? null) as T;
     }
 
     if (method === "media.probe") {

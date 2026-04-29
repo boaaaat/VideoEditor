@@ -11,16 +11,17 @@ import {
   Puzzle,
   WandSparkles
 } from "lucide-react";
-import type { EngineStatus, MediaMetadata, ProjectSettings } from "@ai-video-editor/protocol";
+import type { AiEditProposal, EngineStatus, MediaMetadata, ProjectSettings, Timeline } from "@ai-video-editor/protocol";
 import { Tabs, type TabItem } from "../components/Tabs";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
-import { getEngineStatus } from "../features/commands/commandClient";
+import { engineRpc, getEngineStatus } from "../features/commands/commandClient";
 import { isTypingTarget, shortcutDefinitions } from "../features/commands/shortcuts";
 import { importMediaFiles, type ImportMediaResult } from "../features/media/importMedia";
 import type { MediaAsset } from "../features/media/mediaTypes";
 import { loadRecentProjects, saveRecentProject, type ActiveProject } from "../features/projects/projectActions";
 import { defaultProjectSettings, seedProjectSettingsFromMetadata } from "../features/settings";
+import { starterTimeline } from "../features/timeline/mockTimeline";
 import { TopBar } from "./topbar/TopBar";
 import { HomeTab } from "./tabs/HomeTab";
 import { EditTab } from "./tabs/EditTab";
@@ -64,6 +65,8 @@ export function AppShell() {
   const [project, setProject] = useState<ActiveProject>({ name: "Untitled Project" });
   const [recentProjects, setRecentProjects] = useState<ActiveProject[]>([]);
   const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
+  const [timeline, setTimeline] = useState<Timeline>(starterTimeline);
+  const [aiProposals, setAiProposals] = useState<AiEditProposal[]>([]);
   const [projectSettings, setProjectSettings] = useState<ProjectSettings>(defaultProjectSettings);
   const [settingsProposal, setSettingsProposal] = useState<ProjectSettingsProposal | null>(null);
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
@@ -75,7 +78,10 @@ export function AppShell() {
     setRecentProjects(loadRecentProjects());
 
     getEngineStatus()
-      .then(setEngineStatus)
+      .then((status) => {
+        setEngineStatus(status);
+        void refreshEngineState();
+      })
       .catch((error) => {
         setStatusMessage(error instanceof Error ? error.message : "Engine status failed");
       });
@@ -124,6 +130,8 @@ export function AppShell() {
     setProject(nextProject);
     setRecentProjects(saveRecentProject(nextProject));
     setMediaAssets([]);
+    setTimeline(starterTimeline);
+    setAiProposals([]);
     setProjectSettings(defaultProjectSettings);
     setSettingsProposal(null);
     setStatusMessage(`Project open: ${nextProject.name}`);
@@ -146,6 +154,7 @@ export function AppShell() {
       const newAssets = result.media.filter((asset) => !existingPaths.has(asset.path));
       return [...existing, ...newAssets];
     });
+    applyTimelineFromCommandData(result.command.data);
     const importedVideo = result.media.find((asset) => asset.kind === "video" && asset.metadata);
     if (importedVideo?.metadata) {
       const proposal = createProjectSettingsProposal(importedVideo, projectSettings);
@@ -171,6 +180,44 @@ export function AppShell() {
     applyImportedMedia(await importMediaFiles());
   }
 
+  async function refreshEngineState() {
+    const [mediaIndex, nextTimeline, proposalIndex] = await Promise.all([
+      engineRpc<{ media: MediaAsset[] }>("media.index"),
+      engineRpc<Timeline>("timeline.state"),
+      engineRpc<{ proposals: AiEditProposal[] }>("ai.proposals")
+    ]);
+    setMediaAssets(mediaIndex.media ?? []);
+    setTimeline(nextTimeline);
+    setAiProposals(proposalIndex.proposals ?? []);
+  }
+
+  function applyTimelineFromCommandData(data: unknown) {
+    const maybeTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
+    if (maybeTimeline?.tracks) {
+      setTimeline(maybeTimeline);
+    }
+  }
+
+  async function generateRoughCutProposal(goal: string, mediaIds: string[]) {
+    const proposal = await engineRpc<AiEditProposal>("ai.proposal.generate", { goal, mediaIds });
+    setAiProposals((current) => [proposal, ...current.filter((item) => item.id !== proposal.id)]);
+    setStatusMessage("Rough cut proposal generated");
+    setActiveTab("future-ai");
+  }
+
+  async function applyAiProposal(proposalId: string) {
+    await engineRpc<AiEditProposal>("ai.proposal.apply", { proposalId });
+    await refreshEngineState();
+    setStatusMessage("AI proposal applied to timeline");
+    setActiveTab("edit");
+  }
+
+  async function rejectAiProposal(proposalId: string) {
+    const proposal = await engineRpc<AiEditProposal>("ai.proposal.reject", { proposalId });
+    setAiProposals((current) => current.map((item) => (item.id === proposal.id ? proposal : item)));
+    setStatusMessage("AI proposal rejected");
+  }
+
   const activeContent = useMemo(() => {
     switch (activeTab) {
       case "home":
@@ -180,6 +227,8 @@ export function AppShell() {
           <EditTab
             previewUrl={engineStatus?.previewUrl}
             mediaAssets={mediaAssets}
+            timeline={timeline}
+            setTimeline={setTimeline}
             projectSettings={projectSettings}
             onImportMedia={handleImportMedia}
             onImportMediaResult={applyImportedMedia}
@@ -210,11 +259,19 @@ export function AppShell() {
           />
         );
       case "future-ai":
-        return <FutureAiTab />;
+        return (
+          <FutureAiTab
+            mediaAssets={mediaAssets}
+            proposals={aiProposals}
+            onGenerateProposal={generateRoughCutProposal}
+            onApplyProposal={applyAiProposal}
+            onRejectProposal={rejectAiProposal}
+          />
+        );
       default:
         return null;
     }
-  }, [activeTab, engineStatus, mediaAssets, projectSettings, recentProjects]);
+  }, [activeTab, aiProposals, engineStatus, mediaAssets, projectSettings, recentProjects, timeline]);
 
   return (
     <main className="app-shell">

@@ -1,4 +1,4 @@
-import type { MediaMetadata } from "@ai-video-editor/protocol";
+import type { MediaIntelligence, MediaMetadata } from "@ai-video-editor/protocol";
 
 export type MediaKind = "video" | "audio";
 
@@ -10,6 +10,7 @@ export interface MediaAsset {
   extension: string;
   importedAt: string;
   metadata?: MediaMetadata;
+  intelligence?: MediaIntelligence;
 }
 
 export const supportedMediaExtensions = ["mp4", "mov", "mkv", "mp3"] as const;
