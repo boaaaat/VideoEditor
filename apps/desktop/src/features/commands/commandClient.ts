@@ -96,6 +96,10 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
       return browserTimeline as T;
     }
 
+    if (method === "project.reset") {
+      return {} as T;
+    }
+
     if (method === "ai.proposals") {
       return { proposals: browserProposals } as T;
     }

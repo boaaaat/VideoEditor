@@ -28,6 +28,10 @@ nlohmann::json EngineApp::handleRequest(const nlohmann::json& request) {
     return createProject(params);
   }
 
+  if (method == "project.reset") {
+    return resetProjectState(params);
+  }
+
   if (method == "media.probe") {
     return probeMedia(params);
   }
@@ -143,6 +147,15 @@ nlohmann::json EngineApp::createProject(const nlohmann::json& params) {
 
   const auto project = projectManager_.createProject(path, name);
   return project.toJson();
+}
+
+nlohmann::json EngineApp::resetProjectState(const nlohmann::json& params) {
+  session_.replaceState(params);
+  return {
+      {"mediaIndex", session_.mediaIndexJson()},
+      {"timeline", session_.timelineJson()},
+      {"proposals", session_.proposalsJson()},
+  };
 }
 
 nlohmann::json EngineApp::probeMedia(const nlohmann::json& params) const {

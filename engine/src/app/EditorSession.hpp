@@ -120,6 +120,42 @@ class EditorSession {
     return {{"proposals", rows}};
   }
 
+  void replaceState(const nlohmann::json& state) {
+    media_.clear();
+    timeline_ = Timeline{};
+    proposals_.clear();
+
+    if (state.contains("mediaAssets") && state.at("mediaAssets").is_array()) {
+      for (const auto& item : state.at("mediaAssets")) {
+        auto media = mediaFromJson(item);
+        if (!media.id.empty()) {
+          media_.push_back(media);
+        }
+      }
+    }
+
+    if (state.contains("timeline") && state.at("timeline").is_object()) {
+      timeline_ = timelineFromJson(state.at("timeline"));
+    }
+    if (timeline_.tracks.empty()) {
+      timeline_.tracks = defaultTracks();
+    }
+
+    if (state.contains("aiProposals") && state.at("aiProposals").is_array()) {
+      for (const auto& item : state.at("aiProposals")) {
+        auto proposal = proposalFromJson(item);
+        if (!proposal.id.empty()) {
+          proposals_.push_back(proposal);
+        }
+      }
+    }
+
+    recalculateTimelineDuration();
+    saveMedia();
+    saveTimeline();
+    saveProposals();
+  }
+
   nlohmann::json importMedia(const nlohmann::json& command, const FfprobeService& ffprobeService) {
     if (!command.contains("paths") || !command.at("paths").is_array()) {
       throw std::runtime_error("import_media requires paths");
@@ -307,6 +343,108 @@ class EditorSession {
   }
 
  private:
+  static IndexedMedia mediaFromJson(const nlohmann::json& value) {
+    IndexedMedia media;
+    media.id = value.value("id", std::string{});
+    media.path = value.value("path", std::string{});
+    media.name = value.value("name", fileName(media.path));
+    media.kind = value.value("kind", std::string{"video"});
+    media.extension = value.value("extension", extensionForPath(media.path));
+    media.importedAt = value.value("importedAt", nowStamp());
+    media.metadata = value.value("metadata", nlohmann::json::object());
+    media.intelligence = value.value("intelligence", intelligenceFor(media));
+    return media;
+  }
+
+  static Timeline timelineFromJson(const nlohmann::json& value) {
+    Timeline timeline;
+    timeline.id = value.value("id", timeline.id);
+    timeline.name = value.value("name", timeline.name);
+    timeline.fps = value.value("fps", timeline.fps);
+    timeline.durationUs = value.value("durationUs", timeline.durationUs);
+
+    if (value.contains("tracks") && value.at("tracks").is_array()) {
+      for (const auto& item : value.at("tracks")) {
+        Track track;
+        track.id = item.value("id", std::string{});
+        track.name = item.value("name", track.id);
+        track.kind = item.value("kind", std::string{"video"}) == "audio" ? TrackKind::Audio : TrackKind::Video;
+        track.index = item.value("index", static_cast<int>(timeline.tracks.size()));
+        track.locked = item.value("locked", false);
+        track.muted = item.value("muted", false);
+        track.visible = item.value("visible", true);
+
+        if (item.contains("clips") && item.at("clips").is_array()) {
+          for (const auto& clipItem : item.at("clips")) {
+            auto clip = clipFromJson(clipItem, track.id);
+            if (!clip.id.empty() && !clip.mediaId.empty()) {
+              track.clips.push_back(clip);
+            }
+          }
+          sortTrack(track);
+        }
+
+        if (!track.id.empty()) {
+          timeline.tracks.push_back(track);
+        }
+      }
+    }
+
+    return timeline;
+  }
+
+  static Clip clipFromJson(const nlohmann::json& value, const std::string& fallbackTrackId) {
+    Clip clip;
+    clip.id = value.value("id", std::string{});
+    clip.mediaId = value.value("mediaId", std::string{});
+    clip.trackId = value.value("trackId", fallbackTrackId);
+    clip.startUs = value.value("startUs", 0LL);
+    clip.inUs = value.value("inUs", 0LL);
+    clip.outUs = value.value("outUs", clip.inUs + 1'000'000LL);
+
+    const auto color = value.contains("color") ? value.at("color") : defaultColorJson();
+    clip.color.brightness = color.value("brightness", 0.0);
+    clip.color.contrast = color.value("contrast", 0.0);
+    clip.color.saturation = color.value("saturation", 1.0);
+    clip.color.temperature = color.value("temperature", 0.0);
+    clip.color.tint = color.value("tint", 0.0);
+    clip.color.lutId = color.value("lutId", std::string{});
+    clip.color.lutStrength = color.value("lutStrength", 1.0);
+
+    if (value.contains("lut") && value.at("lut").is_object()) {
+      clip.color.lutId = value.at("lut").value("lutId", clip.color.lutId);
+      clip.color.lutStrength = value.at("lut").value("strength", clip.color.lutStrength);
+    }
+
+    const auto audio = value.contains("audio") ? value.at("audio") : defaultAudioJson();
+    clip.audioGainDb = audio.value("gainDb", 0.0);
+    clip.audioMuted = audio.value("muted", false);
+    clip.audioFadeInUs = audio.value("fadeInUs", 0LL);
+    clip.audioFadeOutUs = audio.value("fadeOutUs", 0LL);
+    clip.audioNormalize = audio.value("normalize", false);
+    clip.audioCleanup = audio.value("cleanup", false);
+
+    if (value.contains("transform")) {
+      clip.transform = transformFromJson(value.at("transform"));
+    }
+    if (value.contains("effects")) {
+      clip.effects = effectsFromJson(value.at("effects"));
+    }
+
+    return clip;
+  }
+
+  static AiEditProposal proposalFromJson(const nlohmann::json& value) {
+    AiEditProposal proposal;
+    proposal.id = value.value("id", std::string{});
+    proposal.goal = value.value("goal", std::string{});
+    proposal.status = value.value("status", std::string{"pending"});
+    proposal.explanation = value.value("explanation", std::string{});
+    proposal.commands = value.value("commands", nlohmann::json::array());
+    proposal.createdAt = value.value("createdAt", nowStamp());
+    return proposal;
+  }
+
   static std::filesystem::path resolveDatabasePath() {
     if (const auto* value = std::getenv("AI_VIDEO_SESSION_DB")) {
       if (std::string(value).size() > 0) {

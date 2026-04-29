@@ -352,6 +352,36 @@ export function AppShell() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [aiProposals, autosaveState, mediaAssets, projectSettings, redoStack, shortcuts, timeline, undoStack]);
 
+  async function syncEngineProjectState(
+    nextMediaAssets: MediaAsset[],
+    nextTimeline: Timeline,
+    nextProposals: AiEditProposal[],
+    reason: string
+  ) {
+    try {
+      await engineRpc("project.reset", {
+        mediaAssets: nextMediaAssets,
+        timeline: nextTimeline,
+        aiProposals: nextProposals
+      });
+      recordLog("Engine project state reset", {
+        source: "engine",
+        details: {
+          reason,
+          mediaCount: nextMediaAssets.length,
+          trackCount: nextTimeline.tracks.length,
+          proposalCount: nextProposals.length
+        }
+      }, false);
+    } catch (error) {
+      logStatus(error instanceof Error ? error.message : "Engine project state reset failed", {
+        level: "error",
+        source: "engine",
+        details: { reason }
+      });
+    }
+  }
+
   async function applyProject(nextProject: ActiveProject) {
     if (!nextProject.path) {
       logStatus("Choose or create a project folder before editing", { level: "warning", source: "project", details: { project: nextProject } });
@@ -373,6 +403,12 @@ export function AppShell() {
       const snapshot = await loadProjectSnapshot(openedProject);
       if (snapshot) {
         restoreProjectSnapshot(snapshot, openedProject);
+        await syncEngineProjectState(
+          snapshot.mediaAssets ?? [],
+          snapshot.timeline ?? starterTimeline,
+          snapshot.aiProposals ?? [],
+          "project restore"
+        );
         logStatus(`Project restored: ${openedProject.name}`, {
           level: "success",
           source: "project",
@@ -405,6 +441,7 @@ export function AppShell() {
         void saveProjectSnapshot(blankProject, blankSnapshot).catch((error) => {
           logStatus(error instanceof Error ? error.message : "Initial project snapshot save failed", { level: "error", source: "project" });
         });
+        await syncEngineProjectState([], starterTimeline, [], "blank project open");
         logStatus(`Project open: ${openedProject.name}`, {
           source: "project",
           details: { path: openedProject.path, manifestPath: openedProject.manifestPath, restored: false }
@@ -419,6 +456,7 @@ export function AppShell() {
       lastSavedStateRef.current = serializeProjectState(defaultProjectSettings, [], starterTimeline, []);
       resetCommandHistory(openedProject, defaultProjectSettings, [], starterTimeline, []);
       setProjectDirty(false);
+      await syncEngineProjectState([], starterTimeline, [], "project restore failure");
       logStatus(error instanceof Error ? error.message : "Project restore failed", { level: "error", source: "project", details: { project: openedProject } });
     } finally {
       window.setTimeout(() => {
@@ -441,7 +479,7 @@ export function AppShell() {
     const existingPaths = new Set(mediaAssets.map((asset) => asset.path));
     const newAssets = result.media.filter((asset) => !existingPaths.has(asset.path));
     const nextMediaAssets = [...mediaAssets, ...newAssets];
-    const nextTimeline = timelineFromCommandData(result.command.data) ?? timeline;
+    const nextTimeline = timeline;
 
     setMediaAssets(nextMediaAssets);
     setTimeline(nextTimeline);
@@ -491,9 +529,9 @@ export function AppShell() {
 
   function removeMediaAsset(assetId: string, data?: unknown) {
     const resultData = data as { mediaIndex?: { media?: MediaAsset[] }; timeline?: Timeline } | undefined;
-    const nextMediaAssets = Array.isArray(resultData?.mediaIndex?.media) ? resultData.mediaIndex.media : mediaAssets.filter((asset) => asset.id !== assetId);
+    const nextMediaAssets = mediaAssets.filter((asset) => asset.id !== assetId);
     const nextTimeline = resultData?.timeline?.tracks
-      ? resultData.timeline
+      ? sanitizeTimelineForMedia(resultData.timeline, nextMediaAssets)
       : {
           ...timeline,
           tracks: timeline.tracks.map((track) => ({
@@ -582,6 +620,17 @@ export function AppShell() {
   function timelineFromCommandData(data: unknown) {
     const maybeTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
     return maybeTimeline?.tracks ? maybeTimeline : null;
+  }
+
+  function sanitizeTimelineForMedia(nextTimeline: Timeline, nextMediaAssets: MediaAsset[]) {
+    const mediaIds = new Set(nextMediaAssets.map((asset) => asset.id));
+    return {
+      ...nextTimeline,
+      tracks: nextTimeline.tracks.map((track) => ({
+        ...track,
+        clips: track.clips.filter((clip) => mediaIds.has(clip.mediaId))
+      }))
+    };
   }
 
   async function generateRoughCutProposal(goal: string, mediaIds: string[]) {

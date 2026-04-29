@@ -268,6 +268,33 @@ int runTests() {
   });
   assert(appliedProposal.at("status") == "applied");
 
+  const auto resetResult = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 11},
+      {"method", "project.reset"},
+      {"params",
+       {
+           {"mediaAssets", nlohmann::json::array()},
+           {"aiProposals", nlohmann::json::array()},
+           {"timeline",
+            {
+                {"id", "timeline_main"},
+                {"name", "Main Timeline"},
+                {"fps", 30},
+                {"durationUs", 10000000},
+                {"tracks",
+                 {
+                     {{"id", "v2"}, {"name", "Video 2"}, {"kind", "video"}, {"index", 0}, {"locked", false}, {"muted", false}, {"visible", true}, {"clips", nlohmann::json::array()}},
+                     {{"id", "v1"}, {"name", "Video 1"}, {"kind", "video"}, {"index", 1}, {"locked", false}, {"muted", false}, {"visible", true}, {"clips", nlohmann::json::array()}},
+                     {{"id", "a1"}, {"name", "Audio 1"}, {"kind", "audio"}, {"index", 2}, {"locked", false}, {"muted", false}, {"visible", true}, {"clips", nlohmann::json::array()}},
+                 }},
+            }},
+       }},
+  });
+  assert(resetResult.at("mediaIndex").at("media").empty());
+  assert(resetResult.at("timeline").at("tracks").at(1).at("clips").empty());
+  assert(resetResult.at("proposals").at("proposals").empty());
+
   std::cout << "engine core tests passed\n";
   return 0;
 }

@@ -21,6 +21,7 @@ apps/desktop/src-tauri/gen/
 engine/build/
 engine/out/
 CMakeUserPresets.json
+engine-session-test.db
 
 # Local tools and generated media
 tools/ffmpeg/bin/

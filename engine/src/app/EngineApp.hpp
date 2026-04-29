@@ -25,6 +25,7 @@ class EngineApp {
  private:
   nlohmann::json executeCommand(const nlohmann::json& params);
   nlohmann::json createProject(const nlohmann::json& params);
+  nlohmann::json resetProjectState(const nlohmann::json& params);
   nlohmann::json probeMedia(const nlohmann::json& params) const;
   nlohmann::json generateProposal(const nlohmann::json& params);
   nlohmann::json applyProposal(const nlohmann::json& params);
