@@ -35,3 +35,12 @@ Every edit goes through a command. The command registry is the shared execution 
 ## Undo and Redo
 
 Commands are recorded by `CommandHistory`. Reversible commands should store enough before/after data for undo. Future AI auto-accept modes must create a restore point before applying commands.
+
+The desktop UI also keeps a bounded read-model snapshot history so undo/redo works for the current editor surface while engine-side command history matures. Each media, timeline, project settings, and AI proposal state change records the previous visible state. Undo and redo restore those snapshots, mark the project dirty, and are saved through the normal project snapshot flow.
+
+Current UI-backed undo/redo covers:
+
+- adding, deleting, moving, trimming, splitting, nudging, and ripple-deleting clips
+- removing media from the bin and restoring linked timeline clips through undo
+- project settings changes
+- AI proposal apply/reject state changes

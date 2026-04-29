@@ -33,7 +33,7 @@ import {
   ZoomIn,
   ZoomOut
 } from "lucide-react";
-import type { PreviewState, ProjectSettings, Timeline, TimelineClip } from "@ai-video-editor/protocol";
+import type { CommandResult, EditorCommand, PreviewState, ProjectSettings, Timeline, TimelineClip } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 import { IconButton } from "../../components/IconButton";
@@ -41,6 +41,7 @@ import { Panel } from "../../components/Panel";
 import { Toggle } from "../../components/Toggle";
 import { executeCommand } from "../../features/commands/commandClient";
 import { isTypingTarget } from "../../features/commands/shortcuts";
+import type { LogStatus } from "../../features/logging/appLog";
 import { importMediaPaths, type ImportMediaResult } from "../../features/media/importMedia";
 import {
   getMediaDurationUs,
@@ -83,7 +84,7 @@ interface EditTabProps {
   onImportMedia: () => Promise<void>;
   onImportMediaResult: (result: ImportMediaResult | null) => void;
   onRemoveMediaAsset: (assetId: string, data?: unknown) => void;
-  setStatusMessage: (message: string) => void;
+  setStatusMessage: LogStatus;
 }
 
 interface ClipInteraction {
@@ -184,17 +185,27 @@ export function EditTab({
     return track?.locked ? track.name : "";
   }
 
+  async function runCommand(command: EditorCommand, fallbackError = "Command failed"): Promise<CommandResult> {
+    try {
+      return await executeCommand(command);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : fallbackError;
+      setStatusMessage(message, { level: "error" });
+      return { ok: false, error: message };
+    }
+  }
+
   async function splitAtPlayhead(targetClip?: TimelineClip) {
     const clip = targetClip ?? selectedClip;
     if (clip) {
       const lockedTrackName = lockedTrackNameForClip(clip);
       if (lockedTrackName) {
-        setStatusMessage(`${lockedTrackName} is locked`);
+        setStatusMessage(`${lockedTrackName} is locked`, { level: "warning" });
         return;
       }
     }
 
-    const result = await executeCommand({ type: "split_clip", clipId: targetClip?.id, playheadUs });
+    const result = await runCommand({ type: "split_clip", clipId: targetClip?.id, playheadUs }, "Split failed");
     const usedEngineTimeline = applyEngineTimeline(result.data);
     if (!usedEngineTimeline && clip && playheadUs > clip.startUs && playheadUs < clip.startUs + (clip.outUs - clip.inUs)) {
       const firstOutUs = clip.inUs + (playheadUs - clip.startUs);
@@ -221,11 +232,11 @@ export function EditTab({
       setSelectedClipId(secondClip.id);
     }
 
-    setStatusMessage(result.ok ? "Split command accepted" : result.error ?? "Split failed");
+    setStatusMessage(result.ok ? "Split command accepted" : result.error ?? "Split failed", { level: result.ok ? "success" : "error" });
   }
 
   async function addTrack(kind: "video" | "audio") {
-    const result = await executeCommand({ type: "add_track", kind });
+    const result = await runCommand({ type: "add_track", kind }, "Add track failed");
     if (!applyEngineTimeline(result.data)) {
       setTimeline((current) => {
         const trackCount = current.tracks.filter((track) => track.kind === kind).length + 1;
@@ -246,30 +257,34 @@ export function EditTab({
         };
       });
     }
-    setStatusMessage(result.ok ? `Add ${kind} track command accepted` : result.error ?? "Add track failed");
+    setStatusMessage(result.ok ? `Add ${kind} track command accepted` : result.error ?? "Add track failed", { level: result.ok ? "success" : "error" });
   }
 
   function toggleTrack(trackId: string, field: "locked" | "muted" | "visible") {
+    const track = timeline.tracks.find((item) => item.id === trackId);
     setTimeline((current) => ({
       ...current,
       tracks: current.tracks.map((track) => (track.id === trackId ? { ...track, [field]: !track[field] } : track))
     }));
+    if (track) {
+      setStatusMessage(`${track.name} ${field} ${track[field] ? "off" : "on"}`);
+    }
   }
 
   async function deleteSelectedClip(targetClip?: TimelineClip) {
     const clip = targetClip ?? selectedClip;
     if (!clip) {
-      setStatusMessage("No clip selected");
+      setStatusMessage("No clip selected", { level: "warning" });
       return;
     }
 
     const lockedTrackName = lockedTrackNameForClip(clip);
     if (lockedTrackName) {
-      setStatusMessage(`${lockedTrackName} is locked`);
+      setStatusMessage(`${lockedTrackName} is locked`, { level: "warning" });
       return;
     }
 
-    const result = await executeCommand({ type: "delete_clip", clipId: clip.id });
+    const result = await runCommand({ type: "delete_clip", clipId: clip.id }, "Delete failed");
     if (!applyEngineTimeline(result.data)) {
       setTimeline((current) => ({
         ...current,
@@ -280,23 +295,23 @@ export function EditTab({
       }));
     }
     setSelectedClipId("");
-    setStatusMessage(result.ok ? "Delete command accepted" : result.error ?? "Delete failed");
+    setStatusMessage(result.ok ? "Delete command accepted" : result.error ?? "Delete failed", { level: result.ok ? "success" : "error" });
   }
 
   async function rippleDelete(targetClip?: TimelineClip) {
     const clip = targetClip ?? selectedClip;
     if (!clip) {
-      setStatusMessage("No clip selected");
+      setStatusMessage("No clip selected", { level: "warning" });
       return;
     }
 
     const lockedTrackName = lockedTrackNameForClip(clip);
     if (lockedTrackName) {
-      setStatusMessage(`${lockedTrackName} is locked`);
+      setStatusMessage(`${lockedTrackName} is locked`, { level: "warning" });
       return;
     }
 
-    const result = await executeCommand({ type: "ripple_delete_clip", clipId: clip.id, trackMode: "selected_track" });
+    const result = await runCommand({ type: "ripple_delete_clip", clipId: clip.id, trackMode: "selected_track" }, "Ripple delete failed");
     if (!applyEngineTimeline(result.data)) {
       const deletedDuration = clip.outUs - clip.inUs;
       setTimeline((current) => ({
@@ -314,7 +329,7 @@ export function EditTab({
       }));
     }
     setSelectedClipId("");
-    setStatusMessage(result.ok ? "Ripple delete command accepted" : result.error ?? "Ripple delete failed");
+    setStatusMessage(result.ok ? "Ripple delete command accepted" : result.error ?? "Ripple delete failed", { level: result.ok ? "success" : "error" });
   }
 
   function zoomTimeline(direction: -1 | 1) {
@@ -339,23 +354,23 @@ export function EditTab({
   async function nudgeSelectedClip(direction: -1 | 1, targetClip?: TimelineClip) {
     const clip = targetClip ?? selectedClip;
     if (!clip) {
-      setStatusMessage("No clip selected");
+      setStatusMessage("No clip selected", { level: "warning" });
       return;
     }
 
     const lockedTrackName = lockedTrackNameForClip(clip);
     if (lockedTrackName) {
-      setStatusMessage(`${lockedTrackName} is locked`);
+      setStatusMessage(`${lockedTrackName} is locked`, { level: "warning" });
       return;
     }
 
-    const result = await executeCommand({
+    const result = await runCommand({
       type: "move_clip",
       clipId: clip.id,
       trackId: clip.trackId,
       startUs: Math.max(0, clip.startUs + direction * 100_000),
       snapping
-    });
+    }, "Nudge failed");
     if (!applyEngineTimeline(result.data)) {
       setTimeline((current) => ({
         ...current,
@@ -365,7 +380,7 @@ export function EditTab({
         }))
       }));
     }
-    setStatusMessage(result.ok ? "Nudge command accepted" : result.error ?? "Nudge failed");
+    setStatusMessage(result.ok ? "Nudge command accepted" : result.error ?? "Nudge failed", { level: result.ok ? "success" : "error" });
   }
 
   async function moveClip(clipId: string, targetTrackId: string, startUs: number) {
@@ -376,24 +391,24 @@ export function EditTab({
     }
 
     if (targetTrack.locked) {
-      setStatusMessage(`${targetTrack.name} is locked`);
+      setStatusMessage(`${targetTrack.name} is locked`, { level: "warning" });
       return;
     }
 
     const sourceAsset = mediaAssets.find((asset) => asset.id === clip.mediaId);
     if (sourceAsset && sourceAsset.kind !== targetTrack.kind) {
-      setStatusMessage(`${sourceAsset.name} belongs on a ${sourceAsset.kind} track`);
+      setStatusMessage(`${sourceAsset.name} belongs on a ${sourceAsset.kind} track`, { level: "warning" });
       return;
     }
 
     const nextStartUs = snapping ? resolveTrackSnapStart(timeline, targetTrackId, startUs, timelineZoom, clipId, false).startUs : Math.max(0, startUs);
-    const result = await executeCommand({
+    const result = await runCommand({
       type: "move_clip",
       clipId,
       trackId: targetTrackId,
       startUs: nextStartUs,
       snapping
-    });
+    }, "Move clip failed");
     if (!applyEngineTimeline(result.data)) {
       setTimeline((current) => {
         let movedClip = current.tracks.flatMap((track) => track.clips).find((item) => item.id === clipId);
@@ -420,7 +435,7 @@ export function EditTab({
       });
     }
     setSelectedClipId(clipId);
-    setStatusMessage(result.ok ? "Moved clip" : result.error ?? "Move clip failed");
+    setStatusMessage(result.ok ? "Moved clip" : result.error ?? "Move clip failed", { level: result.ok ? "success" : "error" });
   }
 
   async function trimClip(clipId: string, edge: "start" | "end", deltaUs: number) {
@@ -431,7 +446,7 @@ export function EditTab({
 
     const track = timeline.tracks.find((item) => item.id === clip.trackId);
     if (track?.locked) {
-      setStatusMessage(`${track.name} is locked`);
+      setStatusMessage(`${track.name} is locked`, { level: "warning" });
       return;
     }
 
@@ -449,12 +464,12 @@ export function EditTab({
       nextClip = { ...clip, outUs: nextOutUs };
     }
 
-    const result = await executeCommand({
+    const result = await runCommand({
       type: "trim_clip",
       clipId,
       edge,
       timeUs: edge === "start" ? nextClip.startUs : nextClip.outUs
-    });
+    }, "Trim failed");
     if (!applyEngineTimeline(result.data)) {
       setTimeline((current) => ({
         ...current,
@@ -466,7 +481,7 @@ export function EditTab({
       }));
     }
     setSelectedClipId(clipId);
-    setStatusMessage(result.ok ? "Trimmed clip" : result.error ?? "Trim failed");
+    setStatusMessage(result.ok ? "Trimmed clip" : result.error ?? "Trim failed", { level: result.ok ? "success" : "error" });
   }
 
   async function addMediaToTimeline(asset: MediaAsset, targetTrackId?: string, startUs = playheadUs) {
@@ -475,17 +490,17 @@ export function EditTab({
       : timeline.tracks.find((track) => track.kind === asset.kind && track.name.endsWith("1")) ?? timeline.tracks.find((track) => track.kind === asset.kind);
 
     if (!targetTrack) {
-      setStatusMessage(`Add an ${asset.kind} track first`);
+      setStatusMessage(`Add an ${asset.kind} track first`, { level: "warning" });
       return;
     }
 
     if (targetTrack.kind !== asset.kind) {
-      setStatusMessage(`${asset.name} belongs on an ${asset.kind} track`);
+      setStatusMessage(`${asset.name} belongs on an ${asset.kind} track`, { level: "warning" });
       return;
     }
 
     if (targetTrack.locked) {
-      setStatusMessage(`${targetTrack.name} is locked`);
+      setStatusMessage(`${targetTrack.name} is locked`, { level: "warning" });
       return;
     }
 
@@ -523,9 +538,9 @@ export function EditTab({
       )
     }));
     setSelectedClipId(clipId);
-    setStatusMessage(`Added ${asset.name} to timeline`);
+    setStatusMessage(`Added ${asset.name} to timeline`, { level: "success", details: { mediaId: asset.id, clipId, trackId: targetTrack.id } });
 
-    void executeCommand({
+    void runCommand({
       type: "add_clip",
       clipId,
       mediaId: asset.id,
@@ -533,9 +548,9 @@ export function EditTab({
       startUs: nextStartUs,
       inUs: 0,
       outUs: fallbackDurationUs
-    }).then((result) => {
+    }, "Add clip failed").then((result) => {
       if (!result.ok) {
-        setStatusMessage(result.error ?? "Add clip failed");
+        setStatusMessage(result.error ?? "Add clip failed", { level: "error" });
         return;
       }
       applyEngineTimeline(result.data);
@@ -552,12 +567,16 @@ export function EditTab({
     const supported = paths.filter(isSupportedMediaPath);
     if (supported.length === 0) {
       if (paths.length > 0) {
-        setStatusMessage("No supported media dropped");
+        setStatusMessage("No supported media dropped", { level: "warning", source: "media" });
       }
       return;
     }
 
-    onImportMediaResult(await importMediaPaths(supported));
+    try {
+      onImportMediaResult(await importMediaPaths(supported));
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Dropped media import failed", { level: "error", source: "media" });
+    }
   }
 
   async function handleMediaDrop(event: ReactDragEvent<HTMLDivElement>) {
@@ -601,7 +620,7 @@ export function EditTab({
       y: event.clientY,
       active: false
     });
-    setStatusMessage(`Drag ${asset.name} onto a ${asset.kind} track`);
+    setStatusMessage(`Drag ${asset.name} onto a ${asset.kind} track`, { source: "media" });
   }
 
   function updateMediaPointerDrag(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -648,19 +667,19 @@ export function EditTab({
     const placement = drop ? resolveMediaDropPlacement(timeline, mediaDragState.asset, drop.trackId, drop.startUs, timelineZoom, snapping) : null;
     const targetTrack = placement ? timeline.tracks.find((track) => track.id === placement.trackId) : undefined;
     if (!drop || !targetTrack) {
-      setStatusMessage(`Drop ${mediaDragState.asset.name} onto a ${mediaDragState.asset.kind} track`);
+      setStatusMessage(`Drop ${mediaDragState.asset.name} onto a ${mediaDragState.asset.kind} track`, { level: "warning", source: "media" });
       clearMediaPointerDrag();
       return;
     }
 
     if (targetTrack.kind !== mediaDragState.asset.kind) {
-      setStatusMessage(`${mediaDragState.asset.name} belongs on a ${mediaDragState.asset.kind} track`);
+      setStatusMessage(`${mediaDragState.asset.name} belongs on a ${mediaDragState.asset.kind} track`, { level: "warning", source: "media" });
       clearMediaPointerDrag();
       return;
     }
 
     if (targetTrack.locked) {
-      setStatusMessage(`${targetTrack.name} is locked`);
+      setStatusMessage(`${targetTrack.name} is locked`, { level: "warning" });
       clearMediaPointerDrag();
       return;
     }
@@ -703,24 +722,24 @@ export function EditTab({
 
   async function revealMediaInExplorer(asset: MediaAsset) {
     if (!("__TAURI_INTERNALS__" in window)) {
-      setStatusMessage("Reveal in Explorer is available in the desktop app");
+      setStatusMessage("Reveal in Explorer is available in the desktop app", { level: "warning", source: "media" });
       return;
     }
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("reveal_media_path", { path: asset.path });
-      setStatusMessage(`Revealed ${asset.name} in Explorer`);
+      setStatusMessage(`Revealed ${asset.name} in Explorer`, { level: "success", source: "media", details: { path: asset.path } });
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Reveal in Explorer failed");
+      setStatusMessage(error instanceof Error ? error.message : "Reveal in Explorer failed", { level: "error", source: "media" });
     }
   }
 
   async function removeMediaFromBin(asset: MediaAsset) {
     const removedClipCount = timeline.tracks.reduce((count, track) => count + track.clips.filter((clip) => clip.mediaId === asset.id).length, 0);
-    const result = await executeCommand({ type: "remove_media", mediaId: asset.id });
+    const result = await runCommand({ type: "remove_media", mediaId: asset.id }, "Remove media failed");
     if (!result.ok) {
-      setStatusMessage(result.error ?? "Remove media failed");
+      setStatusMessage(result.error ?? "Remove media failed", { level: "error", source: "media" });
       return;
     }
 
@@ -730,7 +749,11 @@ export function EditTab({
     }
 
     const suffix = removedClipCount > 0 ? ` and ${removedClipCount} timeline clip${removedClipCount === 1 ? "" : "s"}` : "";
-    setStatusMessage(`Removed ${asset.name} from bin${suffix}`);
+    setStatusMessage(`Removed ${asset.name} from bin${suffix}`, {
+      level: "success",
+      source: "media",
+      details: { mediaId: asset.id, removedClipCount, sourceFileDeleted: false }
+    });
   }
 
   function contextMenuItems(): ContextMenuItem[] {
@@ -1109,9 +1132,10 @@ function TimelineSurface({
   mediaDropTrackId: string | null;
   mediaDropPreview: MediaDropPreviewState | null;
   onMediaDropTrackChange: (trackId: string | null) => void;
-  setStatusMessage: (message: string) => void;
+  setStatusMessage: LogStatus;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const lastWheelModeRef = useRef("");
   const [draggingPlayhead, setDraggingPlayhead] = useState(false);
   const [clipInteraction, setClipInteraction] = useState<ClipInteraction | null>(null);
   const [previewClip, setPreviewClip] = useState<PreviewClipState | null>(null);
@@ -1185,10 +1209,19 @@ function TimelineSurface({
   function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
     event.preventDefault();
     if (event.shiftKey || event.ctrlKey) {
+      const mode = event.ctrlKey ? "ctrl-zoom" : "shift-zoom";
+      if (lastWheelModeRef.current !== mode) {
+        lastWheelModeRef.current = mode;
+        setStatusMessage(event.ctrlKey ? "Timeline zoom with Ctrl+wheel" : "Timeline zoom with Shift+wheel");
+      }
       onZoom(event.deltaY > 0 ? -1 : 1);
       return;
     }
 
+    if (lastWheelModeRef.current !== "pan") {
+      lastWheelModeRef.current = "pan";
+      setStatusMessage("Timeline wheel panning");
+    }
     const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
     event.currentTarget.scrollLeft += horizontalDelta;
   }
@@ -1385,7 +1418,7 @@ function TimelineSurface({
                   event.dataTransfer.getData("text/plain");
                 const asset = mediaAssets.find((item) => item.id === mediaId);
                 if (!asset) {
-                  setStatusMessage("Drop an imported media card from the media bin");
+                  setStatusMessage("Drop an imported media card from the media bin", { level: "warning", source: "media" });
                   return;
                 }
 

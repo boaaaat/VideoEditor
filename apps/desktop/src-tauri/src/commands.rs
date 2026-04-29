@@ -5,7 +5,8 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::State;
@@ -155,6 +156,78 @@ pub fn reveal_media_path(path: String) -> Result<(), String> {
     };
 
     reveal_path(&target)
+}
+
+#[tauri::command]
+pub fn append_app_log(project_path: String, entry: Value) -> Result<(), String> {
+    let timestamp = entry
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "log entry timestamp missing".to_string())?;
+    let date = timestamp
+        .get(0..10)
+        .filter(|value| is_iso_date(value))
+        .ok_or_else(|| "log entry timestamp must start with YYYY-MM-DD".to_string())?;
+    let logs_dir = PathBuf::from(project_path).join("logs");
+    fs::create_dir_all(&logs_dir)
+        .map_err(|error| format!("failed to create project logs folder: {error}"))?;
+
+    let log_path = logs_dir.join(format!("app-{date}.jsonl"));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|error| format!("failed to open app log file: {error}"))?;
+    let line = serde_json::to_string(&entry)
+        .map_err(|error| format!("failed to serialize app log entry: {error}"))?;
+    writeln!(file, "{line}").map_err(|error| format!("failed to write app log entry: {error}"))
+}
+
+#[tauri::command]
+pub fn save_project_snapshot(project_path: String, snapshot: Value) -> Result<(), String> {
+    let cache_dir = PathBuf::from(project_path).join("cache");
+    fs::create_dir_all(&cache_dir)
+        .map_err(|error| format!("failed to create project cache folder: {error}"))?;
+    let snapshot_path = cache_dir.join("ui-state.json");
+    let content = serde_json::to_string_pretty(&snapshot)
+        .map_err(|error| format!("failed to serialize project snapshot: {error}"))?;
+    fs::write(&snapshot_path, format!("{content}\n"))
+        .map_err(|error| format!("failed to write project snapshot: {error}"))
+}
+
+#[tauri::command]
+pub fn load_project_snapshot(project_path: String) -> Result<Option<Value>, String> {
+    let snapshot_path = PathBuf::from(project_path)
+        .join("cache")
+        .join("ui-state.json");
+    if !snapshot_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&snapshot_path)
+        .map_err(|error| format!("failed to read project snapshot: {error}"))?;
+    let snapshot = serde_json::from_str(&content)
+        .map_err(|error| format!("invalid project snapshot JSON: {error}"))?;
+    Ok(Some(snapshot))
+}
+
+#[tauri::command]
+pub fn validate_media_paths(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|path| !PathBuf::from(path).exists())
+        .collect()
+}
+
+fn is_iso_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
 }
 
 fn parent_hwnd(window: &tauri::Window) -> Result<String, String> {

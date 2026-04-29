@@ -8,12 +8,14 @@ interface TopBarProps {
   onSave: () => void;
   onUndo: () => void;
   onRedo: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
   onOpenCommandPalette: () => void;
   onOpenSettings: () => void;
   onExport: () => void;
 }
 
-export function TopBar({ projectName, onImportMedia, onSave, onUndo, onRedo, onOpenCommandPalette, onOpenSettings, onExport }: TopBarProps) {
+export function TopBar({ projectName, onImportMedia, onSave, onUndo, onRedo, canUndo = true, canRedo = true, onOpenCommandPalette, onOpenSettings, onExport }: TopBarProps) {
   return (
     <header className="top-bar">
       <div className="project-title">
@@ -25,8 +27,8 @@ export function TopBar({ projectName, onImportMedia, onSave, onUndo, onRedo, onO
           Import
         </Button>
         <IconButton label="Save" icon={<Save size={17} />} onClick={onSave} />
-        <IconButton label="Undo" icon={<Undo2 size={17} />} onClick={onUndo} />
-        <IconButton label="Redo" icon={<Redo2 size={17} />} onClick={onRedo} />
+        <IconButton label="Undo" icon={<Undo2 size={17} />} onClick={onUndo} disabled={!canUndo} />
+        <IconButton label="Redo" icon={<Redo2 size={17} />} onClick={onRedo} disabled={!canRedo} />
         <Button icon={<Download size={16} />} variant="primary" onClick={onExport}>
           Export
         </Button>

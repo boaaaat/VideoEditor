@@ -649,6 +649,154 @@
   gap: 8px;
 }
 
+.logs-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2600;
+  display: grid;
+  align-items: end;
+  background: rgba(0, 0, 0, 0.34);
+}
+
+.logs-drawer {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: min(520px, 68vh);
+  border-top: 1px solid var(--line);
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.38);
+}
+
+.logs-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 52px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.logs-drawer-header h2 {
+  margin: 0;
+  font-size: 0.94rem;
+}
+
+.logs-drawer-header span {
+  color: var(--muted);
+}
+
+.logs-drawer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.logs-drawer-list {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-height: 0;
+  padding: 10px 12px 14px;
+  overflow: auto;
+  background: #171716;
+}
+
+.log-entry {
+  display: grid;
+  grid-template-columns: 84px 70px 78px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #1d1d1b;
+}
+
+.log-entry time,
+.log-entry-level,
+.log-entry-source {
+  color: var(--muted);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 0.78rem;
+}
+
+.log-entry-level,
+.log-entry-source {
+  text-transform: uppercase;
+}
+
+.log-entry p {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.log-entry pre {
+  grid-column: 4;
+  max-height: 140px;
+  overflow: auto;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.log-entry-success {
+  border-color: rgba(47, 191, 159, 0.34);
+}
+
+.log-entry-success .log-entry-level {
+  color: var(--accent);
+}
+
+.log-entry-warning {
+  border-color: rgba(215, 180, 104, 0.38);
+}
+
+.log-entry-warning .log-entry-level {
+  color: var(--accent-2);
+}
+
+.log-entry-error {
+  border-color: rgba(217, 105, 95, 0.44);
+}
+
+.log-entry-error .log-entry-level {
+  color: var(--danger);
+}
+
+.logs-empty {
+  display: grid;
+  place-items: center;
+  min-height: 180px;
+  color: var(--muted);
+}
+
+@media (max-width: 700px) {
+  .logs-drawer {
+    height: min(560px, 78vh);
+  }
+
+  .logs-drawer-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .logs-drawer-actions {
+    flex-wrap: wrap;
+  }
+
+  .log-entry {
+    grid-template-columns: minmax(0, 1fr) minmax(70px, auto);
+  }
+
+  .log-entry p,
+  .log-entry pre {
+    grid-column: 1 / -1;
+  }
+}
+
 .shortcuts-workspace {
   height: 100%;
   padding: 12px;

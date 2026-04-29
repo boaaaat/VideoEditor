@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Ban, Download, FolderOpen, RefreshCw } from "lucide-react";
 import type { ExportCodec, ExportContainer, ExportQuality, ExportStatus, GpuStatus, MediaMetadata, ProjectSettings } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Toggle } from "../../components/Toggle";
 import { engineRpc } from "../../features/commands/commandClient";
+import type { LogStatus } from "../../features/logging/appLog";
 import {
   calculateAutoBitrate,
   exportCodecLabels,
@@ -26,7 +27,7 @@ interface ExportTabProps {
   firstMediaMetadata?: MediaMetadata;
   mediaAssets: MediaAsset[];
   gpuStatus: GpuStatus | null;
-  setStatusMessage: (message: string) => void;
+  setStatusMessage: LogStatus;
 }
 
 export function ExportTab({ projectSettings, onProjectSettingsChange, firstMediaMetadata, mediaAssets, gpuStatus, setStatusMessage }: ExportTabProps) {
@@ -36,6 +37,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
   const [audioEnabled, setAudioEnabled] = useState(projectSettings.audioEnabled);
   const [outputPath, setOutputPath] = useState("");
   const [exportStatus, setExportStatus] = useState<ExportStatus>({ jobId: null, state: "idle", progress: 0, logs: [] });
+  const loggedExportLinesRef = useRef(0);
 
   const bitrateMbps = useMemo(() => calculateAutoBitrate(projectSettings, quality, codec), [codec, projectSettings, quality]);
   const hasAudio = mediaAssets.some((asset) => asset.kind === "audio" || asset.metadata?.hasAudio);
@@ -69,6 +71,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
 
     const interval = window.setInterval(() => {
       void engineRpc<ExportStatus>("export.status").then(setExportStatus).catch((error) => {
+        setStatusMessage(error instanceof Error ? error.message : "Export status failed", { level: "error" });
         setExportStatus((current) => ({
           ...current,
           state: "error",
@@ -79,6 +82,21 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
 
     return () => window.clearInterval(interval);
   }, [exportStatus.state]);
+
+  useEffect(() => {
+    if (exportStatus.logs.length < loggedExportLinesRef.current) {
+      loggedExportLinesRef.current = 0;
+    }
+
+    const nextLogs = exportStatus.logs.slice(loggedExportLinesRef.current);
+    loggedExportLinesRef.current = exportStatus.logs.length;
+    for (const line of nextLogs) {
+      setStatusMessage(line, {
+        level: exportStatus.state === "error" ? "error" : exportStatus.state === "completed" ? "success" : "info",
+        details: { jobId: exportStatus.jobId, state: exportStatus.state, progress: exportStatus.progress }
+      });
+    }
+  }, [exportStatus.jobId, exportStatus.logs, exportStatus.progress, exportStatus.state, setStatusMessage]);
 
   function updateSettings(next: Partial<ProjectSettings>) {
     const merged = {
@@ -93,20 +111,21 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
 
   function resetProjectSettings() {
     onProjectSettingsChange(firstMediaMetadata ? seedProjectSettingsFromMetadata(firstMediaMetadata) : defaultProjectSettings);
-    setStatusMessage(firstMediaMetadata ? "Project settings reset to first media" : "Project settings reset");
+    setStatusMessage(firstMediaMetadata ? "Project settings reset to first media" : "Project settings reset", { source: "project" });
   }
 
   async function chooseOutputPath() {
     const output = await pickExportOutputPath(container);
     if (output) {
       setOutputPath(output);
+      setStatusMessage("Export output path selected", { details: { outputPath: output } });
     }
   }
 
   async function exportTimeline() {
     if (validationErrors.length > 0) {
       setExportStatus((current) => ({ ...current, state: "error", logs: validationErrors }));
-      setStatusMessage(validationErrors[0] ?? "Export validation failed");
+      setStatusMessage(validationErrors[0] ?? "Export validation failed", { level: "warning" });
       return;
     }
 
@@ -129,7 +148,10 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
     });
 
     setExportStatus(status);
-    setStatusMessage(status.state === "error" ? status.logs.at(-1) ?? "Export failed" : "Export started");
+    setStatusMessage(status.state === "error" ? status.logs.at(-1) ?? "Export failed" : "Export started", {
+      level: status.state === "error" ? "error" : "success",
+      details: { outputPath, codec, container, quality }
+    });
   }
 
   async function cancelExport() {
@@ -139,7 +161,9 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
       logs: [...exportStatus.logs, error instanceof Error ? error.message : "Cancel failed"]
     }));
     setExportStatus(status);
-    setStatusMessage(status.state === "cancelled" ? "Export cancelled" : "Cancel command sent");
+    setStatusMessage(status.state === "cancelled" ? "Export cancelled" : "Cancel command sent", {
+      level: status.state === "cancelled" ? "warning" : "info"
+    });
   }
 
   function updateResolution(value: ProjectSettings["resolution"]) {

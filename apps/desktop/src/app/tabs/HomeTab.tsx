@@ -2,13 +2,14 @@ import type { EngineStatus } from "@ai-video-editor/protocol";
 import { FolderOpen, FolderPlus, HardDrive, PlugZap } from "lucide-react";
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
+import type { LogStatus } from "../../features/logging/appLog";
 import { createProjectFromDialog, openProjectFromDialog, type ActiveProject } from "../../features/projects/projectActions";
 
 interface HomeTabProps {
   engineStatus: EngineStatus | null;
   recentProjects: ActiveProject[];
-  onProjectOpen: (project: ActiveProject) => void;
-  setStatusMessage: (message: string) => void;
+  onProjectOpen: (project: ActiveProject) => void | Promise<void>;
+  setStatusMessage: LogStatus;
 }
 
 export function HomeTab({ engineStatus, recentProjects, onProjectOpen, setStatusMessage }: HomeTabProps) {
@@ -19,7 +20,7 @@ export function HomeTab({ engineStatus, recentProjects, onProjectOpen, setStatus
         onProjectOpen(project);
       }
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "New project failed");
+      setStatusMessage(error instanceof Error ? error.message : "New project failed", { level: "error" });
     }
   }
 
@@ -30,7 +31,7 @@ export function HomeTab({ engineStatus, recentProjects, onProjectOpen, setStatus
         onProjectOpen(project);
       }
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Open project failed");
+      setStatusMessage(error instanceof Error ? error.message : "Open project failed", { level: "error" });
     }
   }
 
@@ -48,9 +49,10 @@ export function HomeTab({ engineStatus, recentProjects, onProjectOpen, setStatus
         <div className="recent-list">
           {recentProjects.length > 0 ? (
             recentProjects.map((project) => (
-              <button type="button" key={project.manifestPath ?? project.path ?? project.name} onClick={() => onProjectOpen(project)}>
+              <button type="button" key={project.manifestPath ?? project.path ?? project.name} onClick={() => void onProjectOpen(project)}>
                 <span>{project.name}</span>
                 {project.path ? <small>{project.path}</small> : null}
+                {project.lastSavedAt ? <small>Saved {formatRecentTime(project.lastSavedAt)}</small> : null}
               </button>
             ))
           ) : (
@@ -83,6 +85,14 @@ export function HomeTab({ engineStatus, recentProjects, onProjectOpen, setStatus
       </Panel>
     </div>
   );
+}
+
+function formatRecentTime(timestamp: string) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return timestamp;
+  }
+  return date.toLocaleString([], { dateStyle: "short", timeStyle: "short" });
 }
 
 function StatusItem({ label, value, detail }: { label: string; value: string; detail?: string }) {

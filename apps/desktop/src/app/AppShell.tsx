@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AudioLines,
   Blocks,
@@ -15,11 +15,21 @@ import type { AiEditProposal, EngineStatus, MediaMetadata, ProjectSettings, Time
 import { Tabs, type TabItem } from "../components/Tabs";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
-import { engineRpc, getEngineStatus } from "../features/commands/commandClient";
+import { LogsDrawer, logsToText } from "../components/LogsDrawer";
+import { engineRpc, getEngineStatus, type CommandExecutionEventDetail } from "../features/commands/commandClient";
 import { isTypingTarget, shortcutDefinitions } from "../features/commands/shortcuts";
+import { appendProjectLog, createAppLogEntry, type AppLogEntry, type AppLogSource, type LogStatusOptions } from "../features/logging/appLog";
 import { importMediaFiles, type ImportMediaResult } from "../features/media/importMedia";
 import type { MediaAsset } from "../features/media/mediaTypes";
-import { loadRecentProjects, saveRecentProject, type ActiveProject } from "../features/projects/projectActions";
+import {
+  loadProjectSnapshot,
+  loadRecentProjects,
+  saveProjectSnapshot,
+  saveRecentProject,
+  validateMediaPaths,
+  type ActiveProject,
+  type ProjectSnapshot
+} from "../features/projects/projectActions";
 import { defaultProjectSettings, seedProjectSettingsFromMetadata } from "../features/settings";
 import { starterTimeline } from "../features/timeline/mockTimeline";
 import { TopBar } from "./topbar/TopBar";
@@ -34,6 +44,10 @@ import { FutureAiTab } from "./tabs/FutureAiTab";
 import { ShortcutsTab } from "./tabs/ShortcutsTab";
 
 export type WorkspaceTab = "home" | "edit" | "audio" | "color" | "effects" | "shortcuts" | "plugins" | "export" | "future-ai";
+
+const maxAppLogEntries = 1000;
+const autosaveDelayMs = 4500;
+const maxCommandHistoryEntries = 80;
 
 const workspaceTabs: TabItem<WorkspaceTab>[] = [
   { id: "home", label: "Home", icon: <Home size={16} /> },
@@ -72,7 +86,129 @@ export function AppShell() {
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [statusMessage, setStatusMessage] = useState("Ready");
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [projectDirty, setProjectDirty] = useState(false);
+  const [savingProject, setSavingProject] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
+  const [autosaveState, setAutosaveState] = useState<"idle" | "pending" | "saving" | "saved" | "error">("idle");
+  const [missingMediaPaths, setMissingMediaPaths] = useState<string[]>([]);
+  const [undoStack, setUndoStack] = useState<ProjectSnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<ProjectSnapshot[]>([]);
+  const [statusMessage, setLatestStatusMessage] = useState("Ready");
+  const [appLogs, setAppLogs] = useState<AppLogEntry[]>(() => [createAppLogEntry("Ready", { source: "app" })]);
+  const projectRef = useRef(project);
+  const logPersistenceWarningShownRef = useRef(false);
+  const lastSavedStateRef = useRef(serializeProjectState(defaultProjectSettings, [], starterTimeline, []));
+  const historyStateRef = useRef(serializeProjectState(defaultProjectSettings, [], starterTimeline, []));
+  const lastHistorySnapshotRef = useRef<ProjectSnapshot | null>(null);
+  const loadingProjectRef = useRef(false);
+  const applyingHistoryRef = useRef(false);
+  const lastMissingMediaKeyRef = useRef("");
+
+  useEffect(() => {
+    projectRef.current = project;
+  }, [project]);
+
+  useEffect(() => {
+    if (loadingProjectRef.current) {
+      return;
+    }
+
+    const stateHash = serializeProjectState(projectSettings, mediaAssets, timeline, aiProposals);
+    setProjectDirty(Boolean(lastSavedStateRef.current) && stateHash !== lastSavedStateRef.current);
+  }, [aiProposals, mediaAssets, projectSettings, timeline]);
+
+  useEffect(() => {
+    if (loadingProjectRef.current || applyingHistoryRef.current) {
+      return;
+    }
+
+    const stateHash = serializeProjectState(projectSettings, mediaAssets, timeline, aiProposals);
+    const previousSnapshot = lastHistorySnapshotRef.current;
+    if (!previousSnapshot) {
+      historyStateRef.current = stateHash;
+      lastHistorySnapshotRef.current = createHistorySnapshot();
+      return;
+    }
+
+    if (stateHash === historyStateRef.current) {
+      return;
+    }
+
+    setUndoStack((current) => [...current, previousSnapshot].slice(-maxCommandHistoryEntries));
+    setRedoStack([]);
+    historyStateRef.current = stateHash;
+    lastHistorySnapshotRef.current = createHistorySnapshot();
+  }, [aiProposals, mediaAssets, projectSettings, timeline]);
+
+  useEffect(() => {
+    function onBeforeUnload(event: BeforeUnloadEvent) {
+      if (!projectDirty) {
+        return;
+      }
+
+      event.preventDefault();
+      event.returnValue = "";
+    }
+
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [projectDirty]);
+
+  useEffect(() => {
+    if (!projectDirty || savingProject) {
+      return;
+    }
+
+    setAutosaveState("pending");
+    const timeout = window.setTimeout(() => {
+      void saveProject("autosave");
+    }, autosaveDelayMs);
+
+    return () => window.clearTimeout(timeout);
+  }, [aiProposals, mediaAssets, projectDirty, projectSettings, savingProject, timeline]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const paths = mediaAssets.map((asset) => asset.path).filter(Boolean);
+    if (paths.length === 0) {
+      setMissingMediaPaths([]);
+      lastMissingMediaKeyRef.current = "";
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void validateMediaPaths(paths)
+        .then((missing) => {
+          if (cancelled) {
+            return;
+          }
+          setMissingMediaPaths(missing);
+          const key = missing.slice().sort().join("|");
+          if (missing.length > 0 && key !== lastMissingMediaKeyRef.current) {
+            lastMissingMediaKeyRef.current = key;
+            logStatus(`${missing.length} missing media file${missing.length === 1 ? "" : "s"} detected`, {
+              level: "warning",
+              source: "media",
+              details: { missing }
+            });
+          } else if (missing.length === 0 && lastMissingMediaKeyRef.current) {
+            lastMissingMediaKeyRef.current = "";
+            recordLog("Missing media check passed", { source: "media" }, false);
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            logStatus(error instanceof Error ? error.message : "Media path validation failed", { level: "error", source: "media" });
+          }
+        });
+    }, 800);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [mediaAssets]);
 
   useEffect(() => {
     setRecentProjects(loadRecentProjects());
@@ -80,12 +216,86 @@ export function AppShell() {
     getEngineStatus()
       .then((status) => {
         setEngineStatus(status);
-        void refreshEngineState();
+        logStatus("Engine status refreshed", {
+          source: "engine",
+          details: {
+            ffmpeg: status.ffmpeg.available,
+            ffprobe: status.ffprobe.available,
+            gpu: status.gpu.name ?? status.gpu.message ?? "unknown"
+          }
+        });
+        void refreshEngineState("startup");
       })
       .catch((error) => {
-        setStatusMessage(error instanceof Error ? error.message : "Engine status failed");
+        logStatus(error instanceof Error ? error.message : "Engine status failed", { level: "error", source: "engine" });
       });
   }, []);
+
+  useEffect(() => {
+    function onCommandExecution(event: Event) {
+      const detail = (event as CustomEvent<CommandExecutionEventDetail>).detail;
+      if (!detail?.commandType) {
+        return;
+      }
+
+      if (detail.phase === "start") {
+        recordLog(`Command started: ${formatCommandType(detail.commandType)}`, {
+          level: "debug",
+          source: commandSource(detail.commandType),
+          details: { command: detail.command }
+        }, false);
+        return;
+      }
+
+      if (detail.phase === "finish" && detail.ok) {
+        recordLog(`Command accepted: ${formatCommandType(detail.commandType)}`, {
+          source: commandSource(detail.commandType),
+          details: { commandId: detail.commandId, durationMs: detail.durationMs, command: detail.command }
+        }, false);
+        return;
+      }
+
+      logStatus(detail.error ?? `Command failed: ${formatCommandType(detail.commandType)}`, {
+        level: "error",
+        source: commandSource(detail.commandType),
+        details: { commandId: detail.commandId, durationMs: detail.durationMs, command: detail.command }
+      });
+    }
+
+    function onWindowError(event: ErrorEvent) {
+      logStatus(event.message || "Unhandled app error", {
+        level: "error",
+        source: "app",
+        details: {
+          filename: event.filename,
+          line: event.lineno,
+          column: event.colno,
+          stack: event.error instanceof Error ? event.error.stack : undefined
+        }
+      });
+    }
+
+    function onUnhandledRejection(event: PromiseRejectionEvent) {
+      const reason = event.reason;
+      logStatus(reason instanceof Error ? reason.message : "Unhandled promise rejection", {
+        level: "error",
+        source: "app",
+        details: {
+          stack: reason instanceof Error ? reason.stack : undefined,
+          reason: reason instanceof Error ? reason.name : reason
+        }
+      });
+    }
+
+    window.addEventListener("ai-video-editor:command-execution", onCommandExecution);
+    window.addEventListener("error", onWindowError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    return () => {
+      window.removeEventListener("ai-video-editor:command-execution", onCommandExecution);
+      window.removeEventListener("error", onWindowError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    };
+  }, [aiProposals, autosaveState, mediaAssets, projectSettings, savingProject, timeline]);
 
   useEffect(() => {
     async function onKeyDown(event: KeyboardEvent) {
@@ -96,11 +306,12 @@ export function AppShell() {
       if (event.ctrlKey && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setCommandPaletteOpen(true);
+        recordLog("Command search opened", { source: "ui" }, false);
       }
 
       if (event.ctrlKey && event.key.toLowerCase() === "e") {
         event.preventDefault();
-        setActiveTab("export");
+        openWorkspaceTab("export");
       }
 
       if (event.ctrlKey && event.key.toLowerCase() === "i") {
@@ -110,15 +321,15 @@ export function AppShell() {
 
       if (event.ctrlKey && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        setStatusMessage("Save command queued");
+        await saveProject("manual");
       }
 
       if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "z") {
         event.preventDefault();
-        setStatusMessage("Redo command queued");
+        redoProjectState();
       } else if (event.ctrlKey && event.key.toLowerCase() === "z") {
         event.preventDefault();
-        setStatusMessage("Undo command queued");
+        undoProjectState();
       }
     }
 
@@ -126,26 +337,83 @@ export function AppShell() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  function applyProject(nextProject: ActiveProject) {
-    setProject(nextProject);
-    setRecentProjects(saveRecentProject(nextProject));
-    setMediaAssets([]);
-    setTimeline(starterTimeline);
-    setAiProposals([]);
-    setProjectSettings(defaultProjectSettings);
+  async function applyProject(nextProject: ActiveProject) {
+    loadingProjectRef.current = true;
+    const openedProject = { ...nextProject, lastOpenedAt: new Date().toISOString() };
+    setProject(openedProject);
+    setRecentProjects(saveRecentProject(openedProject));
     setSettingsProposal(null);
-    setStatusMessage(`Project open: ${nextProject.name}`);
-    setActiveTab("edit");
+    setMissingMediaPaths([]);
+    setAutosaveState("idle");
+    logPersistenceWarningShownRef.current = false;
+    projectRef.current = openedProject;
+
+    try {
+      const snapshot = await loadProjectSnapshot(openedProject);
+      if (snapshot) {
+        restoreProjectSnapshot(snapshot, openedProject);
+        logStatus(`Project restored: ${openedProject.name}`, {
+          level: "success",
+          source: "project",
+          details: { path: openedProject.path, savedAt: snapshot.savedAt, mediaCount: snapshot.mediaAssets.length }
+        });
+      } else {
+        const savedAt = new Date().toISOString();
+        const blankProject = { ...openedProject, lastSavedAt: savedAt };
+        projectRef.current = blankProject;
+        setProject(blankProject);
+        setRecentProjects(saveRecentProject(blankProject));
+        setMediaAssets([]);
+        setTimeline(starterTimeline);
+        setAiProposals([]);
+        setProjectSettings(defaultProjectSettings);
+        const blankHash = serializeProjectState(defaultProjectSettings, [], starterTimeline, []);
+        lastSavedStateRef.current = blankHash;
+        resetCommandHistory(blankProject, defaultProjectSettings, [], starterTimeline, []);
+        setLastSavedAt(savedAt);
+        setProjectDirty(false);
+        const blankSnapshot: ProjectSnapshot = {
+          version: 1,
+          savedAt,
+          project: blankProject,
+          projectSettings: defaultProjectSettings,
+          mediaAssets: [],
+          timeline: starterTimeline,
+          aiProposals: []
+        };
+        void saveProjectSnapshot(blankProject, blankSnapshot).catch((error) => {
+          logStatus(error instanceof Error ? error.message : "Initial project snapshot save failed", { level: "error", source: "project" });
+        });
+        logStatus(`Project open: ${openedProject.name}`, {
+          source: "project",
+          details: { path: openedProject.path, manifestPath: openedProject.manifestPath, restored: false }
+        });
+      }
+      openWorkspaceTab("edit");
+    } catch (error) {
+      setMediaAssets([]);
+      setTimeline(starterTimeline);
+      setAiProposals([]);
+      setProjectSettings(defaultProjectSettings);
+      lastSavedStateRef.current = serializeProjectState(defaultProjectSettings, [], starterTimeline, []);
+      resetCommandHistory(openedProject, defaultProjectSettings, [], starterTimeline, []);
+      setProjectDirty(false);
+      logStatus(error instanceof Error ? error.message : "Project restore failed", { level: "error", source: "project", details: { project: openedProject } });
+    } finally {
+      window.setTimeout(() => {
+        loadingProjectRef.current = false;
+      }, 0);
+    }
   }
 
   function applyImportedMedia(result: ImportMediaResult | null) {
     if (!result) {
-      setStatusMessage("No supported media selected");
+      logStatus("No supported media selected", { level: "warning", source: "media" });
       return;
     }
 
     if (!result.command.ok) {
-      setStatusMessage(result.command.error ?? "Import failed");
+      logStatus(result.command.error ?? "Import failed", { level: "error", source: "media" });
       return;
     }
 
@@ -162,8 +430,12 @@ export function AppShell() {
         setSettingsProposal(proposal);
       }
     }
-    setStatusMessage(`Imported ${result.media.length} media file${result.media.length === 1 ? "" : "s"}`);
-    setActiveTab("edit");
+    logStatus(`Imported ${result.media.length} media file${result.media.length === 1 ? "" : "s"}`, {
+      level: "success",
+      source: "media",
+      details: { paths: result.media.map((asset) => asset.path) }
+    });
+    openWorkspaceTab("edit");
   }
 
   function applySettingsProposal() {
@@ -173,11 +445,19 @@ export function AppShell() {
 
     setProjectSettings(settingsProposal.nextSettings);
     setSettingsProposal(null);
-    setStatusMessage(`Project settings updated from ${settingsProposal.assetName}`);
+    logStatus(`Project settings updated from ${settingsProposal.assetName}`, {
+      source: "project",
+      details: { changes: settingsProposal.changes }
+    });
   }
 
   async function handleImportMedia() {
-    applyImportedMedia(await importMediaFiles());
+    try {
+      logStatus("Import media requested", { source: "media" });
+      applyImportedMedia(await importMediaFiles());
+    } catch (error) {
+      logStatus(error instanceof Error ? error.message : "Import failed", { level: "error", source: "media" });
+    }
   }
 
   function removeMediaAsset(assetId: string, data?: unknown) {
@@ -201,15 +481,28 @@ export function AppShell() {
     }
   }
 
-  async function refreshEngineState() {
-    const [mediaIndex, nextTimeline, proposalIndex] = await Promise.all([
-      engineRpc<{ media: MediaAsset[] }>("media.index"),
-      engineRpc<Timeline>("timeline.state"),
-      engineRpc<{ proposals: AiEditProposal[] }>("ai.proposals")
-    ]);
-    setMediaAssets(mediaIndex.media ?? []);
-    setTimeline(nextTimeline);
-    setAiProposals(proposalIndex.proposals ?? []);
+  async function refreshEngineState(reason = "manual") {
+    try {
+      const [mediaIndex, nextTimeline, proposalIndex] = await Promise.all([
+        engineRpc<{ media: MediaAsset[] }>("media.index"),
+        engineRpc<Timeline>("timeline.state"),
+        engineRpc<{ proposals: AiEditProposal[] }>("ai.proposals")
+      ]);
+      setMediaAssets(mediaIndex.media ?? []);
+      setTimeline(nextTimeline);
+      setAiProposals(proposalIndex.proposals ?? []);
+      recordLog("Engine state refreshed", {
+        source: "engine",
+        details: {
+          reason,
+          mediaCount: mediaIndex.media?.length ?? 0,
+          trackCount: nextTimeline.tracks.length,
+          proposalCount: proposalIndex.proposals?.length ?? 0
+        }
+      }, false);
+    } catch (error) {
+      logStatus(error instanceof Error ? error.message : "Engine state refresh failed", { level: "error", source: "engine", details: { reason } });
+    }
   }
 
   function applyTimelineFromCommandData(data: unknown) {
@@ -220,41 +513,303 @@ export function AppShell() {
   }
 
   async function generateRoughCutProposal(goal: string, mediaIds: string[]) {
-    const proposal = await engineRpc<AiEditProposal>("ai.proposal.generate", { goal, mediaIds });
-    setAiProposals((current) => [proposal, ...current.filter((item) => item.id !== proposal.id)]);
-    setStatusMessage("Rough cut proposal generated");
-    setActiveTab("future-ai");
+    try {
+      recordLog("Rough cut proposal requested", { source: "ai", details: { goal, mediaIds } }, false);
+      const proposal = await engineRpc<AiEditProposal>("ai.proposal.generate", { goal, mediaIds });
+      setAiProposals((current) => [proposal, ...current.filter((item) => item.id !== proposal.id)]);
+      logStatus("Rough cut proposal generated", { level: "success", source: "ai", details: { goal, mediaIds, proposalId: proposal.id } });
+      openWorkspaceTab("future-ai");
+    } catch (error) {
+      logStatus(error instanceof Error ? error.message : "Rough cut proposal failed", { level: "error", source: "ai", details: { goal, mediaIds } });
+    }
   }
 
   async function applyAiProposal(proposalId: string) {
-    await engineRpc<AiEditProposal>("ai.proposal.apply", { proposalId });
-    await refreshEngineState();
-    setStatusMessage("AI proposal applied to timeline");
-    setActiveTab("edit");
+    try {
+      recordLog("AI proposal apply requested", { source: "ai", details: { proposalId } }, false);
+      await engineRpc<AiEditProposal>("ai.proposal.apply", { proposalId });
+      await refreshEngineState("ai proposal applied");
+      logStatus("AI proposal applied to timeline", { level: "success", source: "ai", details: { proposalId } });
+      openWorkspaceTab("edit");
+    } catch (error) {
+      logStatus(error instanceof Error ? error.message : "AI proposal apply failed", { level: "error", source: "ai", details: { proposalId } });
+    }
   }
 
   async function rejectAiProposal(proposalId: string) {
-    const proposal = await engineRpc<AiEditProposal>("ai.proposal.reject", { proposalId });
-    setAiProposals((current) => current.map((item) => (item.id === proposal.id ? proposal : item)));
-    setStatusMessage("AI proposal rejected");
+    try {
+      const proposal = await engineRpc<AiEditProposal>("ai.proposal.reject", { proposalId });
+      setAiProposals((current) => current.map((item) => (item.id === proposal.id ? proposal : item)));
+      logStatus("AI proposal rejected", { source: "ai", details: { proposalId } });
+    } catch (error) {
+      logStatus(error instanceof Error ? error.message : "AI proposal reject failed", { level: "error", source: "ai", details: { proposalId } });
+    }
+  }
+
+  function appendLogEntry(entry: AppLogEntry, updateStatus = true) {
+    if (updateStatus) {
+      setLatestStatusMessage(entry.message);
+    }
+    setAppLogs((current) => [...current, entry].slice(-maxAppLogEntries));
+  }
+
+  function logStatus(message: string, options: LogStatusOptions = {}) {
+    recordLog(message, options);
+  }
+
+  function recordLog(message: string, options: LogStatusOptions = {}, updateStatus = true) {
+    const entry = createAppLogEntry(message, options);
+    appendLogEntry(entry, updateStatus);
+
+    void appendProjectLog(entry, projectRef.current.path).catch((error) => {
+      if (logPersistenceWarningShownRef.current) {
+        return;
+      }
+      logPersistenceWarningShownRef.current = true;
+      appendLogEntry(
+        createAppLogEntry(error instanceof Error ? error.message : "Project log file persistence failed", {
+          level: "warning",
+          source: "app"
+        }),
+        false
+      );
+    });
+  }
+
+  function makeStatusLogger(source: AppLogSource) {
+    return (message: string, options?: LogStatusOptions) => logStatus(message, { source, ...options });
+  }
+
+  async function saveProject(reason: "manual" | "autosave") {
+    const activeProject = projectRef.current;
+    const savedAt = new Date().toISOString();
+    const snapshot = createProjectSnapshot({ ...activeProject, lastSavedAt: savedAt }, savedAt);
+
+    setSavingProject(true);
+    setAutosaveState(reason === "autosave" ? "saving" : autosaveState);
+    if (reason === "manual") {
+      logStatus("Save requested", { source: "project", details: { project: activeProject.name, projectPath: activeProject.path ?? null } });
+    }
+
+    try {
+      await saveProjectSnapshot(activeProject, snapshot);
+      const savedProject = { ...activeProject, lastSavedAt: savedAt };
+      projectRef.current = savedProject;
+      setProject(savedProject);
+      setRecentProjects(saveRecentProject(savedProject));
+      lastSavedStateRef.current = serializeProjectState(projectSettings, mediaAssets, timeline, aiProposals);
+      setProjectDirty(false);
+      setLastSavedAt(savedAt);
+      setAutosaveState(reason === "autosave" ? "saved" : "idle");
+      logStatus(reason === "autosave" ? "Project autosaved" : "Project saved", {
+        level: "success",
+        source: "project",
+        details: { projectPath: activeProject.path ?? null, savedAt }
+      });
+    } catch (error) {
+      setAutosaveState("error");
+      logStatus(error instanceof Error ? error.message : "Project save failed", {
+        level: "error",
+        source: "project",
+        details: { reason, projectPath: activeProject.path ?? null }
+      });
+    } finally {
+      setSavingProject(false);
+    }
+  }
+
+  function createProjectSnapshot(snapshotProject: ActiveProject, savedAt: string): ProjectSnapshot {
+    return {
+      version: 1,
+      savedAt,
+      project: snapshotProject,
+      projectSettings,
+      mediaAssets,
+      timeline,
+      aiProposals
+    };
+  }
+
+  function restoreProjectSnapshot(snapshot: ProjectSnapshot, fallbackProject: ActiveProject) {
+    const restoredProject = {
+      ...fallbackProject,
+      name: snapshot.project.name || fallbackProject.name,
+      lastSavedAt: snapshot.savedAt
+    };
+    projectRef.current = restoredProject;
+    setProject(restoredProject);
+    setRecentProjects(saveRecentProject(restoredProject));
+    setMediaAssets(snapshot.mediaAssets ?? []);
+    setTimeline(snapshot.timeline ?? starterTimeline);
+    setAiProposals(snapshot.aiProposals ?? []);
+    setProjectSettings(snapshot.projectSettings ?? defaultProjectSettings);
+    lastSavedStateRef.current = serializeProjectState(
+      snapshot.projectSettings ?? defaultProjectSettings,
+      snapshot.mediaAssets ?? [],
+      snapshot.timeline ?? starterTimeline,
+      snapshot.aiProposals ?? []
+    );
+    resetCommandHistory(
+      restoredProject,
+      snapshot.projectSettings ?? defaultProjectSettings,
+      snapshot.mediaAssets ?? [],
+      snapshot.timeline ?? starterTimeline,
+      snapshot.aiProposals ?? []
+    );
+    setLastSavedAt(snapshot.savedAt);
+    setProjectDirty(false);
+    setAutosaveState("idle");
+  }
+
+  function createHistorySnapshot(): ProjectSnapshot {
+    return {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      project: projectRef.current,
+      projectSettings,
+      mediaAssets,
+      timeline,
+      aiProposals
+    };
+  }
+
+  function resetCommandHistory(
+    nextProject: ActiveProject,
+    nextSettings: ProjectSettings,
+    nextMediaAssets: MediaAsset[],
+    nextTimeline: Timeline,
+    nextProposals: AiEditProposal[]
+  ) {
+    const stateHash = serializeProjectState(nextSettings, nextMediaAssets, nextTimeline, nextProposals);
+    historyStateRef.current = stateHash;
+    lastHistorySnapshotRef.current = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      project: nextProject,
+      projectSettings: nextSettings,
+      mediaAssets: nextMediaAssets,
+      timeline: nextTimeline,
+      aiProposals: nextProposals
+    };
+    setUndoStack([]);
+    setRedoStack([]);
+  }
+
+  function restoreHistorySnapshot(snapshot: ProjectSnapshot) {
+    applyingHistoryRef.current = true;
+    setProjectSettings(snapshot.projectSettings ?? defaultProjectSettings);
+    setMediaAssets(snapshot.mediaAssets ?? []);
+    setTimeline(snapshot.timeline ?? starterTimeline);
+    setAiProposals(snapshot.aiProposals ?? []);
+    const stateHash = serializeProjectState(
+      snapshot.projectSettings ?? defaultProjectSettings,
+      snapshot.mediaAssets ?? [],
+      snapshot.timeline ?? starterTimeline,
+      snapshot.aiProposals ?? []
+    );
+    historyStateRef.current = stateHash;
+    lastHistorySnapshotRef.current = {
+      ...snapshot,
+      project: projectRef.current,
+      savedAt: new Date().toISOString()
+    };
+    window.setTimeout(() => {
+      applyingHistoryRef.current = false;
+    }, 0);
+  }
+
+  function undoProjectState() {
+    const previous = undoStack.at(-1);
+    if (!previous) {
+      logStatus("Nothing to undo", { level: "warning", source: "timeline" });
+      return;
+    }
+
+    const currentSnapshot = createHistorySnapshot();
+    setUndoStack((current) => current.slice(0, -1));
+    setRedoStack((current) => [...current, currentSnapshot].slice(-maxCommandHistoryEntries));
+    restoreHistorySnapshot(previous);
+    setProjectDirty(true);
+    logStatus("Undo restored previous edit state", {
+      level: "success",
+      source: "timeline",
+      details: { undoCount: Math.max(0, undoStack.length - 1), redoCount: redoStack.length + 1 }
+    });
+  }
+
+  function redoProjectState() {
+    const next = redoStack.at(-1);
+    if (!next) {
+      logStatus("Nothing to redo", { level: "warning", source: "timeline" });
+      return;
+    }
+
+    const currentSnapshot = createHistorySnapshot();
+    setRedoStack((current) => current.slice(0, -1));
+    setUndoStack((current) => [...current, currentSnapshot].slice(-maxCommandHistoryEntries));
+    restoreHistorySnapshot(next);
+    setProjectDirty(true);
+    logStatus("Redo restored next edit state", {
+      level: "success",
+      source: "timeline",
+      details: { undoCount: undoStack.length + 1, redoCount: Math.max(0, redoStack.length - 1) }
+    });
+  }
+
+  function openWorkspaceTab(nextTab: WorkspaceTab) {
+    setActiveTab(nextTab);
+    recordLog(`Opened ${workspaceTabs.find((tab) => tab.id === nextTab)?.label ?? nextTab} workspace`, { source: "ui", details: { tab: nextTab } }, false);
+  }
+
+  async function copyLogs() {
+    const text = logsToText(appLogs);
+    try {
+      await navigator.clipboard.writeText(text);
+      logStatus("Copied visible logs to clipboard", { level: "success", source: "app" });
+    } catch (error) {
+      logStatus(error instanceof Error ? error.message : "Copy logs failed", { level: "error", source: "app" });
+    }
+  }
+
+  function exportLogs() {
+    const jsonl = appLogs.map((entry) => JSON.stringify(entry)).join("\n");
+    const blob = new Blob([`${jsonl}\n`], { type: "application/x-ndjson" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `ai-video-editor-logs-${new Date().toISOString().slice(0, 10)}.jsonl`;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+    logStatus("Exported visible logs", { level: "success", source: "app" });
+  }
+
+  function clearLogs() {
+    const entry = createAppLogEntry("Logs cleared", { source: "app" });
+    setLatestStatusMessage(entry.message);
+    setAppLogs([entry]);
+    void appendProjectLog(entry, projectRef.current.path).catch(() => undefined);
   }
 
   const activeContent = useMemo(() => {
     switch (activeTab) {
       case "home":
-        return <HomeTab engineStatus={engineStatus} recentProjects={recentProjects} onProjectOpen={applyProject} setStatusMessage={setStatusMessage} />;
+        return <HomeTab engineStatus={engineStatus} recentProjects={recentProjects} onProjectOpen={applyProject} setStatusMessage={makeStatusLogger("project")} />;
       case "edit":
         return (
           <EditTab
             previewUrl={engineStatus?.previewUrl}
             mediaAssets={mediaAssets}
             timeline={timeline}
-            setTimeline={setTimeline}
+            setTimeline={(nextTimeline) => {
+              setTimeline(nextTimeline);
+            }}
             projectSettings={projectSettings}
             onImportMedia={handleImportMedia}
             onImportMediaResult={applyImportedMedia}
             onRemoveMediaAsset={removeMediaAsset}
-            setStatusMessage={setStatusMessage}
+            setStatusMessage={makeStatusLogger("timeline")}
           />
         );
       case "audio":
@@ -273,11 +828,12 @@ export function AppShell() {
             projectSettings={projectSettings}
             onProjectSettingsChange={(settings) => {
               setProjectSettings(settings);
+              logStatus("Project settings changed", { source: "project", details: { settings } });
             }}
             firstMediaMetadata={mediaAssets.find((asset) => asset.kind === "video" && asset.metadata)?.metadata}
             mediaAssets={mediaAssets}
             gpuStatus={engineStatus?.gpu ?? null}
-            setStatusMessage={setStatusMessage}
+            setStatusMessage={makeStatusLogger("export")}
           />
         );
       case "future-ai":
@@ -298,24 +854,47 @@ export function AppShell() {
   return (
     <main className="app-shell">
       <TopBar
-        projectName={project.name}
+        projectName={`${project.name}${projectDirty ? " *" : ""}`}
         onImportMedia={handleImportMedia}
-        onSave={() => setStatusMessage("Project saved")}
-        onUndo={() => setStatusMessage("Undo command queued")}
-        onRedo={() => setStatusMessage("Redo command queued")}
-        onOpenCommandPalette={() => setCommandPaletteOpen(true)}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onExport={() => setActiveTab("export")}
+        onSave={() => void saveProject("manual")}
+        onUndo={undoProjectState}
+        onRedo={redoProjectState}
+        canUndo={undoStack.length > 0}
+        canRedo={redoStack.length > 0}
+        onOpenCommandPalette={() => {
+          setCommandPaletteOpen(true);
+          recordLog("Command search opened", { source: "ui" }, false);
+        }}
+        onOpenSettings={() => {
+          setSettingsOpen(true);
+          recordLog("Settings opened", { source: "ui" }, false);
+        }}
+        onExport={() => openWorkspaceTab("export")}
       />
-      <Tabs items={workspaceTabs} activeId={activeTab} onChange={setActiveTab} />
+      <Tabs items={workspaceTabs} activeId={activeTab} onChange={openWorkspaceTab} />
       <section className="workspace">{activeContent}</section>
       <footer className="status-bar">
-        <span>{statusMessage}</span>
+        <button type="button" className="status-message-button" onClick={() => setLogsOpen(true)} title="Open application logs">
+          <span>{statusMessage}</span>
+        </button>
+        <span className="status-pill">
+          {projectStatusLabel(projectDirty, savingProject, autosaveState, lastSavedAt)}
+        </span>
+        <span className="status-pill">
+          Undo {undoStack.length} / Redo {redoStack.length}
+        </span>
+        {missingMediaPaths.length > 0 ? (
+          <span className="status-pill status-pill-warning">
+            {missingMediaPaths.length} missing media
+          </span>
+        ) : null}
         <span className="status-pill">
           <Blocks size={14} />
           {engineStatus?.gpu.name ?? "GPU unknown"}
         </span>
       </footer>
+
+      <LogsDrawer open={logsOpen} logs={appLogs} onClose={() => setLogsOpen(false)} onClear={clearLogs} onCopy={copyLogs} onExport={exportLogs} />
 
       <Modal title="Command Search" open={commandPaletteOpen} onClose={() => setCommandPaletteOpen(false)}>
         <div className="command-palette">
@@ -436,4 +1015,57 @@ function formatCodec(codec: ProjectSettings["defaultCodec"]) {
 
 function formatFps(fps: number) {
   return Number.isFinite(fps) && fps > 0 ? fps.toFixed(Math.abs(fps - Math.round(fps)) < 0.01 ? 0 : 3) : "unknown";
+}
+
+function commandSource(commandType: string): AppLogSource {
+  if (commandType.includes("media")) {
+    return "media";
+  }
+  if (commandType.includes("color") || commandType.includes("lut")) {
+    return "timeline";
+  }
+  if (commandType.includes("export")) {
+    return "export";
+  }
+  return "timeline";
+}
+
+function formatCommandType(commandType: string) {
+  return commandType.replaceAll("_", " ");
+}
+
+function serializeProjectState(projectSettings: ProjectSettings, mediaAssets: MediaAsset[], timeline: Timeline, aiProposals: AiEditProposal[]) {
+  return JSON.stringify({
+    projectSettings,
+    mediaAssets,
+    timeline,
+    aiProposals
+  });
+}
+
+function projectStatusLabel(dirty: boolean, saving: boolean, autosaveState: string, lastSavedAt: string | null) {
+  if (saving || autosaveState === "saving") {
+    return "Saving";
+  }
+  if (autosaveState === "pending") {
+    return "Autosave pending";
+  }
+  if (autosaveState === "error") {
+    return "Save failed";
+  }
+  if (dirty) {
+    return "Unsaved";
+  }
+  if (lastSavedAt) {
+    return `Saved ${formatShortTime(lastSavedAt)}`;
+  }
+  return "Not saved";
+}
+
+function formatShortTime(timestamp: string) {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }

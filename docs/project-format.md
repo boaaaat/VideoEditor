@@ -11,6 +11,7 @@ MyProject/
   thumbnails/
   waveforms/
   cache/
+    ui-state.json
   luts/
   plugins/
   exports/
@@ -30,6 +31,8 @@ MyProject/
 ## Database Ownership
 
 The C++ engine is the only writer for `project.db`. UI state is a read model derived from engine responses and events.
+
+The desktop app stores a UI restore snapshot at `cache/ui-state.json`. This file contains the current read model for project settings, media-bin cards, timeline state, and AI proposals so reopening a project can restore the visible workspace reliably while the engine project database matures.
 
 ## Media Import
 

@@ -137,8 +137,37 @@
   background: #171716;
 }
 
+.status-message-button {
+  min-width: 0;
+  max-width: min(72vw, 980px);
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.status-message-button:hover,
+.status-message-button:focus-visible {
+  color: var(--text);
+}
+
+.status-message-button span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .status-pill {
   gap: 6px;
+  flex: 0 0 auto;
+}
+
+.status-pill-warning {
+  color: #f4d58a;
 }
 
 .edit-workspace {

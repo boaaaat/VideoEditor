@@ -2,6 +2,16 @@ import type { AiEditProposal, CommandResult, EditorCommand, EngineStatus, Export
 
 type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
+export interface CommandExecutionEventDetail {
+  phase: "start" | "finish" | "error";
+  commandType: EditorCommand["type"];
+  command: EditorCommand;
+  commandId?: string;
+  ok?: boolean;
+  error?: string;
+  durationMs?: number;
+}
+
 const browserEngineStatus: EngineStatus = {
   appName: "AI Video Editor",
   version: "0.1.0",
@@ -173,6 +183,38 @@ export function getEngineStatus(): Promise<EngineStatus> {
   return engineRpc<EngineStatus>("engine.status");
 }
 
-export function executeCommand(command: EditorCommand): Promise<CommandResult> {
-  return engineRpc<CommandResult>("command.execute", command);
+export async function executeCommand(command: EditorCommand): Promise<CommandResult> {
+  const startedAt = performance.now();
+  emitCommandExecutionEvent({
+    phase: "start",
+    commandType: command.type,
+    command
+  });
+
+  try {
+    const result = await engineRpc<CommandResult>("command.execute", command);
+    emitCommandExecutionEvent({
+      phase: "finish",
+      commandType: command.type,
+      command,
+      commandId: result.commandId,
+      ok: result.ok,
+      error: result.error,
+      durationMs: Math.round(performance.now() - startedAt)
+    });
+    return result;
+  } catch (error) {
+    emitCommandExecutionEvent({
+      phase: "error",
+      commandType: command.type,
+      command,
+      error: error instanceof Error ? error.message : "Command execution failed",
+      durationMs: Math.round(performance.now() - startedAt)
+    });
+    throw error;
+  }
+}
+
+function emitCommandExecutionEvent(detail: CommandExecutionEventDetail) {
+  window.dispatchEvent(new CustomEvent("ai-video-editor:command-execution", { detail }));
 }
