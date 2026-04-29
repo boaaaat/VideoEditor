@@ -396,7 +396,7 @@
   align-content: center;
   gap: 8px;
   min-height: 160px;
-  overflow: hidden;
+  overflow: auto;
   border: 1px solid #10100f;
   background:
     linear-gradient(135deg, rgba(47, 191, 159, 0.14), transparent),

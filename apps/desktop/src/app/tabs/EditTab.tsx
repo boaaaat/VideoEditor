@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type Dispatch,
   type DragEvent as ReactDragEvent,
   type MouseEvent as ReactMouseEvent,
@@ -1591,6 +1592,7 @@ export function EditTab({
               zoomPxPerSecond={timelineZoom}
               snapping={snapping}
               onZoom={zoomTimeline}
+              onZoomTo={setTimelineZoomValue}
               onAddMediaToTimeline={addMediaToTimeline}
               onMoveClip={moveClip}
               onTrimClip={trimClip}
@@ -1635,6 +1637,7 @@ function TimelineSurface({
   zoomPxPerSecond,
   snapping,
   onZoom,
+  onZoomTo,
   onAddMediaToTimeline,
   onMoveClip,
   onTrimClip,
@@ -1657,6 +1660,7 @@ function TimelineSurface({
   zoomPxPerSecond: number;
   snapping: boolean;
   onZoom: (direction: -1 | 1) => void;
+  onZoomTo: (zoomPxPerSecond: number) => void;
   onAddMediaToTimeline: (asset: MediaAsset, targetTrackId?: string, startUs?: number) => Promise<void>;
   onMoveClip: (clipId: string, targetTrackId: string, startUs: number) => Promise<void>;
   onTrimClip: (clipId: string, edge: "start" | "end", deltaUs: number) => Promise<void>;
@@ -1751,10 +1755,26 @@ function TimelineSurface({
         lastWheelModeRef.current = mode;
         setStatusMessage(event.ctrlKey ? "Timeline zoom with Ctrl+wheel" : "Timeline zoom with Shift+wheel");
       }
-      onZoom(event.deltaY > 0 ? -1 : 1);
+
+      const direction = event.deltaY > 0 ? -1 : 1;
+      const nextZoom = clamp(zoomPxPerSecond + direction * timelineZoomStep, minTimelineZoom, maxTimelineZoom);
+      if (nextZoom === zoomPxPerSecond) {
+        return;
+      }
+
+      const scrollElement = event.currentTarget;
+      const rect = scrollElement.getBoundingClientRect();
+      const anchorX = event.clientX - rect.left + scrollElement.scrollLeft - timelineHeaderWidth;
+      const anchorSeconds = clamp(anchorX / zoomPxPerSecond, 0, durationSeconds);
+      onZoomTo(nextZoom);
+      requestAnimationFrame(() => {
+        scrollElement.scrollLeft = Math.max(0, anchorSeconds * nextZoom - (event.clientX - rect.left) + timelineHeaderWidth);
+      });
       return;
     }
 
+    // Plain wheel always pans the timeline horizontally. Shift/Ctrl wheel zooms around
+    // the cursor anchor above; status logging is limited to mode changes by lastWheelModeRef.
     if (lastWheelModeRef.current !== "pan") {
       lastWheelModeRef.current = "pan";
       setStatusMessage("Timeline wheel panning");
@@ -2091,6 +2111,7 @@ function PreviewSurface({
   audioClip,
   projectSettings,
   previewQuality,
+  previewScale,
   playheadUs,
   playing
 }: {
@@ -2101,6 +2122,7 @@ function PreviewSurface({
   audioClip?: TimelineClip;
   projectSettings: ProjectSettings;
   previewQuality: PreviewQuality;
+  previewScale: PreviewScaleMode;
   playheadUs: number;
   playing: boolean;
 }) {
@@ -2219,6 +2241,7 @@ function PreviewSurface({
       mediaPath: videoAsset?.path ?? audioAsset?.path ?? "",
       codec: videoAsset?.metadata?.codec ?? audioAsset?.metadata?.codec ?? "unknown",
       quality: previewQuality,
+      scale: previewScale,
       colorMode: projectSettings.colorMode,
       fps: projectSettings.fps,
       playheadUs,
@@ -2226,7 +2249,7 @@ function PreviewSurface({
       outUs: videoClip?.outUs ?? audioClip?.outUs ?? 0,
       playing
     }).then(setStats).catch(() => undefined);
-  }, [audioAsset, audioClip, playheadUs, playing, previewQuality, projectSettings.colorMode, projectSettings.fps, videoAsset, videoClip]);
+  }, [audioAsset, audioClip, playheadUs, playing, previewQuality, previewScale, projectSettings.colorMode, projectSettings.fps, videoAsset, videoClip]);
 
   useEffect(() => {
     void (playing ? playNativePreview() : pauseNativePreview()).then(setStats).catch(() => undefined);
@@ -2256,6 +2279,7 @@ function PreviewSurface({
   const activeTime = activeClip ? formatTimelineTime(Math.max(0, Math.floor((playheadUs - activeClip.startUs) / 1_000_000))) : "";
   const nativePreviewActive = Boolean(stats?.childHwnd);
   const displayedPreviewFps = playing ? Math.round(stats?.previewFps || projectSettings.fps) : Math.round(stats?.previewFps ?? 0);
+  const previewScaleStyle = getPreviewScaleStyle(previewScale, projectSettings);
   const frameClassName = activeAsset
     ? nativePreviewActive
       ? "preview-frame has-native"
@@ -2266,11 +2290,11 @@ function PreviewSurface({
 
   return (
     <div ref={frameRef} className={frameClassName}>
-      {nativePreviewActive ? <div className="native-preview-surface" /> : null}
+      {nativePreviewActive ? <div className="native-preview-surface" style={previewScaleStyle} /> : null}
       {!nativePreviewActive && videoAsset && videoClip && videoSrc ? (
-        <video ref={videoRef} src={videoSrc} muted={false} playsInline onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, playheadUs, playing)} />
+        <video ref={videoRef} src={videoSrc} muted={false} playsInline style={previewScaleStyle} onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, playheadUs, playing)} />
       ) : null}
-      {!nativePreviewActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" /> : null}
+      {!nativePreviewActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" style={previewScaleStyle} /> : null}
       {!nativePreviewActive && !videoAsset && audioAsset && audioClip && audioSrc ? (
         <>
           <audio ref={audioRef} src={audioSrc} onLoadedMetadata={() => syncMediaElement(audioRef, audioClip, playheadUs, playing)} />
@@ -2496,6 +2520,21 @@ function formatTimelineTime(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+}
+
+function getPreviewScaleStyle(previewScale: PreviewScaleMode, projectSettings: ProjectSettings): CSSProperties | undefined {
+  if (previewScale === "fit") {
+    return undefined;
+  }
+
+  const scale = Number(previewScale) / 100;
+  return {
+    width: `${Math.max(1, Math.round(projectSettings.width * scale))}px`,
+    height: `${Math.max(1, Math.round(projectSettings.height * scale))}px`,
+    maxWidth: "none",
+    maxHeight: "none",
+    objectFit: "contain"
+  };
 }
 
 function formatMediaAssetDetail(asset: MediaAsset) {
