@@ -138,6 +138,9 @@ int runTests() {
   assert(importResult.at("ok") == true);
   assert(importResult.at("data").at("media").size() == 2);
   const auto mediaId = importResult.at("data").at("media").at(0).at("id").get<std::string>();
+  assert(importResult.at("data").at("media").at(0).at("metadata").at("width") == 0);
+  assert(importResult.at("data").at("media").at(0).at("metadata").at("height") == 0);
+  assert(importResult.at("data").at("media").at(0).at("metadata").at("fps") == 0.0);
   assert(importResult.at("data").at("media").at(0).at("intelligence").at("transcript").at("status") == "placeholder");
   assert(importResult.at("data").at("media").at(0).at("intelligence").at("sceneCuts").at("status") == "placeholder");
 
@@ -159,13 +162,57 @@ int runTests() {
   const auto timelineState = app.handleRequest({{"jsonrpc", "2.0"}, {"id", 4}, {"method", "timeline.state"}});
   assert(timelineState.at("tracks").at(1).at("clips").size() == 1);
 
+  const auto removeResult = app.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 5},
+      {"method", "command.execute"},
+      {"params",
+       {
+           {"type", "remove_media"},
+           {"mediaId", mediaId},
+       }},
+  });
+  assert(removeResult.at("ok") == true);
+  assert(removeResult.at("data").at("mediaIndex").at("media").size() == 1);
+  assert(removeResult.at("data").at("timeline").at("tracks").at(1).at("clips").empty());
+
+  const auto reimportResult = app.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 6},
+      {"method", "command.execute"},
+      {"params",
+       {
+           {"type", "import_media"},
+           {"paths", {"sample-a.mp4"}},
+       }},
+  });
+  assert(reimportResult.at("ok") == true);
+  const auto reimportedMediaId = reimportResult.at("data").at("media").at(0).at("id").get<std::string>();
+  assert(reimportedMediaId == mediaId);
+
+  const auto reAddClipResult = app.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 7},
+      {"method", "command.execute"},
+      {"params",
+       {
+           {"type", "add_clip"},
+           {"mediaId", mediaId},
+           {"trackId", "v1"},
+           {"startUs", 0},
+           {"inUs", 0},
+           {"outUs", 5000000},
+       }},
+  });
+  assert(reAddClipResult.at("ok") == true);
+
   ai_editor::EngineApp reloadedApp;
-  const auto reloadedTimeline = reloadedApp.handleRequest({{"jsonrpc", "2.0"}, {"id", 5}, {"method", "timeline.state"}});
+  const auto reloadedTimeline = reloadedApp.handleRequest({{"jsonrpc", "2.0"}, {"id", 8}, {"method", "timeline.state"}});
   assert(reloadedTimeline.at("tracks").at(1).at("clips").size() == 1);
 
   const auto proposal = reloadedApp.handleRequest({
       {"jsonrpc", "2.0"},
-      {"id", 6},
+      {"id", 9},
       {"method", "ai.proposal.generate"},
       {"params",
        {
@@ -179,7 +226,7 @@ int runTests() {
 
   const auto appliedProposal = reloadedApp.handleRequest({
       {"jsonrpc", "2.0"},
-      {"id", 7},
+      {"id", 10},
       {"method", "ai.proposal.apply"},
       {"params", {{"proposalId", proposal.at("id")}}},
   });

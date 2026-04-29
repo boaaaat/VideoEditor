@@ -205,6 +205,63 @@
   color: var(--muted);
 }
 
+.context-menu {
+  position: fixed;
+  z-index: 3000;
+  display: grid;
+  gap: 3px;
+  width: max-content;
+  min-width: 178px;
+  max-width: 240px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 18px 56px rgba(0, 0, 0, 0.42);
+}
+
+.context-menu button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+
+.context-menu button:hover:not(:disabled),
+.context-menu button:focus-visible:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.context-menu button.danger {
+  color: var(--danger);
+}
+
+.context-menu button:disabled {
+  cursor: default;
+  color: var(--muted);
+  opacity: 0.52;
+}
+
+.context-menu-icon {
+  display: grid;
+  place-items: center;
+}
+
+.context-menu button span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .media-thumb-frame.audio {
   background: repeating-linear-gradient(90deg, #7bb65f 0 4px, #294125 4px 8px);
 }

@@ -180,6 +180,27 @@ export function AppShell() {
     applyImportedMedia(await importMediaFiles());
   }
 
+  function removeMediaAsset(assetId: string, data?: unknown) {
+    const resultData = data as { mediaIndex?: { media?: MediaAsset[] }; timeline?: Timeline } | undefined;
+    if (Array.isArray(resultData?.mediaIndex?.media)) {
+      setMediaAssets(resultData.mediaIndex.media);
+    } else {
+      setMediaAssets((existing) => existing.filter((asset) => asset.id !== assetId));
+    }
+
+    if (resultData?.timeline?.tracks) {
+      setTimeline(resultData.timeline);
+    } else {
+      setTimeline((current) => ({
+        ...current,
+        tracks: current.tracks.map((track) => ({
+          ...track,
+          clips: track.clips.filter((clip) => clip.mediaId !== assetId)
+        }))
+      }));
+    }
+  }
+
   async function refreshEngineState() {
     const [mediaIndex, nextTimeline, proposalIndex] = await Promise.all([
       engineRpc<{ media: MediaAsset[] }>("media.index"),
@@ -232,6 +253,7 @@ export function AppShell() {
             projectSettings={projectSettings}
             onImportMedia={handleImportMedia}
             onImportMediaResult={applyImportedMedia}
+            onRemoveMediaAsset={removeMediaAsset}
             setStatusMessage={setStatusMessage}
           />
         );
