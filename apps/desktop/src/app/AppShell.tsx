@@ -181,7 +181,7 @@ export function AppShell() {
     }
 
     const timeout = window.setTimeout(() => {
-      void validateMediaPaths(paths)
+      void validateMediaPaths(paths, projectRef.current.path)
         .then((missing) => {
           if (cancelled) {
             return;
@@ -430,12 +430,14 @@ export function AppShell() {
       return;
     }
 
-    setMediaAssets((existing) => {
-      const existingPaths = new Set(existing.map((asset) => asset.path));
-      const newAssets = result.media.filter((asset) => !existingPaths.has(asset.path));
-      return [...existing, ...newAssets];
-    });
-    applyTimelineFromCommandData(result.command.data);
+    const existingPaths = new Set(mediaAssets.map((asset) => asset.path));
+    const newAssets = result.media.filter((asset) => !existingPaths.has(asset.path));
+    const nextMediaAssets = [...mediaAssets, ...newAssets];
+    const nextTimeline = timelineFromCommandData(result.command.data) ?? timeline;
+
+    setMediaAssets(nextMediaAssets);
+    setTimeline(nextTimeline);
+    void saveProjectStateSnapshot(projectSettings, nextMediaAssets, nextTimeline, aiProposals, "media import");
     const importedVideo = result.media.find((asset) => asset.kind === "video" && asset.metadata);
     if (importedVideo?.metadata) {
       const proposal = createProjectSettingsProposal(importedVideo, projectSettings);
@@ -475,23 +477,20 @@ export function AppShell() {
 
   function removeMediaAsset(assetId: string, data?: unknown) {
     const resultData = data as { mediaIndex?: { media?: MediaAsset[] }; timeline?: Timeline } | undefined;
-    if (Array.isArray(resultData?.mediaIndex?.media)) {
-      setMediaAssets(resultData.mediaIndex.media);
-    } else {
-      setMediaAssets((existing) => existing.filter((asset) => asset.id !== assetId));
-    }
+    const nextMediaAssets = Array.isArray(resultData?.mediaIndex?.media) ? resultData.mediaIndex.media : mediaAssets.filter((asset) => asset.id !== assetId);
+    const nextTimeline = resultData?.timeline?.tracks
+      ? resultData.timeline
+      : {
+          ...timeline,
+          tracks: timeline.tracks.map((track) => ({
+            ...track,
+            clips: track.clips.filter((clip) => clip.mediaId !== assetId)
+          }))
+        };
 
-    if (resultData?.timeline?.tracks) {
-      setTimeline(resultData.timeline);
-    } else {
-      setTimeline((current) => ({
-        ...current,
-        tracks: current.tracks.map((track) => ({
-          ...track,
-          clips: track.clips.filter((clip) => clip.mediaId !== assetId)
-        }))
-      }));
-    }
+    setMediaAssets(nextMediaAssets);
+    setTimeline(nextTimeline);
+    void saveProjectStateSnapshot(projectSettings, nextMediaAssets, nextTimeline, aiProposals, "media remove");
   }
 
   function renameMediaAsset(assetId: string, nextName: string) {
@@ -502,14 +501,14 @@ export function AppShell() {
     }
 
     const previousName = mediaAssets.find((asset) => asset.id === assetId)?.name ?? "";
-    setMediaAssets((existing) =>
-      existing.map((asset) => {
-        if (asset.id !== assetId) {
-          return asset;
-        }
-        return { ...asset, name: trimmedName };
-      })
-    );
+    const nextMediaAssets = mediaAssets.map((asset) => {
+      if (asset.id !== assetId) {
+        return asset;
+      }
+      return { ...asset, name: trimmedName };
+    });
+    setMediaAssets(nextMediaAssets);
+    void saveProjectStateSnapshot(projectSettings, nextMediaAssets, timeline, aiProposals, "media rename");
     logStatus(`Renamed media bin item to ${trimmedName}`, {
       source: "media",
       details: { mediaId: assetId, previousName, nextName: trimmedName }
@@ -519,15 +518,15 @@ export function AppShell() {
   function relinkMediaAsset(assetId: string, relinkedAsset: MediaAsset) {
     const previousAsset = mediaAssets.find((asset) => asset.id === assetId);
     const previousPath = previousAsset?.path ?? "";
-    setMediaAssets((existing) =>
-      existing.map((asset) => {
-        if (asset.id !== assetId) {
-          return asset;
-        }
-        return { ...relinkedAsset, id: asset.id, name: asset.name };
-      })
-    );
+    const nextMediaAssets = mediaAssets.map((asset) => {
+      if (asset.id !== assetId) {
+        return asset;
+      }
+      return { ...relinkedAsset, id: asset.id, name: asset.name };
+    });
+    setMediaAssets(nextMediaAssets);
     setMissingMediaPaths((existing) => existing.filter((path) => path !== previousPath && path !== relinkedAsset.path));
+    void saveProjectStateSnapshot(projectSettings, nextMediaAssets, timeline, aiProposals, "media relink");
     logStatus(`Relinked media: ${previousAsset?.name ?? relinkedAsset.name}`, {
       level: "success",
       source: "media",
@@ -560,10 +559,15 @@ export function AppShell() {
   }
 
   function applyTimelineFromCommandData(data: unknown) {
-    const maybeTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
-    if (maybeTimeline?.tracks) {
+    const maybeTimeline = timelineFromCommandData(data);
+    if (maybeTimeline) {
       setTimeline(maybeTimeline);
     }
+  }
+
+  function timelineFromCommandData(data: unknown) {
+    const maybeTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
+    return maybeTimeline?.tracks ? maybeTimeline : null;
   }
 
   async function generateRoughCutProposal(goal: string, mediaIds: string[]) {
@@ -669,6 +673,46 @@ export function AppShell() {
       });
     } finally {
       setSavingProject(false);
+    }
+  }
+
+  async function saveProjectStateSnapshot(
+    nextSettings: ProjectSettings,
+    nextMediaAssets: MediaAsset[],
+    nextTimeline: Timeline,
+    nextProposals: AiEditProposal[],
+    reason: string
+  ) {
+    const activeProject = projectRef.current;
+    const savedAt = new Date().toISOString();
+    const snapshot: ProjectSnapshot = {
+      version: 1,
+      savedAt,
+      project: { ...activeProject, lastSavedAt: savedAt },
+      projectSettings: nextSettings,
+      mediaAssets: nextMediaAssets,
+      timeline: nextTimeline,
+      aiProposals: nextProposals
+    };
+
+    try {
+      await saveProjectSnapshot(activeProject, snapshot);
+      const savedProject = { ...activeProject, lastSavedAt: savedAt };
+      projectRef.current = savedProject;
+      setProject(savedProject);
+      setRecentProjects(saveRecentProject(savedProject));
+      lastSavedStateRef.current = serializeProjectState(nextSettings, nextMediaAssets, nextTimeline, nextProposals);
+      setProjectDirty(false);
+      setLastSavedAt(savedAt);
+      setAutosaveState("saved");
+      recordLog(`Project snapshot saved after ${reason}`, { source: "project", details: { projectPath: activeProject.path ?? null, savedAt } }, false);
+    } catch (error) {
+      setAutosaveState("error");
+      logStatus(error instanceof Error ? error.message : "Project snapshot save failed", {
+        level: "error",
+        source: "project",
+        details: { reason, projectPath: activeProject.path ?? null }
+      });
     }
   }
 

@@ -86,21 +86,24 @@ export async function saveProjectSnapshot(project: ActiveProject, snapshot: Proj
 }
 
 export async function loadProjectSnapshot(project: ActiveProject): Promise<ProjectSnapshot | null> {
+  let snapshot: ProjectSnapshot | null;
   if (!project.path || !("__TAURI_INTERNALS__" in window)) {
-    return loadBrowserProjectSnapshot(project);
+    snapshot = loadBrowserProjectSnapshot(project);
+  } else {
+    const { invoke } = await import("@tauri-apps/api/core");
+    snapshot = await invoke<ProjectSnapshot | null>("load_project_snapshot", { projectPath: project.path });
   }
 
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<ProjectSnapshot | null>("load_project_snapshot", { projectPath: project.path });
+  return snapshot ? normalizeSnapshotMediaPaths(snapshot, project.path) : null;
 }
 
-export async function validateMediaPaths(paths: string[]): Promise<string[]> {
+export async function validateMediaPaths(paths: string[], projectPath?: string): Promise<string[]> {
   if (paths.length === 0 || !("__TAURI_INTERNALS__" in window)) {
     return [];
   }
 
   const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<string[]>("validate_media_paths", { paths });
+  return invoke<string[]>("validate_media_paths", { paths, projectPath });
 }
 
 export function loadRecentProjects(): ActiveProject[] {
@@ -134,4 +137,36 @@ function loadBrowserProjectSnapshot(project: ActiveProject): ProjectSnapshot | n
 
 function browserSnapshotKey(project: ActiveProject) {
   return `ai-video-editor.projectSnapshot.${project.manifestPath ?? project.path ?? project.name}`;
+}
+
+function normalizeSnapshotMediaPaths(snapshot: ProjectSnapshot, projectPath?: string): ProjectSnapshot {
+  if (!projectPath) {
+    return snapshot;
+  }
+
+  return {
+    ...snapshot,
+    mediaAssets: snapshot.mediaAssets.map((asset) => {
+      const path = resolveProjectMediaPath(asset.path, projectPath);
+      return {
+        ...asset,
+        path,
+        metadata: asset.metadata ? { ...asset.metadata, path: resolveProjectMediaPath(asset.metadata.path, projectPath) } : asset.metadata
+      };
+    })
+  };
+}
+
+function resolveProjectMediaPath(path: string, projectPath: string) {
+  const trimmedPath = path.trim();
+  if (!trimmedPath || isAbsoluteOrUrlPath(trimmedPath)) {
+    return trimmedPath;
+  }
+
+  const separator = projectPath.includes("\\") ? "\\" : "/";
+  return `${projectPath.replace(/[\\/]+$/, "")}${separator}${trimmedPath.replace(/^[\\/]+/, "")}`;
+}
+
+function isAbsoluteOrUrlPath(path: string) {
+  return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("\\\\") || path.startsWith("/") || /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(path);
 }

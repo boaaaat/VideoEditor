@@ -254,11 +254,65 @@ pub fn load_project_snapshot(project_path: String) -> Result<Option<Value>, Stri
 }
 
 #[tauri::command]
-pub fn validate_media_paths(paths: Vec<String>) -> Vec<String> {
+pub fn validate_media_paths(paths: Vec<String>, project_path: Option<String>) -> Vec<String> {
     paths
         .into_iter()
-        .filter(|path| !PathBuf::from(path).exists())
+        .filter(|path| !resolve_media_path(path, project_path.as_deref()).exists())
         .collect()
+}
+
+fn resolve_media_path(path: &str, project_path: Option<&str>) -> PathBuf {
+    let normalized = normalize_media_path(path);
+    let media_path = PathBuf::from(&normalized);
+    if media_path.is_absolute() || project_path.is_none() {
+        return media_path;
+    }
+
+    PathBuf::from(project_path.unwrap()).join(media_path)
+}
+
+fn normalize_media_path(path: &str) -> String {
+    let trimmed = path.trim();
+    let without_scheme = if let Some(rest) = trimmed.strip_prefix("file://") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("asset://localhost/") {
+        rest
+    } else {
+        trimmed
+    };
+
+    let decoded = percent_decode_path(without_scheme);
+    if decoded.len() > 2 && decoded.as_bytes()[0] == b'/' && decoded.as_bytes()[2] == b':' {
+        return decoded[1..].to_string();
+    }
+    decoded
+}
+
+fn percent_decode_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut output = Vec::with_capacity(path.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2])) {
+                output.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).to_string()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn is_iso_date(value: &str) -> bool {
