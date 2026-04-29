@@ -104,12 +104,14 @@ export interface ExportTimelineCommand {
   width: number;
   height: number;
   fps: ExportFps;
+  durationUs?: number;
   codec: ExportCodec;
   container: ExportContainer;
   quality: ExportQuality;
   bitrateMbps: number;
   audioEnabled: boolean;
   colorMode: ColorMode;
+  overwrite?: boolean;
 }
 
 export type EditorCommand =

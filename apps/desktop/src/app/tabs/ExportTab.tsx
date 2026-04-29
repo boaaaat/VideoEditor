@@ -8,6 +8,7 @@ import { engineRpc } from "../../features/commands/commandClient";
 import type { LogStatus } from "../../features/logging/appLog";
 import {
   calculateAutoBitrate,
+  exportDestinationExists,
   exportCodecLabels,
   exportCodecs,
   exportContainers,
@@ -21,20 +22,31 @@ import {
 import { defaultProjectSettings, seedProjectSettingsFromMetadata } from "../../features/settings";
 import type { MediaAsset } from "../../features/media/mediaTypes";
 
+type ExportPresetId = "custom" | "web_1080p" | "archive_4k" | "preview_fast";
+
+const exportPresetLabels: Record<ExportPresetId, string> = {
+  custom: "Custom",
+  web_1080p: "Web 1080p",
+  archive_4k: "Archive 4K",
+  preview_fast: "Preview Fast"
+};
+
 interface ExportTabProps {
   projectSettings: ProjectSettings;
   onProjectSettingsChange: (settings: ProjectSettings) => void;
   firstMediaMetadata?: MediaMetadata;
   mediaAssets: MediaAsset[];
+  timelineDurationUs: number;
   gpuStatus: GpuStatus | null;
   setStatusMessage: LogStatus;
 }
 
-export function ExportTab({ projectSettings, onProjectSettingsChange, firstMediaMetadata, mediaAssets, gpuStatus, setStatusMessage }: ExportTabProps) {
+export function ExportTab({ projectSettings, onProjectSettingsChange, firstMediaMetadata, mediaAssets, timelineDurationUs, gpuStatus, setStatusMessage }: ExportTabProps) {
   const [codec, setCodec] = useState<ExportCodec>(projectSettings.defaultCodec);
   const [container, setContainer] = useState<ExportContainer>(projectSettings.defaultContainer);
   const [quality, setQuality] = useState<ExportQuality>("medium");
   const [audioEnabled, setAudioEnabled] = useState(projectSettings.audioEnabled);
+  const [preset, setPreset] = useState<ExportPresetId>("custom");
   const [outputPath, setOutputPath] = useState("");
   const [exportStatus, setExportStatus] = useState<ExportStatus>({ jobId: null, state: "idle", progress: 0, logs: [] });
   const loggedExportLinesRef = useRef(0);
@@ -50,6 +62,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
     hasAudio,
     width: projectSettings.width,
     height: projectSettings.height,
+    durationUs: timelineDurationUs,
     gpu: gpuStatus
   });
   const av1Supported = Boolean(gpuStatus?.av1NvencAvailable);
@@ -109,6 +122,41 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
     });
   }
 
+  function applyExportPreset(nextPreset: ExportPresetId) {
+    setPreset(nextPreset);
+    if (nextPreset === "custom") {
+      return;
+    }
+
+    if (nextPreset === "web_1080p") {
+      setCodec("h264_nvenc");
+      setContainer("mp4");
+      setQuality("medium");
+      setAudioEnabled(hasAudio);
+      updateSettings({ resolution: "1080p", width: 1920, height: 1080, defaultCodec: "h264_nvenc", defaultContainer: "mp4", audioEnabled: hasAudio });
+      setStatusMessage("Applied Web 1080p export preset", { source: "export" });
+      return;
+    }
+
+    if (nextPreset === "archive_4k") {
+      const archiveCodec = av1Supported ? "av1_nvenc" : "hevc_nvenc";
+      setCodec(archiveCodec);
+      setContainer("mkv");
+      setQuality("high");
+      setAudioEnabled(hasAudio);
+      updateSettings({ resolution: "4k", width: 3840, height: 2160, defaultCodec: archiveCodec, defaultContainer: "mkv", audioEnabled: hasAudio });
+      setStatusMessage("Applied Archive 4K export preset", { source: "export" });
+      return;
+    }
+
+    setCodec("h264_nvenc");
+    setContainer("mp4");
+    setQuality("low");
+    setAudioEnabled(false);
+    updateSettings({ resolution: "1080p", width: 1920, height: 1080, defaultCodec: "h264_nvenc", defaultContainer: "mp4", audioEnabled: false });
+    setStatusMessage("Applied Preview Fast export preset", { source: "export" });
+  }
+
   function resetProjectSettings() {
     onProjectSettingsChange(firstMediaMetadata ? seedProjectSettingsFromMetadata(firstMediaMetadata) : defaultProjectSettings);
     setStatusMessage(firstMediaMetadata ? "Project settings reset to first media" : "Project settings reset", { source: "project" });
@@ -129,18 +177,39 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
       return;
     }
 
+    const overwrite = await exportDestinationExists(outputPath);
+    if (overwrite && !window.confirm("Replace the existing export file?")) {
+      setStatusMessage("Export cancelled before overwrite", { level: "warning", details: { outputPath } });
+      return;
+    }
+
+    loggedExportLinesRef.current = 0;
+    setExportStatus({
+      jobId: null,
+      outputPath,
+      state: "running",
+      progress: 0,
+      logs: ["Export start requested"]
+    });
+    setStatusMessage("Export start requested", {
+      source: "export",
+      details: { outputPath, width: projectSettings.width, height: projectSettings.height, fps: projectSettings.fps, durationUs: timelineDurationUs }
+    });
+
     const status = await engineRpc<ExportStatus>("export.start", {
       outputPath,
       resolution: projectSettings.resolution,
       width: projectSettings.width,
       height: projectSettings.height,
       fps: projectSettings.fps,
+      durationUs: timelineDurationUs,
       codec,
       container,
       quality,
       bitrateMbps,
       audioEnabled,
-      colorMode: projectSettings.colorMode
+      colorMode: projectSettings.colorMode,
+      overwrite
     }).catch((error) => {
       const message = error instanceof Error ? error.message : "Export failed";
       const failed: ExportStatus = { jobId: null, state: "error", progress: 0, logs: [message] };
@@ -268,8 +337,19 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
       <Panel title="Export">
         <div className="form-grid">
           <label>
+            Preset
+            <select value={preset} onChange={(event) => applyExportPreset(event.target.value as ExportPresetId)}>
+              {(Object.keys(exportPresetLabels) as ExportPresetId[]).map((value) => (
+                <option key={value} value={value}>{exportPresetLabels[value]}</option>
+              ))}
+            </select>
+          </label>
+          <label>
             File type
-            <select value={container} onChange={(event) => setContainer(event.target.value as ExportContainer)}>
+            <select value={container} onChange={(event) => {
+              setPreset("custom");
+              setContainer(event.target.value as ExportContainer);
+            }}>
               {exportContainers.map((value) => (
                 <option key={value} value={value}>{value.toUpperCase()}</option>
               ))}
@@ -277,7 +357,10 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
           </label>
           <label>
             Codec
-            <select value={codec} onChange={(event) => setCodec(event.target.value as ExportCodec)}>
+            <select value={codec} onChange={(event) => {
+              setPreset("custom");
+              setCodec(event.target.value as ExportCodec);
+            }}>
               {exportCodecs.map((value) => (
                 <option key={value} value={value} disabled={value === "av1_nvenc" && !av1Supported}>
                   {exportCodecLabels[value]}{value === "av1_nvenc" && !av1Supported ? " unsupported on this GPU" : ""}
@@ -287,7 +370,10 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
           </label>
           <label>
             Quality
-            <select value={quality} onChange={(event) => setQuality(event.target.value as ExportQuality)}>
+            <select value={quality} onChange={(event) => {
+              setPreset("custom");
+              setQuality(event.target.value as ExportQuality);
+            }}>
               {exportQualities.map((value) => (
                 <option key={value} value={value}>{exportQualityLabels[value]}</option>
               ))}
@@ -306,7 +392,10 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
               </Button>
             </span>
           </label>
-          <Toggle label="Export audio" checked={audioEnabled} onChange={(event) => setAudioEnabled(event.target.checked)} />
+          <Toggle label="Export audio" checked={audioEnabled} onChange={(event) => {
+            setPreset("custom");
+            setAudioEnabled(event.target.checked);
+          }} />
         </div>
         {!av1Supported ? <p className="form-warning">AV1 NVENC unsupported on this GPU.</p> : null}
         {validationErrors.length > 0 ? <p className="form-warning">{validationErrors[0]}</p> : null}

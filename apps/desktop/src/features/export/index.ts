@@ -39,6 +39,7 @@ export function validateExportSettings({
   hasAudio,
   width,
   height,
+  durationUs,
   gpu
 }: {
   outputPath: string;
@@ -49,11 +50,15 @@ export function validateExportSettings({
   hasAudio: boolean;
   width: number;
   height: number;
+  durationUs: number;
   gpu: GpuStatus | null;
 }) {
   const errors: string[] = [];
   if (!outputPath.trim()) {
     errors.push("Choose an output path.");
+  }
+  if (outputPath.trim() && !outputPath.toLowerCase().endsWith(`.${getContainerExtension(container)}`)) {
+    errors.push(`Output path must end with .${getContainerExtension(container)}.`);
   }
   if (!exportContainers.includes(container)) {
     errors.push("Choose MP4 or MKV.");
@@ -72,6 +77,9 @@ export function validateExportSettings({
   }
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
     errors.push("Choose a valid output size.");
+  }
+  if (!Number.isFinite(durationUs) || durationUs <= 0) {
+    errors.push("Timeline duration must be greater than zero.");
   }
   if (width % 2 !== 0 || height % 2 !== 0) {
     errors.push("Output width and height must be even for hardware encoders.");
@@ -97,6 +105,16 @@ export async function pickExportOutputPath(container: ExportContainer) {
 
 export function getContainerExtension(container: ExportContainer) {
   return container === "mkv" ? "mkv" : "mp4";
+}
+
+export async function exportDestinationExists(outputPath: string) {
+  if (!outputPath || !("__TAURI_INTERNALS__" in window)) {
+    return false;
+  }
+
+  const { invoke } = await import("@tauri-apps/api/core");
+  const missing = await invoke<string[]>("validate_media_paths", { paths: [outputPath] });
+  return missing.length === 0;
 }
 
 function resolutionSize(resolution: ExportResolution) {

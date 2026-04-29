@@ -85,6 +85,7 @@ export interface ExportStatus {
   width?: number;
   height?: number;
   fps?: number;
+  durationUs?: number;
   codec?: ExportCodec;
   container?: ExportContainer;
   quality?: ExportQuality;

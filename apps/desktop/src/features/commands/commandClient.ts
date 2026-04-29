@@ -141,12 +141,24 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
     }
 
     if (method === "export.start") {
+      const request = params as Partial<ExportStatus> & { durationUs?: number } | undefined;
       browserExportStatus = {
         ...browserExportStatus,
         jobId: `browser-export-${Date.now()}`,
+        outputPath: request?.outputPath,
         state: "running",
         progress: 0.1,
-        logs: ["Browser preview accepted export settings."]
+        width: request?.width,
+        height: request?.height,
+        fps: request?.fps,
+        durationUs: request?.durationUs,
+        codec: request?.codec,
+        container: request?.container,
+        quality: request?.quality,
+        bitrateMbps: request?.bitrateMbps,
+        audioEnabled: request?.audioEnabled,
+        colorMode: request?.colorMode,
+        logs: ["Browser preview accepted export settings; file rendering is available in the desktop app."]
       };
       return browserExportStatus as T;
     }

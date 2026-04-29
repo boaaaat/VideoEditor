@@ -5,13 +5,20 @@
 #include "platform/GpuDetector.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cctype>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
 #include <cmath>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -21,6 +28,13 @@ class ExportEngine {
  public:
   ExportEngine(const FfmpegLocator& locator, const GpuDetector& gpuDetector)
       : locator_(locator), gpuDetector_(gpuDetector) {}
+
+  ~ExportEngine() {
+    cancelRequested_ = true;
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+  }
 
   [[nodiscard]] ExportJob createJob(const std::string& outputPath) const {
     ExportRequest request;
@@ -36,6 +50,7 @@ class ExportEngine {
     job.width = request.width;
     job.height = request.height;
     job.fps = request.fps;
+    job.durationUs = request.durationUs;
     job.codec = request.codec;
     job.container = request.container;
     job.quality = request.quality;
@@ -54,39 +69,68 @@ class ExportEngine {
       throw std::runtime_error(join(errors, "; "));
     }
 
+    const auto ffmpeg = locator_.locate("ffmpeg");
+    if (!ffmpeg.available) {
+      throw std::runtime_error(ffmpeg.message.empty() ? "ffmpeg was not found" : ffmpeg.message);
+    }
+
+    {
+      std::lock_guard lock(mutex_);
+      if (activeJob_ && activeJob_->state == "running") {
+        throw std::runtime_error("an export is already running");
+      }
+    }
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+
+    prepareDestination(request);
+
     auto job = createJob(request);
-    job.logs.push_back("Export queued");
+    const auto progressPath = progressPathFor(job.id);
+    std::error_code ignored;
+    std::filesystem::remove(progressPath, ignored);
+    job.ffmpegCommand = buildFfmpegCommand(job, ffmpeg.path, progressPath.string(), request.overwrite);
+    job.logs.push_back("Export started");
+    job.logs.push_back("Render duration: " + formatSeconds(job.durationUs));
     job.logs.push_back("FFmpeg command: " + job.ffmpegCommand);
-    job.logs.push_back("Waiting for timeline render graph input");
-    activeJob_ = job;
-    return activeJob_->toJson();
+
+    {
+      std::lock_guard lock(mutex_);
+      activeJob_ = job;
+      activeProgressPath_ = progressPath;
+      cancelRequested_ = false;
+      lastLoggedProgressPercent_ = -1;
+      worker_ = std::thread([this, jobId = job.id, command = job.ffmpegCommand, outputPath = job.outputPath]() {
+        runExportProcess(jobId, command, outputPath);
+      });
+    }
+
+    return status();
   }
 
   nlohmann::json cancel() {
+    std::lock_guard lock(mutex_);
     if (!activeJob_) {
       return idleStatus();
     }
 
-    activeJob_->cancelled = true;
-    activeJob_->state = "cancelled";
-    activeJob_->logs.push_back("Export cancelled");
+    cancelRequested_ = true;
+    if (activeJob_->state == "running") {
+      activeJob_->cancelled = true;
+      activeJob_->state = "cancelled";
+      activeJob_->logs.push_back("Export cancel requested");
+    }
     return activeJob_->toJson();
   }
 
   nlohmann::json status() {
+    std::lock_guard lock(mutex_);
     if (!activeJob_) {
       return idleStatus();
     }
 
-    if (activeJob_->state == "running") {
-      activeJob_->progress = std::min(1.0, activeJob_->progress + 0.08);
-      activeJob_->logs.push_back("Progress " + std::to_string(static_cast<int>(activeJob_->progress * 100.0)) + "%");
-      if (activeJob_->progress >= 1.0) {
-        activeJob_->state = "completed";
-        activeJob_->logs.push_back("Export completed");
-      }
-    }
-
+    updateProgressFromFile();
     return activeJob_->toJson();
   }
 
@@ -97,12 +141,14 @@ class ExportEngine {
     request.width = params.value("width", 1920);
     request.height = params.value("height", 1080);
     request.fps = params.value("fps", 30);
+    request.durationUs = params.value("durationUs", 60'000'000LL);
     request.codec = params.value("codec", std::string{"h264_nvenc"});
     request.container = params.value("container", std::string{"mp4"});
     request.quality = params.value("quality", std::string{"medium"});
     request.bitrateMbps = params.value("bitrateMbps", 0);
     request.audioEnabled = params.value("audioEnabled", true);
     request.colorMode = params.value("colorMode", std::string{"SDR"});
+    request.overwrite = params.value("overwrite", false);
     if (request.bitrateMbps <= 0) {
       request.bitrateMbps = calculateBitrateMbps(request);
     }
@@ -118,6 +164,14 @@ class ExportEngine {
 
     if (request.width <= 0 || request.height <= 0) {
       errors.push_back("output width and height must be positive");
+    }
+
+    if (request.durationUs <= 0) {
+      errors.push_back("timeline duration must be positive");
+    }
+
+    if (request.fps <= 0) {
+      errors.push_back("export fps must be positive");
     }
 
     if (request.width % 2 != 0 || request.height % 2 != 0) {
@@ -144,6 +198,11 @@ class ExportEngine {
       errors.push_back("HDR export requires H.265 or AV1");
     }
 
+    const auto extension = lower(std::filesystem::path(request.outputPath).extension().string());
+    if (!request.outputPath.empty() && (extension.empty() || extension != "." + request.container)) {
+      errors.push_back("output file extension must match selected container");
+    }
+
     return errors;
   }
 
@@ -159,23 +218,38 @@ class ExportEngine {
   }
 
   [[nodiscard]] static std::string buildFfmpegCommand(const ExportJob& job) {
+    return buildFfmpegCommand(job, "ffmpeg", "", true);
+  }
+
+ private:
+  [[nodiscard]] static std::string buildFfmpegCommand(const ExportJob& job, const std::string& ffmpegPath, const std::string& progressPath, bool overwrite) {
+    const auto durationSeconds = formatSeconds(job.durationUs);
     std::vector<std::string> args = {
-        "ffmpeg",
+        ffmpegPath.empty() ? "ffmpeg" : ffmpegPath,
         "-hide_banner",
-        "-y",
-        "-hwaccel",
-        "cuda",
+        overwrite ? "-y" : "-n",
+        "-f",
+        "lavfi",
         "-i",
-        "<timeline-render-graph>",
+        "color=c=black:s=" + std::to_string(job.width) + "x" + std::to_string(job.height) + ":r=" + std::to_string(job.fps) + ":d=" + durationSeconds,
+    };
+
+    if (job.audioEnabled) {
+      args.insert(args.end(), {"-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"});
+    }
+
+    args.insert(args.end(), {
+        "-t",
+        durationSeconds,
+        "-r",
+        std::to_string(job.fps),
         "-c:v",
         job.codec,
         "-preset",
         presetForQuality(job.quality),
-        "-vf",
-        "scale=" + std::to_string(job.width) + ":" + std::to_string(job.height),
         "-b:v",
         std::to_string(job.bitrateMbps) + "M",
-    };
+    });
 
     if (job.colorMode == "HDR") {
       args.insert(args.end(), {"-pix_fmt", "p010le", "-color_primaries", "bt2020", "-colorspace", "bt2020nc", "-color_trc", "smpte2084"});
@@ -184,16 +258,110 @@ class ExportEngine {
     }
 
     if (job.audioEnabled) {
-      args.insert(args.end(), {"-c:a", "aac", "-b:a", "320k"});
+      args.insert(args.end(), {"-c:a", "aac", "-b:a", "320k", "-shortest"});
     } else {
       args.push_back("-an");
+    }
+
+    if (!progressPath.empty()) {
+      args.insert(args.end(), {"-progress", progressPath, "-nostats"});
     }
 
     args.push_back(job.outputPath);
     return joinQuoted(args);
   }
 
- private:
+  static void prepareDestination(const ExportRequest& request) {
+    const auto output = std::filesystem::path(request.outputPath);
+    const auto parent = output.parent_path();
+    if (!parent.empty()) {
+      std::error_code error;
+      std::filesystem::create_directories(parent, error);
+      if (error) {
+        throw std::runtime_error("failed to create export destination folder: " + error.message());
+      }
+    }
+
+    if (std::filesystem::exists(output) && !request.overwrite) {
+      throw std::runtime_error("output file already exists; confirm overwrite before exporting");
+    }
+  }
+
+  [[nodiscard]] static std::filesystem::path progressPathFor(const std::string& jobId) {
+    return std::filesystem::temp_directory_path() / (jobId + ".progress");
+  }
+
+  void runExportProcess(const std::string& jobId, const std::string& command, const std::string& outputPath) {
+    const auto exitCode = std::system(command.c_str());
+    std::lock_guard lock(mutex_);
+    if (!activeJob_ || activeJob_->id != jobId) {
+      return;
+    }
+
+    updateProgressFromFile();
+    if (cancelRequested_ || activeJob_->cancelled) {
+      activeJob_->state = "cancelled";
+      activeJob_->cancelled = true;
+      activeJob_->progress = std::min(activeJob_->progress, 0.99);
+      activeJob_->logs.push_back("Export cancelled");
+      std::error_code ignored;
+      std::filesystem::remove(outputPath, ignored);
+    } else if (exitCode == 0) {
+      activeJob_->state = "completed";
+      activeJob_->progress = 1.0;
+      activeJob_->logs.push_back("Export completed: " + activeJob_->outputPath);
+    } else {
+      activeJob_->state = "error";
+      activeJob_->logs.push_back("FFmpeg export failed with exit code " + std::to_string(exitCode));
+    }
+    activeJob_->finishedAt = std::chrono::steady_clock::now();
+  }
+
+  void updateProgressFromFile() {
+    if (!activeJob_ || activeProgressPath_.empty() || activeJob_->state != "running") {
+      return;
+    }
+
+    std::ifstream stream(activeProgressPath_);
+    if (!stream) {
+      return;
+    }
+
+    std::string line;
+    std::int64_t outTimeUs = 0;
+    std::string progressStatus;
+    while (std::getline(stream, line)) {
+      const auto separator = line.find('=');
+      if (separator == std::string::npos) {
+        continue;
+      }
+      const auto key = line.substr(0, separator);
+      const auto value = line.substr(separator + 1);
+      if (key == "out_time_us") {
+        try {
+          outTimeUs = std::stoll(value);
+        } catch (...) {
+          outTimeUs = 0;
+        }
+      } else if (key == "progress") {
+        progressStatus = value;
+      }
+    }
+
+    if (outTimeUs > 0 && activeJob_->durationUs > 0) {
+      activeJob_->progress = std::clamp(static_cast<double>(outTimeUs) / static_cast<double>(activeJob_->durationUs), 0.0, 0.99);
+      const auto percent = static_cast<int>(std::floor(activeJob_->progress * 100.0));
+      if (percent >= lastLoggedProgressPercent_ + 10 || percent == 0) {
+        lastLoggedProgressPercent_ = percent;
+        activeJob_->logs.push_back("Export progress " + std::to_string(percent) + "%");
+      }
+    }
+
+    if (progressStatus == "end") {
+      activeJob_->progress = std::max(activeJob_->progress, 0.99);
+    }
+  }
+
   [[nodiscard]] static nlohmann::json idleStatus() {
     return {
         {"jobId", nullptr},
@@ -277,6 +445,21 @@ class ExportEngine {
     return stream.str();
   }
 
+  [[nodiscard]] static std::string formatSeconds(std::int64_t durationUs) {
+    std::ostringstream stream;
+    stream.setf(std::ios::fixed);
+    stream.precision(3);
+    stream << static_cast<double>(std::max<std::int64_t>(1, durationUs)) / 1'000'000.0;
+    return stream.str();
+  }
+
+  [[nodiscard]] static std::string lower(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char character) {
+      return static_cast<char>(std::tolower(character));
+    });
+    return value;
+  }
+
   [[nodiscard]] static std::string quoteIfNeeded(const std::string& value) {
     if (value.find_first_of(" <>") == std::string::npos) {
       return value;
@@ -296,6 +479,11 @@ class ExportEngine {
 
   const FfmpegLocator& locator_;
   const GpuDetector& gpuDetector_;
+  std::mutex mutex_;
+  std::thread worker_;
+  std::atomic_bool cancelRequested_ = false;
+  std::filesystem::path activeProgressPath_;
+  int lastLoggedProgressPercent_ = -1;
   std::optional<ExportJob> activeJob_;
 };
 
