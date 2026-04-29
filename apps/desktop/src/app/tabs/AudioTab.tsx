@@ -45,11 +45,12 @@ export function AudioTab({ timeline, setTimeline, mediaAssets, projectSettings, 
   useEffect(() => {
     let cancelled = false;
     setWaveformSrc("");
-    if (!selectedAsset) {
+    if (!selectedAsset || !selectedClip) {
       return;
     }
 
-    void getMediaWaveformDataUrl(selectedAsset).then((url) => {
+    const durationUs = Math.max(1, selectedClip.outUs - selectedClip.inUs);
+    void getMediaWaveformDataUrl(selectedAsset, selectedClip.inUs, durationUs).then((url) => {
       if (!cancelled) {
         setWaveformSrc(url);
       }
@@ -58,7 +59,7 @@ export function AudioTab({ timeline, setTimeline, mediaAssets, projectSettings, 
     return () => {
       cancelled = true;
     };
-  }, [selectedAsset]);
+  }, [selectedAsset, selectedClip]);
 
   function updateSelectedClipAudio(next: Partial<AudioAdjustment>, label: string) {
     if (!selectedClip) {

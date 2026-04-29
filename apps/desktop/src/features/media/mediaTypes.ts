@@ -90,14 +90,18 @@ export async function getMediaPreviewFrameDataUrl(asset: MediaAsset, timeUs: num
   }
 }
 
-export async function getMediaWaveformDataUrl(asset: MediaAsset) {
+export async function getMediaWaveformDataUrl(asset: MediaAsset, startUs?: number, durationUs?: number) {
   if (!mediaHasAudio(asset) || !("__TAURI_INTERNALS__" in window)) {
     return "";
   }
 
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    return await invoke<string>("media_waveform_data_url", { path: asset.path });
+    return await invoke<string>("media_waveform_data_url", {
+      path: asset.path,
+      startUs: Number.isFinite(startUs) ? Math.max(0, Math.round(startUs ?? 0)) : undefined,
+      durationUs: Number.isFinite(durationUs) ? Math.max(1, Math.round(durationUs ?? 0)) : undefined
+    });
   } catch {
     return "";
   }

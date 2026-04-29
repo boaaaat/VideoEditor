@@ -143,11 +143,15 @@ pub fn media_preview_frame_data_url(path: String, time_us: i64) -> Result<String
 }
 
 #[tauri::command]
-pub fn media_waveform_data_url(path: String) -> Result<String, String> {
+pub fn media_waveform_data_url(
+    path: String,
+    start_us: Option<i64>,
+    duration_us: Option<i64>,
+) -> Result<String, String> {
     let ffmpeg = find_ffmpeg_executable()
         .ok_or_else(|| "could not find ffmpeg in tools/ffmpeg/bin or PATH".to_string())?;
 
-    let bytes = run_ffmpeg_waveform(&ffmpeg, &path)?;
+    let bytes = run_ffmpeg_waveform(&ffmpeg, &path, start_us, duration_us)?;
     if bytes.is_empty() {
         return Err("ffmpeg produced an empty waveform".to_string());
     }
@@ -405,24 +409,38 @@ fn run_ffmpeg_frame(
     ))
 }
 
-fn run_ffmpeg_waveform(ffmpeg: &Path, media_path: &str) -> Result<Vec<u8>, String> {
+fn run_ffmpeg_waveform(
+    ffmpeg: &Path,
+    media_path: &str,
+    start_us: Option<i64>,
+    duration_us: Option<i64>,
+) -> Result<Vec<u8>, String> {
+    let mut args = vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+    ];
+    if let Some(start_us) = start_us.filter(|value| *value > 0) {
+        args.extend(["-ss".to_string(), format_ffmpeg_timestamp(start_us)]);
+    }
+    args.extend(["-i".to_string(), media_path.to_string()]);
+    if let Some(duration_us) = duration_us.filter(|value| *value > 0) {
+        args.extend(["-t".to_string(), format_ffmpeg_timestamp(duration_us)]);
+    }
+    args.extend([
+        "-filter_complex".to_string(),
+        "aformat=channel_layouts=mono,showwavespic=s=1800x240:colors=7bb65f".to_string(),
+        "-frames:v".to_string(),
+        "1".to_string(),
+        "-f".to_string(),
+        "image2pipe".to_string(),
+        "-vcodec".to_string(),
+        "png".to_string(),
+        "pipe:1".to_string(),
+    ]);
+
     let output = Command::new(ffmpeg)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            media_path,
-            "-filter_complex",
-            "aformat=channel_layouts=mono,showwavespic=s=160x32:colors=7bb65f",
-            "-frames:v",
-            "1",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "png",
-            "pipe:1",
-        ])
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
