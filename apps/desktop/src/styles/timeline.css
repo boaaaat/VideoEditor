@@ -40,6 +40,14 @@
   background: #171716;
 }
 
+.timeline-selection-count {
+  padding: 5px 8px;
+  border: 1px solid rgba(215, 180, 104, 0.35);
+  border-radius: 6px;
+  color: var(--accent-2);
+  background: rgba(215, 180, 104, 0.1);
+}
+
 .timeline-surface {
   position: relative;
   min-height: 100%;
@@ -133,6 +141,18 @@
   border-right: 1px solid var(--line);
   color: var(--muted);
   background: #20201e;
+}
+
+.track-row.track-locked .track-header {
+  background: #27251f;
+}
+
+.track-row.track-soloed .track-header {
+  box-shadow: inset 3px 0 0 var(--accent-2);
+}
+
+.track-row.track-dimmed .track-lane {
+  opacity: 0.56;
 }
 
 .track-header div {
@@ -256,4 +276,5 @@
 .timeline-clip.selected {
   outline: 2px solid var(--accent-2);
   outline-offset: 1px;
+  box-shadow: 0 0 0 1px rgba(241, 207, 120, 0.28);
 }

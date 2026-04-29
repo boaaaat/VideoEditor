@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type Dispatch,
@@ -14,16 +15,25 @@ import {
   Eye,
   EyeOff,
   Film,
+  Filter,
   FolderOpen,
   Import,
+  Clipboard,
+  ClipboardPaste,
+  Copy,
+  Link2,
   Lock,
   Magnet,
   Maximize2,
   Music,
   Pause,
+  Pencil,
   Play,
   Plus,
+  Repeat,
   Scissors,
+  Search,
+  Shield,
   StepBack,
   StepForward,
   Trash2,
@@ -45,12 +55,18 @@ import type { LogStatus } from "../../features/logging/appLog";
 import { importMediaPaths, type ImportMediaResult } from "../../features/media/importMedia";
 import {
   getMediaDurationUs,
+  getMediaCacheStatus,
   getMediaPreviewFrameDataUrl,
   getMediaSourceUrl,
   getMediaThumbnailDataUrl,
+  getMediaWaveformDataUrl,
   isSupportedMediaPath,
+  pathToMediaAsset,
+  supportedMediaExtensions,
+  type MediaCacheStatus,
   type MediaAsset
 } from "../../features/media/mediaTypes";
+import { probeMediaPath } from "../../features/media/importMedia";
 import { starterTimeline } from "../../features/timeline/mockTimeline";
 import {
   attachNativePreviewSurface,
@@ -84,6 +100,10 @@ interface EditTabProps {
   onImportMedia: () => Promise<void>;
   onImportMediaResult: (result: ImportMediaResult | null) => void;
   onRemoveMediaAsset: (assetId: string, data?: unknown) => void;
+  onRenameMediaAsset: (assetId: string, nextName: string) => void;
+  onRelinkMediaAsset: (assetId: string, asset: MediaAsset) => void;
+  missingMediaPaths: string[];
+  projectPath?: string;
   setStatusMessage: LogStatus;
 }
 
@@ -103,6 +123,11 @@ interface PreviewClipState {
   inUs: number;
   outUs: number;
   trackId: string;
+}
+
+interface ClipboardClip {
+  clip: TimelineClip;
+  offsetUs: number;
 }
 
 interface MediaPointerDragState {
@@ -137,6 +162,13 @@ type EditContextMenuState =
       y: number;
     };
 
+type MediaTypeFilter = "all" | "video" | "audio" | "missing";
+type MediaDurationFilter = "all" | "short" | "medium" | "long";
+type MediaResolutionFilter = "all" | "hd" | "uhd" | "unknown";
+type MediaFpsFilter = "all" | "24" | "30" | "60" | "unknown";
+type MediaSortKey = "imported-desc" | "name-asc" | "name-desc" | "duration-desc" | "resolution-desc" | "fps-desc" | "type";
+type PreviewScaleMode = "fit" | "50" | "100" | "150";
+
 export function EditTab({
   previewUrl,
   mediaAssets,
@@ -146,30 +178,60 @@ export function EditTab({
   onImportMedia,
   onImportMediaResult,
   onRemoveMediaAsset,
+  onRenameMediaAsset,
+  onRelinkMediaAsset,
+  missingMediaPaths,
+  projectPath,
   setStatusMessage
 }: EditTabProps) {
   const playbackFrameRef = useRef<number | null>(null);
   const lastPlaybackTimeRef = useRef<number | null>(null);
   const internalMediaDragRef = useRef(false);
-  const [selectedClipId, setSelectedClipId] = useState("");
+  const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [mediaDragOver, setMediaDragOver] = useState(false);
   const [snapping, setSnapping] = useState(true);
+  const [soloTrackIds, setSoloTrackIds] = useState<string[]>([]);
   const [playing, setPlaying] = useState(false);
+  const [loopPlayback, setLoopPlayback] = useState(false);
   const [previewQuality, setPreviewQuality] = useState<PreviewQuality>("Proxy");
+  const [previewScale, setPreviewScale] = useState<PreviewScaleMode>("fit");
   const [timelineZoom, setTimelineZoom] = useState(72);
   const [playheadUs, setPlayheadUs] = useState(0);
+  const [timelineClipboard, setTimelineClipboard] = useState<ClipboardClip[]>([]);
   const [draggingMediaId, setDraggingMediaId] = useState<string | null>(null);
   const [mediaDropTrackId, setMediaDropTrackId] = useState<string | null>(null);
   const [mediaDragState, setMediaDragState] = useState<MediaPointerDragState | null>(null);
   const [mediaDropPreview, setMediaDropPreview] = useState<MediaDropPreviewState | null>(null);
   const [contextMenu, setContextMenu] = useState<EditContextMenuState | null>(null);
+  const [mediaSearch, setMediaSearch] = useState("");
+  const [mediaTypeFilter, setMediaTypeFilter] = useState<MediaTypeFilter>("all");
+  const [mediaDurationFilter, setMediaDurationFilter] = useState<MediaDurationFilter>("all");
+  const [mediaResolutionFilter, setMediaResolutionFilter] = useState<MediaResolutionFilter>("all");
+  const [mediaFpsFilter, setMediaFpsFilter] = useState<MediaFpsFilter>("all");
+  const [mediaSort, setMediaSort] = useState<MediaSortKey>("imported-desc");
+  const [renamingAssetId, setRenamingAssetId] = useState("");
+  const [renameDraft, setRenameDraft] = useState("");
+  const selectedClipId = selectedClipIds.at(-1) ?? "";
   const selectedClip = timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === selectedClipId);
   const contextMediaAsset = contextMenu?.kind === "media" ? mediaAssets.find((asset) => asset.id === contextMenu.assetId) : undefined;
   const contextClip = contextMenu?.kind === "clip" ? timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === contextMenu.clipId) : undefined;
-  const activeVideoClip = findActiveClip(timeline, playheadUs, "video");
-  const activeAudioClip = findActiveClip(timeline, playheadUs, "audio");
+  const activeVideoClip = findActiveClip(timeline, playheadUs, "video", soloTrackIds);
+  const activeAudioClip = findActiveClip(timeline, playheadUs, "audio", soloTrackIds);
   const activeVideoAsset = activeVideoClip ? mediaAssets.find((asset) => asset.id === activeVideoClip.mediaId) : undefined;
   const activeAudioAsset = activeAudioClip ? mediaAssets.find((asset) => asset.id === activeAudioClip.mediaId) : undefined;
+  const missingMediaSet = useMemo(() => new Set(missingMediaPaths), [missingMediaPaths]);
+  const visibleMediaAssets = useMemo(
+    () => filterAndSortMediaAssets(mediaAssets, {
+      search: mediaSearch,
+      type: mediaTypeFilter,
+      duration: mediaDurationFilter,
+      resolution: mediaResolutionFilter,
+      fps: mediaFpsFilter,
+      sort: mediaSort,
+      missingPaths: missingMediaSet
+    }),
+    [mediaAssets, mediaSearch, mediaTypeFilter, mediaDurationFilter, mediaResolutionFilter, mediaFpsFilter, mediaSort, missingMediaSet]
+  );
 
   function applyEngineTimeline(data: unknown) {
     const nextTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
@@ -183,6 +245,49 @@ export function EditTab({
   function lockedTrackNameForClip(clip: TimelineClip) {
     const track = timeline.tracks.find((item) => item.id === clip.trackId);
     return track?.locked ? track.name : "";
+  }
+
+  function getTimelineClips() {
+    return timeline.tracks.flatMap((track) => track.clips);
+  }
+
+  function selectedClipsForAction(targetClip?: TimelineClip) {
+    if (targetClip && !selectedClipIds.includes(targetClip.id)) {
+      return [targetClip];
+    }
+
+    const selected = getTimelineClips().filter((clip) => selectedClipIds.includes(clip.id));
+    return selected.length > 0 ? selected : targetClip ? [targetClip] : [];
+  }
+
+  function lockedTrackNameForClips(clips: TimelineClip[]) {
+    return clips.map(lockedTrackNameForClip).find(Boolean) ?? "";
+  }
+
+  function selectClip(clipId: string, mode: "single" | "toggle" | "range" = "single") {
+    if (mode === "toggle") {
+      setSelectedClipIds((current) => (current.includes(clipId) ? current.filter((id) => id !== clipId) : [...current, clipId]));
+      return;
+    }
+
+    if (mode === "range" && selectedClipId) {
+      const orderedClipIds = getTimelineClips()
+        .sort(compareClipsByTimeline)
+        .map((clip) => clip.id);
+      const anchorIndex = orderedClipIds.indexOf(selectedClipId);
+      const nextIndex = orderedClipIds.indexOf(clipId);
+      if (anchorIndex >= 0 && nextIndex >= 0) {
+        const [from, to] = anchorIndex < nextIndex ? [anchorIndex, nextIndex] : [nextIndex, anchorIndex];
+        setSelectedClipIds(orderedClipIds.slice(from, to + 1));
+        return;
+      }
+    }
+
+    setSelectedClipIds([clipId]);
+  }
+
+  function clearClipSelection() {
+    setSelectedClipIds([]);
   }
 
   async function runCommand(command: EditorCommand, fallbackError = "Command failed"): Promise<CommandResult> {
@@ -229,7 +334,7 @@ export function EditTab({
             : track
         )
       }));
-      setSelectedClipId(secondClip.id);
+      setSelectedClipIds([secondClip.id]);
     }
 
     setStatusMessage(result.ok ? "Split command accepted" : result.error ?? "Split failed", { level: result.ok ? "success" : "error" });
@@ -260,8 +365,16 @@ export function EditTab({
     setStatusMessage(result.ok ? `Add ${kind} track command accepted` : result.error ?? "Add track failed", { level: result.ok ? "success" : "error" });
   }
 
-  function toggleTrack(trackId: string, field: "locked" | "muted" | "visible") {
+  function toggleTrack(trackId: string, field: "locked" | "muted" | "visible" | "solo") {
     const track = timeline.tracks.find((item) => item.id === trackId);
+    if (field === "solo") {
+      setSoloTrackIds((current) => (current.includes(trackId) ? current.filter((id) => id !== trackId) : [...current, trackId]));
+      if (track) {
+        setStatusMessage(`${track.name} solo ${soloTrackIds.includes(trackId) ? "off" : "on"}`, { source: "timeline" });
+      }
+      return;
+    }
+
     setTimeline((current) => ({
       ...current,
       tracks: current.tracks.map((track) => (track.id === trackId ? { ...track, [field]: !track[field] } : track))
@@ -272,74 +385,90 @@ export function EditTab({
   }
 
   async function deleteSelectedClip(targetClip?: TimelineClip) {
-    const clip = targetClip ?? selectedClip;
-    if (!clip) {
+    const clips = selectedClipsForAction(targetClip);
+    if (clips.length === 0) {
       setStatusMessage("No clip selected", { level: "warning" });
       return;
     }
 
-    const lockedTrackName = lockedTrackNameForClip(clip);
+    const lockedTrackName = lockedTrackNameForClips(clips);
     if (lockedTrackName) {
       setStatusMessage(`${lockedTrackName} is locked`, { level: "warning" });
       return;
     }
 
-    const result = await runCommand({ type: "delete_clip", clipId: clip.id }, "Delete failed");
-    if (!applyEngineTimeline(result.data)) {
+    const results = await Promise.all(clips.map((clip) => runCommand({ type: "delete_clip", clipId: clip.id }, "Delete failed")));
+    const lastResult = results.at(-1);
+    if (!applyEngineTimeline(lastResult?.data)) {
+      const deletedIds = new Set(clips.map((clip) => clip.id));
       setTimeline((current) => ({
         ...current,
         tracks: current.tracks.map((track) => ({
           ...track,
-          clips: track.clips.filter((item) => item.id !== clip.id)
+          clips: track.clips.filter((item) => !deletedIds.has(item.id))
         }))
       }));
     }
-    setSelectedClipId("");
-    setStatusMessage(result.ok ? "Delete command accepted" : result.error ?? "Delete failed", { level: result.ok ? "success" : "error" });
+    clearClipSelection();
+    const failed = results.find((result) => !result.ok);
+    setStatusMessage(failed ? failed.error ?? "Delete failed" : `Deleted ${clips.length} clip${clips.length === 1 ? "" : "s"}`, {
+      level: failed ? "error" : "success"
+    });
   }
 
   async function rippleDelete(targetClip?: TimelineClip) {
-    const clip = targetClip ?? selectedClip;
-    if (!clip) {
+    const clips = selectedClipsForAction(targetClip);
+    if (clips.length === 0) {
       setStatusMessage("No clip selected", { level: "warning" });
       return;
     }
 
-    const lockedTrackName = lockedTrackNameForClip(clip);
+    const lockedTrackName = lockedTrackNameForClips(clips);
     if (lockedTrackName) {
       setStatusMessage(`${lockedTrackName} is locked`, { level: "warning" });
       return;
     }
 
-    const result = await runCommand({ type: "ripple_delete_clip", clipId: clip.id, trackMode: "selected_track" }, "Ripple delete failed");
-    if (!applyEngineTimeline(result.data)) {
-      const deletedDuration = clip.outUs - clip.inUs;
-      setTimeline((current) => ({
-        ...current,
-        tracks: current.tracks.map((track) =>
-          track.id === clip.trackId
-            ? {
-                ...track,
-                clips: track.clips
-                  .filter((item) => item.id !== clip.id)
-                  .map((item) => (item.startUs > clip.startUs ? { ...item, startUs: Math.max(0, item.startUs - deletedDuration) } : item))
-              }
-            : track
-        )
-      }));
+    const orderedClips = [...clips].sort(compareClipsByTimeline);
+    const results = await Promise.all(orderedClips.map((clip) => runCommand({ type: "ripple_delete_clip", clipId: clip.id, trackMode: "selected_track" }, "Ripple delete failed")));
+    const lastResult = results.at(-1);
+    if (!applyEngineTimeline(lastResult?.data)) {
+      setTimeline((current) => rippleDeleteClips(current, orderedClips));
     }
-    setSelectedClipId("");
-    setStatusMessage(result.ok ? "Ripple delete command accepted" : result.error ?? "Ripple delete failed", { level: result.ok ? "success" : "error" });
+    clearClipSelection();
+    const failed = results.find((result) => !result.ok);
+    setStatusMessage(failed ? failed.error ?? "Ripple delete failed" : `Ripple deleted ${clips.length} clip${clips.length === 1 ? "" : "s"}`, {
+      level: failed ? "error" : "success"
+    });
   }
 
   function zoomTimeline(direction: -1 | 1) {
     setTimelineZoom((value) => clamp(value + direction * timelineZoomStep, minTimelineZoom, maxTimelineZoom));
   }
 
+  function setTimelineZoomValue(value: number) {
+    setTimelineZoom(clamp(value, minTimelineZoom, maxTimelineZoom));
+  }
+
   function fitTimeline() {
     const durationSeconds = Math.max(1, Math.ceil(timeline.durationUs / 1_000_000));
     const fittedZoom = clamp(Math.floor(1100 / durationSeconds), minTimelineZoom, maxTimelineZoom);
     setTimelineZoom(fittedZoom);
+  }
+
+  function setPlayheadClamped(valueUs: number) {
+    setPlayheadUs(clamp(valueUs, 0, Math.max(timeline.durationUs, 1_000_000)));
+  }
+
+  function stepPlayhead(direction: -1 | 1) {
+    const frameDurationUs = Math.round(1_000_000 / Math.max(1, projectSettings.fps));
+    const nextPlayheadUs = clamp(playheadUs + direction * frameDurationUs, 0, Math.max(timeline.durationUs, 1_000_000));
+    setPlaying(false);
+    setPlayheadUs(nextPlayheadUs);
+    setStatusMessage(direction < 0 ? "Stepped back one frame" : "Stepped forward one frame", {
+      source: "timeline",
+      details: { playheadUs: nextPlayheadUs, frameDurationUs }
+    });
   }
 
   function stopPlayback() {
@@ -352,35 +481,45 @@ export function EditTab({
   }
 
   async function nudgeSelectedClip(direction: -1 | 1, targetClip?: TimelineClip) {
-    const clip = targetClip ?? selectedClip;
-    if (!clip) {
+    const clips = selectedClipsForAction(targetClip);
+    if (clips.length === 0) {
       setStatusMessage("No clip selected", { level: "warning" });
       return;
     }
 
-    const lockedTrackName = lockedTrackNameForClip(clip);
+    const lockedTrackName = lockedTrackNameForClips(clips);
     if (lockedTrackName) {
       setStatusMessage(`${lockedTrackName} is locked`, { level: "warning" });
       return;
     }
 
-    const result = await runCommand({
-      type: "move_clip",
-      clipId: clip.id,
-      trackId: clip.trackId,
-      startUs: Math.max(0, clip.startUs + direction * 100_000),
-      snapping
-    }, "Nudge failed");
-    if (!applyEngineTimeline(result.data)) {
+    const moved = clips.map((clip) => ({ ...clip, startUs: Math.max(0, clip.startUs + direction * 100_000) }));
+    const results = await Promise.all(
+      moved.map((clip) =>
+        runCommand({
+          type: "move_clip",
+          clipId: clip.id,
+          trackId: clip.trackId,
+          startUs: clip.startUs,
+          snapping
+        }, "Nudge failed")
+      )
+    );
+    const lastResult = results.at(-1);
+    if (!applyEngineTimeline(lastResult?.data)) {
+      const movedById = new Map(moved.map((clip) => [clip.id, clip]));
       setTimeline((current) => ({
         ...current,
         tracks: current.tracks.map((track) => ({
           ...track,
-          clips: track.clips.map((item) => (item.id === clip.id ? { ...item, startUs: Math.max(0, item.startUs + direction * 100_000) } : item))
+          clips: track.clips.map((item) => movedById.get(item.id) ?? item).sort((left, right) => left.startUs - right.startUs)
         }))
       }));
     }
-    setStatusMessage(result.ok ? "Nudge command accepted" : result.error ?? "Nudge failed", { level: result.ok ? "success" : "error" });
+    const failed = results.find((result) => !result.ok);
+    setStatusMessage(failed ? failed.error ?? "Nudge failed" : `Nudged ${clips.length} clip${clips.length === 1 ? "" : "s"}`, {
+      level: failed ? "error" : "success"
+    });
   }
 
   async function moveClip(clipId: string, targetTrackId: string, startUs: number) {
@@ -402,40 +541,65 @@ export function EditTab({
     }
 
     const nextStartUs = snapping ? resolveTrackSnapStart(timeline, targetTrackId, startUs, timelineZoom, clipId, false).startUs : Math.max(0, startUs);
-    const result = await runCommand({
-      type: "move_clip",
-      clipId,
-      trackId: targetTrackId,
-      startUs: nextStartUs,
-      snapping
-    }, "Move clip failed");
-    if (!applyEngineTimeline(result.data)) {
-      setTimeline((current) => {
-        let movedClip = current.tracks.flatMap((track) => track.clips).find((item) => item.id === clipId);
-        if (!movedClip) {
-          return current;
-        }
+    const selectedMoveClips = selectedClipIds.includes(clipId) ? selectedClipsForAction(clip) : [clip];
+    const lockedTrackName = lockedTrackNameForClips(selectedMoveClips);
+    if (lockedTrackName) {
+      setStatusMessage(`${lockedTrackName} is locked`, { level: "warning" });
+      return;
+    }
 
-        movedClip = { ...movedClip, trackId: targetTrackId, startUs: nextStartUs };
+    const deltaUs = nextStartUs - clip.startUs;
+    const movedClips = selectedMoveClips.map((item) => ({
+      ...item,
+      trackId: item.id === clipId ? targetTrackId : item.trackId,
+      startUs: Math.max(0, item.startUs + deltaUs)
+    }));
+    const invalidMovedClip = movedClips.find((item) => {
+      const track = timeline.tracks.find((candidate) => candidate.id === item.trackId);
+      const asset = mediaAssets.find((candidate) => candidate.id === item.mediaId);
+      return !track || track.locked || (asset && asset.kind !== track.kind);
+    });
+    if (invalidMovedClip) {
+      setStatusMessage("Move blocked by track type or lock state", { level: "warning" });
+      return;
+    }
+
+    const results = await Promise.all(
+      movedClips.map((item) =>
+        runCommand({
+          type: "move_clip",
+          clipId: item.id,
+          trackId: item.trackId,
+          startUs: item.startUs,
+          snapping
+        }, "Move clip failed")
+      )
+    );
+    const lastResult = results.at(-1);
+    if (!applyEngineTimeline(lastResult?.data)) {
+      const movedById = new Map(movedClips.map((item) => [item.id, item]));
+      setTimeline((current) => {
         return {
           ...current,
-          durationUs: Math.max(current.durationUs, nextStartUs + (movedClip.outUs - movedClip.inUs) + 5_000_000),
-          tracks: current.tracks.map((track) =>
-            track.id === targetTrackId
-              ? {
-                  ...track,
-                  clips: [...track.clips.filter((item) => item.id !== clipId), movedClip].sort((left, right) => left.startUs - right.startUs)
-                }
-              : {
-                  ...track,
-                  clips: track.clips.filter((item) => item.id !== clipId)
-                }
-          )
+          durationUs: Math.max(
+            current.durationUs,
+            ...movedClips.map((item) => item.startUs + (item.outUs - item.inUs) + 5_000_000)
+          ),
+          tracks: current.tracks.map((track) => ({
+            ...track,
+            clips: [
+              ...track.clips.filter((item) => !movedById.has(item.id)),
+              ...movedClips.filter((item) => item.trackId === track.id)
+            ].sort((left, right) => left.startUs - right.startUs)
+          }))
         };
       });
     }
-    setSelectedClipId(clipId);
-    setStatusMessage(result.ok ? "Moved clip" : result.error ?? "Move clip failed", { level: result.ok ? "success" : "error" });
+    setSelectedClipIds(selectedMoveClips.map((item) => item.id));
+    const failed = results.find((result) => !result.ok);
+    setStatusMessage(failed ? failed.error ?? "Move clip failed" : `Moved ${movedClips.length} clip${movedClips.length === 1 ? "" : "s"}`, {
+      level: failed ? "error" : "success"
+    });
   }
 
   async function trimClip(clipId: string, edge: "start" | "end", deltaUs: number) {
@@ -454,14 +618,17 @@ export function EditTab({
     let nextClip = clip;
     if (edge === "start") {
       const nextStartUs = Math.max(0, clip.startUs + deltaUs);
-      const nextInUs = Math.max(0, clip.inUs + (nextStartUs - clip.startUs));
+      const resolvedStartUs = snapping ? resolveTrackSnapStart(timeline, clip.trackId, nextStartUs, timelineZoom, clip.id, false).startUs : nextStartUs;
+      const nextInUs = Math.max(0, clip.inUs + (resolvedStartUs - clip.startUs));
       if (clip.outUs - nextInUs < minDurationUs) {
         return;
       }
-      nextClip = { ...clip, startUs: snapping ? snapTime(nextStartUs) : nextStartUs, inUs: nextInUs };
+      nextClip = { ...clip, startUs: resolvedStartUs, inUs: nextInUs };
     } else {
       const nextOutUs = Math.max(clip.inUs + minDurationUs, clip.outUs + deltaUs);
-      nextClip = { ...clip, outUs: nextOutUs };
+      const clipEndUs = clip.startUs + (nextOutUs - clip.inUs);
+      const resolvedEndUs = snapping ? resolveTrackSnapStart(timeline, clip.trackId, clipEndUs, timelineZoom, clip.id, false).startUs : clipEndUs;
+      nextClip = { ...clip, outUs: Math.max(clip.inUs + minDurationUs, clip.inUs + resolvedEndUs - clip.startUs) };
     }
 
     const result = await runCommand({
@@ -480,7 +647,7 @@ export function EditTab({
         }))
       }));
     }
-    setSelectedClipId(clipId);
+    setSelectedClipIds([clipId]);
     setStatusMessage(result.ok ? "Trimmed clip" : result.error ?? "Trim failed", { level: result.ok ? "success" : "error" });
   }
 
@@ -537,7 +704,7 @@ export function EditTab({
           : track
       )
     }));
-    setSelectedClipId(clipId);
+    setSelectedClipIds([clipId]);
     setStatusMessage(`Added ${asset.name} to timeline`, { level: "success", details: { mediaId: asset.id, clipId, trackId: targetTrack.id } });
 
     void runCommand({
@@ -711,7 +878,9 @@ export function EditTab({
   function openClipContextMenu(event: ReactMouseEvent, clip: TimelineClip) {
     event.preventDefault();
     event.stopPropagation();
-    setSelectedClipId(clip.id);
+    if (!selectedClipIds.includes(clip.id)) {
+      setSelectedClipIds([clip.id]);
+    }
     setContextMenu({
       kind: "clip",
       clipId: clip.id,
@@ -735,6 +904,62 @@ export function EditTab({
     }
   }
 
+  function startRenamingMedia(asset: MediaAsset) {
+    setRenamingAssetId(asset.id);
+    setRenameDraft(asset.name);
+    setStatusMessage(`Renaming ${asset.name}`, { source: "media" });
+  }
+
+  function commitMediaRename() {
+    if (!renamingAssetId) {
+      return;
+    }
+
+    onRenameMediaAsset(renamingAssetId, renameDraft);
+    setRenamingAssetId("");
+    setRenameDraft("");
+  }
+
+  function cancelMediaRename() {
+    setRenamingAssetId("");
+    setRenameDraft("");
+  }
+
+  async function relinkMedia(asset: MediaAsset) {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      setStatusMessage("Relink media is available in the desktop app", { level: "warning", source: "media" });
+      return;
+    }
+
+    try {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const selection = await open({
+        multiple: false,
+        title: `Relink ${asset.name}`,
+        filters: [{ name: "Media", extensions: [...supportedMediaExtensions] }]
+      });
+      if (!selection || Array.isArray(selection)) {
+        return;
+      }
+      if (!isSupportedMediaPath(selection)) {
+        setStatusMessage("Selected file type is not supported", { level: "warning", source: "media", details: { path: selection } });
+        return;
+      }
+
+      const metadata = await probeMediaPath(selection).catch(() => undefined);
+      const relinkedAsset = {
+        ...pathToMediaAsset(selection, metadata),
+        id: asset.id,
+        name: asset.name,
+        importedAt: asset.importedAt,
+        intelligence: asset.intelligence
+      };
+      onRelinkMediaAsset(asset.id, relinkedAsset);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Relink media failed", { level: "error", source: "media" });
+    }
+  }
+
   async function removeMediaFromBin(asset: MediaAsset) {
     const removedClipCount = timeline.tracks.reduce((count, track) => count + track.clips.filter((clip) => clip.mediaId === asset.id).length, 0);
     const result = await runCommand({ type: "remove_media", mediaId: asset.id }, "Remove media failed");
@@ -744,15 +969,121 @@ export function EditTab({
     }
 
     onRemoveMediaAsset(asset.id, result.data);
-    if (selectedClip?.mediaId === asset.id) {
-      setSelectedClipId("");
-    }
+    setSelectedClipIds((current) => current.filter((clipId) => !timeline.tracks.some((track) => track.clips.some((clip) => clip.id === clipId && clip.mediaId === asset.id))));
 
     const suffix = removedClipCount > 0 ? ` and ${removedClipCount} timeline clip${removedClipCount === 1 ? "" : "s"}` : "";
     setStatusMessage(`Removed ${asset.name} from bin${suffix}`, {
       level: "success",
       source: "media",
       details: { mediaId: asset.id, removedClipCount, sourceFileDeleted: false }
+    });
+  }
+
+  function copySelectedClips(targetClip?: TimelineClip) {
+    const clips = selectedClipsForAction(targetClip).sort(compareClipsByTimeline);
+    if (clips.length === 0) {
+      setStatusMessage("No clip selected", { level: "warning", source: "timeline" });
+      return [];
+    }
+
+    const firstStartUs = Math.min(...clips.map((clip) => clip.startUs));
+    const nextClipboard = clips.map((clip) => ({
+      clip,
+      offsetUs: clip.startUs - firstStartUs
+    }));
+    setTimelineClipboard(nextClipboard);
+    setStatusMessage(`Copied ${clips.length} clip${clips.length === 1 ? "" : "s"}`, { source: "timeline" });
+    return nextClipboard;
+  }
+
+  async function cutSelectedClips(targetClip?: TimelineClip) {
+    const copied = copySelectedClips(targetClip);
+    if (copied.length > 0) {
+      await deleteSelectedClip(targetClip);
+      setStatusMessage(`Cut ${copied.length} clip${copied.length === 1 ? "" : "s"}`, { level: "success", source: "timeline" });
+    }
+  }
+
+  function duplicateSelectedClips(targetClip?: TimelineClip) {
+    const clips = selectedClipsForAction(targetClip).sort(compareClipsByTimeline);
+    if (clips.length === 0) {
+      setStatusMessage("No clip selected", { level: "warning", source: "timeline" });
+      return;
+    }
+
+    const lockedTrackName = lockedTrackNameForClips(clips);
+    if (lockedTrackName) {
+      setStatusMessage(`${lockedTrackName} is locked`, { level: "warning", source: "timeline" });
+      return;
+    }
+
+    const duplicateOffsetUs = Math.max(...clips.map((clip) => clip.startUs + (clip.outUs - clip.inUs))) - Math.min(...clips.map((clip) => clip.startUs)) + snapIntervalUs;
+    insertTimelineClips(
+      clips.map((clip, index) => ({
+        ...clip,
+        id: `clip_${Date.now()}_${index}`,
+        startUs: snapTime(clip.startUs + duplicateOffsetUs)
+      })),
+      "Duplicated"
+    );
+  }
+
+  function pasteTimelineClips() {
+    if (timelineClipboard.length === 0) {
+      setStatusMessage("Timeline clipboard is empty", { level: "warning", source: "timeline" });
+      return;
+    }
+
+    const pasteStartUs = snapping ? snapTime(playheadUs) : playheadUs;
+    const nextClips = timelineClipboard.map((item, index) => ({
+      ...item.clip,
+      id: `clip_${Date.now()}_${index}`,
+      startUs: pasteStartUs + item.offsetUs
+    }));
+    insertTimelineClips(nextClips, "Pasted");
+  }
+
+  function insertTimelineClips(clips: TimelineClip[], actionLabel: string) {
+    const blockedTrack = clips
+      .map((clip) => timeline.tracks.find((track) => track.id === clip.trackId))
+      .find((track) => track?.locked);
+    if (blockedTrack) {
+      setStatusMessage(`${blockedTrack.name} is locked`, { level: "warning", source: "timeline" });
+      return;
+    }
+
+    setTimeline((current) => ({
+      ...current,
+      durationUs: Math.max(current.durationUs, ...clips.map((clip) => clip.startUs + (clip.outUs - clip.inUs) + 5_000_000)),
+      tracks: current.tracks.map((track) => ({
+        ...track,
+        clips: [...track.clips, ...clips.filter((clip) => clip.trackId === track.id)].sort((left, right) => left.startUs - right.startUs)
+      }))
+    }));
+    setSelectedClipIds(clips.map((clip) => clip.id));
+    setStatusMessage(`${actionLabel} ${clips.length} clip${clips.length === 1 ? "" : "s"}`, {
+      level: "success",
+      source: "timeline",
+      details: { clipIds: clips.map((clip) => clip.id) }
+    });
+
+    void Promise.all(
+      clips.map((clip) =>
+        runCommand({
+          type: "add_clip",
+          clipId: clip.id,
+          mediaId: clip.mediaId,
+          trackId: clip.trackId,
+          startUs: clip.startUs,
+          inUs: clip.inUs,
+          outUs: clip.outUs
+        }, `${actionLabel} clip failed`)
+      )
+    ).then((results) => {
+      const lastResult = results.at(-1);
+      if (lastResult?.ok) {
+        applyEngineTimeline(lastResult.data);
+      }
     });
   }
 
@@ -765,6 +1096,19 @@ export function EditTab({
           label: "Add to Timeline",
           icon: <Plus size={15} />,
           onSelect: () => void addMediaToTimeline(contextMediaAsset)
+        },
+        {
+          id: "rename-bin-item",
+          label: "Rename in Bin",
+          icon: <Pencil size={15} />,
+          onSelect: () => startRenamingMedia(contextMediaAsset)
+        },
+        {
+          id: "relink-media",
+          label: "Relink Media",
+          icon: <Link2 size={15} />,
+          disabled: !canReveal,
+          onSelect: () => void relinkMedia(contextMediaAsset)
         },
         {
           id: "reveal-in-explorer",
@@ -794,8 +1138,33 @@ export function EditTab({
           onSelect: () => void splitAtPlayhead(contextClip)
         },
         {
+          id: "copy-clip",
+          label: selectedClipIds.includes(contextClip.id) && selectedClipIds.length > 1 ? "Copy Selection" : "Copy Clip",
+          icon: <Copy size={15} />,
+          onSelect: () => copySelectedClips(contextClip)
+        },
+        {
+          id: "cut-clip",
+          label: selectedClipIds.includes(contextClip.id) && selectedClipIds.length > 1 ? "Cut Selection" : "Cut Clip",
+          icon: <Scissors size={15} />,
+          onSelect: () => void cutSelectedClips(contextClip)
+        },
+        {
+          id: "duplicate-clip",
+          label: selectedClipIds.includes(contextClip.id) && selectedClipIds.length > 1 ? "Duplicate Selection" : "Duplicate Clip",
+          icon: <Clipboard size={15} />,
+          onSelect: () => duplicateSelectedClips(contextClip)
+        },
+        {
+          id: "paste-clips",
+          label: "Paste at Playhead",
+          icon: <ClipboardPaste size={15} />,
+          disabled: timelineClipboard.length === 0,
+          onSelect: pasteTimelineClips
+        },
+        {
           id: "delete-clip",
-          label: "Delete Clip",
+          label: selectedClipIds.includes(contextClip.id) && selectedClipIds.length > 1 ? "Delete Selection" : "Delete Clip",
           icon: <Trash2 size={15} />,
           onSelect: () => void deleteSelectedClip(contextClip)
         },
@@ -853,6 +1222,10 @@ export function EditTab({
   }, [onImportMediaResult]);
 
   useEffect(() => {
+    setPlayheadUs((current) => clamp(current, 0, Math.max(timeline.durationUs, 1_000_000)));
+  }, [timeline.durationUs]);
+
+  useEffect(() => {
     if (!playing) {
       if (playbackFrameRef.current !== null) {
         cancelAnimationFrame(playbackFrameRef.current);
@@ -873,6 +1246,9 @@ export function EditTab({
         const next = current + Math.round(elapsedMs * 1000);
         const end = Math.max(timeline.durationUs, 1_000_000);
         if (next >= end) {
+          if (loopPlayback) {
+            return 0;
+          }
           stopPlayback();
           return end;
         }
@@ -888,7 +1264,7 @@ export function EditTab({
         playbackFrameRef.current = null;
       }
     };
-  }, [playing, timeline.durationUs]);
+  }, [loopPlayback, playing, timeline.durationUs]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -899,6 +1275,56 @@ export function EditTab({
       if (event.code === "Space") {
         event.preventDefault();
         setPlaying((value) => !value);
+      }
+
+      if (!event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "l") {
+        event.preventDefault();
+        setLoopPlayback((value) => !value);
+        setStatusMessage(`Loop playback ${loopPlayback ? "off" : "on"}`, { source: "timeline" });
+        return;
+      }
+
+      if (!event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "ArrowLeft") {
+        event.preventDefault();
+        stepPlayhead(-1);
+        return;
+      }
+
+      if (!event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "ArrowRight") {
+        event.preventDefault();
+        stepPlayhead(1);
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+        event.preventDefault();
+        setSelectedClipIds(getTimelineClips().map((clip) => clip.id));
+        setStatusMessage("Selected all timeline clips", { source: "timeline" });
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+        event.preventDefault();
+        copySelectedClips();
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "x") {
+        event.preventDefault();
+        void cutSelectedClips();
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        pasteTimelineClips();
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "d") {
+        event.preventDefault();
+        duplicateSelectedClips();
+        return;
       }
 
       if (!event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "s") {
@@ -933,11 +1359,62 @@ export function EditTab({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [playheadUs, selectedClip, snapping]);
+  }, [loopPlayback, playheadUs, projectSettings.fps, selectedClip, selectedClipIds, snapping, timeline, timelineClipboard]);
 
   return (
     <div className="edit-workspace">
       <Panel title="Media Bin" className="media-bin">
+        <div className="media-bin-tools">
+          <label className="media-search">
+            <Search size={15} />
+            <input value={mediaSearch} onChange={(event) => setMediaSearch(event.target.value)} placeholder="Search media" />
+          </label>
+          <div className="media-filter-row">
+            <select value={mediaTypeFilter} aria-label="Filter media type" onChange={(event) => setMediaTypeFilter(event.target.value as MediaTypeFilter)}>
+              <option value="all">All types</option>
+              <option value="video">Video</option>
+              <option value="audio">Audio</option>
+              <option value="missing">Missing</option>
+            </select>
+            <select value={mediaSort} aria-label="Sort media" onChange={(event) => setMediaSort(event.target.value as MediaSortKey)}>
+              <option value="imported-desc">Newest</option>
+              <option value="name-asc">Name A-Z</option>
+              <option value="name-desc">Name Z-A</option>
+              <option value="duration-desc">Duration</option>
+              <option value="resolution-desc">Resolution</option>
+              <option value="fps-desc">FPS</option>
+              <option value="type">Type</option>
+            </select>
+          </div>
+          <div className="media-filter-row compact">
+            <select value={mediaDurationFilter} aria-label="Filter duration" onChange={(event) => setMediaDurationFilter(event.target.value as MediaDurationFilter)}>
+              <option value="all">Any duration</option>
+              <option value="short">Under 1m</option>
+              <option value="medium">1-10m</option>
+              <option value="long">Over 10m</option>
+            </select>
+            <select value={mediaResolutionFilter} aria-label="Filter resolution" onChange={(event) => setMediaResolutionFilter(event.target.value as MediaResolutionFilter)}>
+              <option value="all">Any resolution</option>
+              <option value="hd">HD</option>
+              <option value="uhd">UHD+</option>
+              <option value="unknown">Unknown res</option>
+            </select>
+            <select value={mediaFpsFilter} aria-label="Filter frame rate" onChange={(event) => setMediaFpsFilter(event.target.value as MediaFpsFilter)}>
+              <option value="all">Any fps</option>
+              <option value="24">24/25</option>
+              <option value="30">30</option>
+              <option value="60">50/60+</option>
+              <option value="unknown">Unknown fps</option>
+            </select>
+          </div>
+          <div className="media-bin-summary">
+            <span>
+              <Filter size={13} />
+              {visibleMediaAssets.length}/{mediaAssets.length}
+            </span>
+            {missingMediaPaths.length > 0 ? <span className="media-status-danger">{missingMediaPaths.length} missing</span> : null}
+          </div>
+        </div>
         <div
           className={mediaDragOver ? "media-drop-zone drag-over" : "media-drop-zone"}
           onDragOver={(event) => {
@@ -949,24 +1426,57 @@ export function EditTab({
         >
           {mediaAssets.length > 0 ? (
             <div className="media-list">
-              {mediaAssets.map((asset) => (
-                <button
-                  type="button"
-                  key={asset.id}
-                  className={draggingMediaId === asset.id ? "media-card dragging" : "media-card"}
-                  draggable={false}
-                  onPointerDown={(event) => beginMediaPointerDrag(event, asset)}
-                  onPointerMove={updateMediaPointerDrag}
-                  onPointerUp={finishMediaPointerDrag}
-                  onPointerCancel={cancelMediaPointerDrag}
-                  onContextMenu={(event) => openMediaContextMenu(event, asset)}
-                  onDoubleClick={() => addMediaToTimeline(asset)}
-                >
-                  <MediaThumbnail asset={asset} />
-                  <span>{asset.name}</span>
-                  <small>{formatMediaAssetDetail(asset)}</small>
-                </button>
-              ))}
+              {visibleMediaAssets.map((asset) => {
+                const missing = missingMediaSet.has(asset.path);
+                return (
+                  <div key={asset.id} className={["media-card-shell", missing ? "missing" : ""].filter(Boolean).join(" ")}>
+                    {renamingAssetId === asset.id ? (
+                      <div className="media-card media-card-edit">
+                        <MediaThumbnail asset={asset} />
+                        <input
+                          className="media-rename-input"
+                          value={renameDraft}
+                          autoFocus
+                          onChange={(event) => setRenameDraft(event.target.value)}
+                          onClick={(event) => event.stopPropagation()}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              commitMediaRename();
+                            }
+                            if (event.key === "Escape") {
+                              event.preventDefault();
+                              cancelMediaRename();
+                            }
+                          }}
+                          onBlur={cancelMediaRename}
+                        />
+                        <small>Enter to rename</small>
+                        <MediaManagementStatus asset={asset} projectPath={projectPath} missing={missing} />
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className={draggingMediaId === asset.id ? "media-card dragging" : "media-card"}
+                        draggable={false}
+                        onPointerDown={(event) => beginMediaPointerDrag(event, asset)}
+                        onPointerMove={updateMediaPointerDrag}
+                        onPointerUp={finishMediaPointerDrag}
+                        onPointerCancel={cancelMediaPointerDrag}
+                        onContextMenu={(event) => openMediaContextMenu(event, asset)}
+                        onDoubleClick={() => addMediaToTimeline(asset)}
+                      >
+                        <MediaThumbnail asset={asset} />
+                        <span>{asset.name}</span>
+                        <small>{formatMediaAssetDetail(asset)}</small>
+                        <MediaManagementStatus asset={asset} projectPath={projectPath} missing={missing} />
+                      </button>
+                      )}
+                  </div>
+                );
+              })}
+              {visibleMediaAssets.length === 0 ? <div className="media-empty filtered">No media matches the current filters.</div> : null}
             </div>
           ) : (
             <div className="media-empty">
@@ -983,11 +1493,19 @@ export function EditTab({
         <Panel
           title="Preview"
           actions={
-            <select value={previewQuality} onChange={(event) => setPreviewQuality(event.target.value as PreviewQuality)}>
-              {previewQualities.map((quality) => (
-                <option key={quality}>{quality}</option>
-              ))}
-            </select>
+            <>
+              <select value={previewQuality} aria-label="Preview quality" onChange={(event) => setPreviewQuality(event.target.value as PreviewQuality)}>
+                {previewQualities.map((quality) => (
+                  <option key={quality}>{quality}</option>
+                ))}
+              </select>
+              <select value={previewScale} aria-label="Preview scale" onChange={(event) => setPreviewScale(event.target.value as PreviewScaleMode)}>
+                <option value="fit">Fit</option>
+                <option value="50">50%</option>
+                <option value="100">100%</option>
+                <option value="150">150%</option>
+              </select>
+            </>
           }
         >
           <div className="preview-player">
@@ -999,11 +1517,17 @@ export function EditTab({
               audioClip={activeAudioClip}
               projectSettings={projectSettings}
               previewQuality={previewQuality}
+              previewScale={previewScale}
               playheadUs={playheadUs}
               playing={playing}
             />
             <div className="transport">
               <IconButton label={playing ? "Pause" : "Play"} icon={playing ? <Pause size={18} /> : <Play size={18} />} onClick={() => setPlaying((value) => !value)} />
+              <IconButton label="Step back one frame" icon={<StepBack size={17} />} onClick={() => stepPlayhead(-1)} />
+              <IconButton label="Step forward one frame" icon={<StepForward size={17} />} onClick={() => stepPlayhead(1)} />
+              <IconButton label={loopPlayback ? "Loop playback on" : "Loop playback off"} icon={<Repeat size={17} />} className={loopPlayback ? "icon-active" : ""} onClick={() => setLoopPlayback((value) => !value)} />
+              <IconButton label="Copy clips" icon={<Copy size={17} />} disabled={selectedClipIds.length === 0} onClick={() => copySelectedClips()} />
+              <IconButton label="Paste clips" icon={<ClipboardPaste size={17} />} disabled={timelineClipboard.length === 0} onClick={pasteTimelineClips} />
               <Button icon={<Scissors size={16} />} onClick={() => void splitAtPlayhead()}>
                 Split
               </Button>
@@ -1036,6 +1560,9 @@ export function EditTab({
               <Button icon={<Music size={16} />} onClick={() => addTrack("audio")}>
                 Audio Track
               </Button>
+              <IconButton label="Copy clips" icon={<Copy size={17} />} disabled={selectedClipIds.length === 0} onClick={() => copySelectedClips()} />
+              <IconButton label="Paste clips" icon={<ClipboardPaste size={17} />} disabled={timelineClipboard.length === 0} onClick={pasteTimelineClips} />
+              <IconButton label="Duplicate clips" icon={<Clipboard size={17} />} disabled={selectedClipIds.length === 0} onClick={() => duplicateSelectedClips()} />
               <Button icon={<Scissors size={16} />} onClick={() => void splitAtPlayhead()}>
                 Split
               </Button>
@@ -1049,13 +1576,16 @@ export function EditTab({
               <IconButton label="Nudge right" icon={<StepForward size={17} />} onClick={() => nudgeSelectedClip(1)} />
               <IconButton label="Fit timeline" icon={<Maximize2 size={17} />} onClick={fitTimeline} />
               <Toggle label="Snapping" checked={snapping} onChange={(event) => setSnapping(event.target.checked)} />
+              {selectedClipIds.length > 1 ? <span className="timeline-selection-count">{selectedClipIds.length} selected</span> : null}
               <span className="timeline-timecode">{formatTimelineTime(Math.floor(playheadUs / 1_000_000))}</span>
             </div>
             <TimelineSurface
               timeline={timeline}
               mediaAssets={mediaAssets}
-              selectedClipId={selectedClipId}
-              onSelectClip={setSelectedClipId}
+              selectedClipIds={selectedClipIds}
+              soloTrackIds={soloTrackIds}
+              onSelectClip={selectClip}
+              onClearSelection={clearClipSelection}
               playheadUs={playheadUs}
               onPlayheadChange={setPlayheadUs}
               zoomPxPerSecond={timelineZoom}
@@ -1096,8 +1626,10 @@ export function EditTab({
 function TimelineSurface({
   timeline,
   mediaAssets,
-  selectedClipId,
+  selectedClipIds,
+  soloTrackIds,
   onSelectClip,
+  onClearSelection,
   playheadUs,
   onPlayheadChange,
   zoomPxPerSecond,
@@ -1116,8 +1648,10 @@ function TimelineSurface({
 }: {
   timeline: typeof starterTimeline;
   mediaAssets: MediaAsset[];
-  selectedClipId: string;
-  onSelectClip: (clipId: string) => void;
+  selectedClipIds: string[];
+  soloTrackIds: string[];
+  onSelectClip: (clipId: string, mode?: "single" | "toggle" | "range") => void;
+  onClearSelection: () => void;
   playheadUs: number;
   onPlayheadChange: (playheadUs: number) => void;
   zoomPxPerSecond: number;
@@ -1127,7 +1661,7 @@ function TimelineSurface({
   onMoveClip: (clipId: string, targetTrackId: string, startUs: number) => Promise<void>;
   onTrimClip: (clipId: string, edge: "start" | "end", deltaUs: number) => Promise<void>;
   onOpenClipContextMenu: (event: ReactMouseEvent, clip: TimelineClip) => void;
-  onToggleTrack: (trackId: string, field: "locked" | "muted" | "visible") => void;
+  onToggleTrack: (trackId: string, field: "locked" | "muted" | "visible" | "solo") => void;
   draggingMediaId: string | null;
   mediaDropTrackId: string | null;
   mediaDropPreview: MediaDropPreviewState | null;
@@ -1181,6 +1715,9 @@ function TimelineSurface({
       return;
     }
 
+    if (!event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      onClearSelection();
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
     setDraggingPlayhead(true);
     updatePlayheadFromPointer(event.clientX);
@@ -1234,7 +1771,13 @@ function TimelineSurface({
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
-    onSelectClip(clip.id);
+    if (event.shiftKey) {
+      onSelectClip(clip.id, "range");
+    } else if (event.ctrlKey || event.metaKey) {
+      onSelectClip(clip.id, "toggle");
+    } else if (!selectedClipIds.includes(clip.id)) {
+      onSelectClip(clip.id, "single");
+    }
     setClipInteraction({
       mode,
       clipId: clip.id,
@@ -1359,8 +1902,21 @@ function TimelineSurface({
         >
           <span className="playhead-handle" />
         </div>
-        {timeline.tracks.map((track) => (
-          <div className="track-row" key={track.id} style={{ gridTemplateColumns: `${timelineHeaderWidth}px ${timelineWidth}px` }}>
+        {timeline.tracks.map((track) => {
+          const soloActive = soloTrackIds.length > 0;
+          const trackSoloed = soloTrackIds.includes(track.id);
+          const trackAudibleVisible = (track.kind === "audio" ? !track.muted : track.visible) && (!soloActive || trackSoloed);
+          return (
+          <div
+            className={[
+              "track-row",
+              track.locked ? "track-locked" : "",
+              trackSoloed ? "track-soloed" : "",
+              !trackAudibleVisible ? "track-dimmed" : ""
+            ].filter(Boolean).join(" ")}
+            key={track.id}
+            style={{ gridTemplateColumns: `${timelineHeaderWidth}px ${timelineWidth}px` }}
+          >
             <div className="track-header">
               <span>{track.name}</span>
               <div>
@@ -1369,6 +1925,12 @@ function TimelineSurface({
                   icon={track.locked ? <Lock size={14} /> : <Unlock size={14} />}
                   className={track.locked ? "icon-active" : ""}
                   onClick={() => onToggleTrack(track.id, "locked")}
+                />
+                <IconButton
+                  label={soloTrackIds.includes(track.id) ? "Unsolo track" : "Solo track"}
+                  icon={<Shield size={14} />}
+                  className={soloTrackIds.includes(track.id) ? "icon-active" : ""}
+                  onClick={() => onToggleTrack(track.id, "solo")}
                 />
                 {track.kind === "audio" ? (
                   <IconButton
@@ -1461,7 +2023,7 @@ function TimelineSurface({
                     className={[
                       "timeline-clip",
                       track.kind,
-                      clip.id === selectedClipId ? "selected" : "",
+                      selectedClipIds.includes(clip.id) ? "selected" : "",
                       clipInteraction?.clipId === clip.id ? "dragging" : ""
                     ]
                       .filter(Boolean)
@@ -1477,7 +2039,15 @@ function TimelineSurface({
                       setPreviewClip(null);
                     }}
                     onContextMenu={(event) => onOpenClipContextMenu(event, clip)}
-                    onClick={() => onSelectClip(clip.id)}
+                    onClick={(event) => {
+                      if (event.shiftKey) {
+                        onSelectClip(clip.id, "range");
+                      } else if (event.ctrlKey || event.metaKey) {
+                        onSelectClip(clip.id, "toggle");
+                      } else if (!selectedClipIds.includes(clip.id)) {
+                        onSelectClip(clip.id, "single");
+                      }
+                    }}
                   >
                     <span
                       className="clip-trim-handle start"
@@ -1506,7 +2076,8 @@ function TimelineSurface({
               })}
             </div>
           </div>
-        ))}
+        );
+        })}
       </div>
     </div>
   );
@@ -1729,11 +2300,13 @@ function PreviewSurface({
 }
 
 const mediaThumbnailCache = new Map<string, string>();
+const mediaWaveformCache = new Map<string, string>();
 
 function MediaThumbnail({ asset }: { asset: MediaAsset }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [src, setSrc] = useState("");
   const [thumbnailSrc, setThumbnailSrc] = useState("");
+  const [waveformSrc, setWaveformSrc] = useState("");
   const [loaded, setLoaded] = useState(asset.kind === "audio");
 
   useEffect(() => {
@@ -1808,9 +2381,31 @@ function MediaThumbnail({ asset }: { asset: MediaAsset }) {
     };
   }, [src]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setWaveformSrc("");
+    const cachedWaveform = mediaWaveformCache.get(asset.path);
+    if (cachedWaveform) {
+      setWaveformSrc(cachedWaveform);
+      return;
+    }
+
+    void getMediaWaveformDataUrl(asset).then((url) => {
+      if (!cancelled && url) {
+        mediaWaveformCache.set(asset.path, url);
+        setWaveformSrc(url);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [asset]);
+
   if (asset.kind === "audio") {
     return (
       <span className="media-thumb-frame audio">
+        {waveformSrc ? <img src={waveformSrc} alt="" /> : null}
         <Music size={18} />
       </span>
     );
@@ -1820,7 +2415,39 @@ function MediaThumbnail({ asset }: { asset: MediaAsset }) {
     <span className={loaded ? "media-thumb-frame video loaded" : "media-thumb-frame video"}>
       {thumbnailSrc ? <img src={thumbnailSrc} alt="" /> : null}
       {!thumbnailSrc && src ? <video ref={videoRef} src={src} muted preload="metadata" playsInline /> : null}
+      {waveformSrc ? <img className="media-waveform-strip" src={waveformSrc} alt="" /> : null}
       <Film size={18} />
+    </span>
+  );
+}
+
+function MediaManagementStatus({ asset, projectPath, missing }: { asset: MediaAsset; projectPath?: string; missing: boolean }) {
+  const [cacheStatus, setCacheStatus] = useState<MediaCacheStatus>(() => ({
+    thumbnail: asset.kind === "video" ? "ready-on-demand" : "not-applicable",
+    waveform: asset.kind === "audio" || asset.metadata?.hasAudio ? "ready-on-demand" : "not-applicable",
+    proxy: "unavailable"
+  }));
+
+  useEffect(() => {
+    let cancelled = false;
+    void getMediaCacheStatus(asset, projectPath).then((status) => {
+      if (!cancelled) {
+        setCacheStatus(status);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [asset, projectPath]);
+
+  return (
+    <span className="media-management-status">
+      <span className={missing ? "media-status-danger" : "media-status-ok"}>{missing ? "Missing" : "Linked"}</span>
+      <span>{statusLabel("Thumb", cacheStatus.thumbnail)}</span>
+      <span>{statusLabel("Wave", cacheStatus.waveform)}</span>
+      <span className={cacheStatus.proxy === "missing" || cacheStatus.proxy === "error" ? "media-status-warning" : ""}>
+        {statusLabel("Proxy", cacheStatus.proxy)}
+      </span>
     </span>
   );
 }
@@ -1873,17 +2500,181 @@ function formatTimelineTime(totalSeconds: number) {
 
 function formatMediaAssetDetail(asset: MediaAsset) {
   if (!asset.metadata || asset.kind === "audio") {
-    return `${asset.kind.toUpperCase()} - ${asset.extension}`;
+    const duration = asset.metadata?.durationUs ? ` - ${formatDuration(asset.metadata.durationUs)}` : "";
+    return `${asset.kind.toUpperCase()} - ${asset.extension}${duration}`;
   }
 
   const fps = asset.metadata.fps > 0 ? `${Math.round(asset.metadata.fps)} fps` : "fps unknown";
   const resolution = asset.metadata.width > 0 && asset.metadata.height > 0 ? `${asset.metadata.width}x${asset.metadata.height}` : "resolution unknown";
-  return `${resolution} - ${fps} - ${asset.metadata.hdr ? "HDR" : "SDR"}`;
+  return `${resolution} - ${fps} - ${formatDuration(asset.metadata.durationUs)} - ${asset.metadata.hdr ? "HDR" : "SDR"}`;
 }
 
-function findActiveClip(timeline: typeof starterTimeline, playheadUs: number, kind: "video" | "audio") {
+function formatDuration(durationUs = 0) {
+  if (!durationUs || durationUs <= 0) {
+    return "duration unknown";
+  }
+  const totalSeconds = Math.round(durationUs / 1_000_000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}:${seconds.toString().padStart(2, "0")}` : `0:${seconds.toString().padStart(2, "0")}`;
+}
+
+function statusLabel(label: string, status: MediaCacheStatus["thumbnail"]) {
+  if (status === "ready-on-demand") {
+    return `${label}: demand`;
+  }
+  if (status === "not-applicable") {
+    return `${label}: n/a`;
+  }
+  if (status === "not-needed") {
+    return `${label}: none`;
+  }
+  return `${label}: ${status}`;
+}
+
+function filterAndSortMediaAssets(
+  assets: MediaAsset[],
+  options: {
+    search: string;
+    type: MediaTypeFilter;
+    duration: MediaDurationFilter;
+    resolution: MediaResolutionFilter;
+    fps: MediaFpsFilter;
+    sort: MediaSortKey;
+    missingPaths: Set<string>;
+  }
+) {
+  const query = options.search.trim().toLowerCase();
+  const filtered = assets.filter((asset) => {
+    if (query && !`${asset.name} ${asset.path} ${asset.extension} ${asset.metadata?.codec ?? ""}`.toLowerCase().includes(query)) {
+      return false;
+    }
+
+    if (options.type === "missing") {
+      if (!options.missingPaths.has(asset.path)) {
+        return false;
+      }
+    } else if (options.type !== "all" && asset.kind !== options.type) {
+      return false;
+    }
+
+    if (!matchesDurationFilter(asset, options.duration)) {
+      return false;
+    }
+    if (!matchesResolutionFilter(asset, options.resolution)) {
+      return false;
+    }
+    return matchesFpsFilter(asset, options.fps);
+  });
+
+  return filtered.sort((left, right) => compareMediaAssets(left, right, options.sort));
+}
+
+function matchesDurationFilter(asset: MediaAsset, filter: MediaDurationFilter) {
+  if (filter === "all") {
+    return true;
+  }
+  const seconds = (asset.metadata?.durationUs ?? 0) / 1_000_000;
+  if (filter === "short") {
+    return seconds > 0 && seconds < 60;
+  }
+  if (filter === "medium") {
+    return seconds >= 60 && seconds <= 600;
+  }
+  return seconds > 600;
+}
+
+function matchesResolutionFilter(asset: MediaAsset, filter: MediaResolutionFilter) {
+  if (filter === "all") {
+    return true;
+  }
+  const width = asset.metadata?.width ?? 0;
+  const height = asset.metadata?.height ?? 0;
+  if (filter === "unknown") {
+    return width <= 0 || height <= 0;
+  }
+  if (filter === "uhd") {
+    return width >= 3840 || height >= 2160;
+  }
+  return width > 0 && height > 0 && width < 3840 && height < 2160;
+}
+
+function matchesFpsFilter(asset: MediaAsset, filter: MediaFpsFilter) {
+  if (filter === "all") {
+    return true;
+  }
+  const fps = asset.metadata?.fps ?? 0;
+  if (filter === "unknown") {
+    return fps <= 0;
+  }
+  if (filter === "24") {
+    return fps > 0 && fps < 29;
+  }
+  if (filter === "30") {
+    return fps >= 29 && fps < 49;
+  }
+  return fps >= 49;
+}
+
+function compareMediaAssets(left: MediaAsset, right: MediaAsset, sort: MediaSortKey) {
+  if (sort === "name-asc") {
+    return left.name.localeCompare(right.name);
+  }
+  if (sort === "name-desc") {
+    return right.name.localeCompare(left.name);
+  }
+  if (sort === "duration-desc") {
+    return (right.metadata?.durationUs ?? 0) - (left.metadata?.durationUs ?? 0);
+  }
+  if (sort === "resolution-desc") {
+    return (right.metadata?.width ?? 0) * (right.metadata?.height ?? 0) - (left.metadata?.width ?? 0) * (left.metadata?.height ?? 0);
+  }
+  if (sort === "fps-desc") {
+    return (right.metadata?.fps ?? 0) - (left.metadata?.fps ?? 0);
+  }
+  if (sort === "type") {
+    return left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name);
+  }
+  return Date.parse(right.importedAt) - Date.parse(left.importedAt);
+}
+
+function compareClipsByTimeline(left: TimelineClip, right: TimelineClip) {
+  return left.trackId.localeCompare(right.trackId) || left.startUs - right.startUs || left.id.localeCompare(right.id);
+}
+
+function rippleDeleteClips(timeline: Timeline, deletedClips: TimelineClip[]) {
+  const deletedByTrack = new Map<string, TimelineClip[]>();
+  for (const clip of deletedClips) {
+    deletedByTrack.set(clip.trackId, [...(deletedByTrack.get(clip.trackId) ?? []), clip]);
+  }
+  const deletedIds = new Set(deletedClips.map((clip) => clip.id));
+
+  return {
+    ...timeline,
+    tracks: timeline.tracks.map((track) => {
+      const trackDeletedClips = (deletedByTrack.get(track.id) ?? []).sort((left, right) => left.startUs - right.startUs);
+      if (trackDeletedClips.length === 0) {
+        return track;
+      }
+
+      return {
+        ...track,
+        clips: track.clips
+          .filter((clip) => !deletedIds.has(clip.id))
+          .map((clip) => {
+            const offsetUs = trackDeletedClips
+              .filter((deletedClip) => deletedClip.startUs < clip.startUs)
+              .reduce((offset, deletedClip) => offset + (deletedClip.outUs - deletedClip.inUs), 0);
+            return offsetUs > 0 ? { ...clip, startUs: Math.max(0, clip.startUs - offsetUs) } : clip;
+          })
+      };
+    })
+  };
+}
+
+function findActiveClip(timeline: typeof starterTimeline, playheadUs: number, kind: "video" | "audio", soloTrackIds: string[] = []) {
   return timeline.tracks
-    .filter((track) => track.kind === kind && !track.locked && (kind === "audio" ? !track.muted : track.visible))
+    .filter((track) => track.kind === kind && !track.locked && (kind === "audio" ? !track.muted : track.visible) && (soloTrackIds.length === 0 || soloTrackIds.includes(track.id)))
     .flatMap((track) => track.clips)
     .find((clip) => playheadUs >= clip.startUs && playheadUs < clip.startUs + (clip.outUs - clip.inUs));
 }

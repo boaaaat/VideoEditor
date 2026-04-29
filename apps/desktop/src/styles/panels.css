@@ -45,6 +45,67 @@
   gap: 10px;
 }
 
+.media-bin-tools {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.media-search {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: #191918;
+}
+
+.media-search input {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+}
+
+.media-search svg {
+  margin-left: 8px;
+}
+
+.media-filter-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.media-filter-row.compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.media-filter-row select {
+  min-width: 0;
+  padding: 0 7px;
+}
+
+.media-bin-summary,
+.media-management-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.media-bin-summary span,
+.media-management-status span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .media-drop-zone {
   min-height: 100%;
   border: 1px solid transparent;
@@ -57,6 +118,7 @@
 }
 
 .media-list button,
+.media-card-edit,
 .recent-list button,
 .command-palette button,
 .plugin-row {
@@ -69,15 +131,27 @@
   background: #1b1b19;
 }
 
-.media-list button {
+.media-list .media-card {
   grid-template-columns: 48px minmax(0, 1fr);
-  grid-template-rows: auto auto;
+  grid-template-rows: auto auto auto;
   padding: 8px;
   text-align: left;
 }
 
+.media-card-shell {
+  min-width: 0;
+}
+
+.media-card-shell.missing .media-card {
+  border-color: rgba(217, 105, 95, 0.5);
+}
+
 .media-card {
   cursor: grab;
+}
+
+.media-card-edit {
+  cursor: default;
 }
 
 .media-card:active,
@@ -95,7 +169,7 @@
   background: rgba(215, 180, 104, 0.12);
 }
 
-.media-list button span:not(.media-thumb),
+.media-list button span:not(.media-thumb):not(.media-management-status),
 .recent-list button span {
   min-width: 0;
   overflow: hidden;
@@ -146,6 +220,12 @@
   opacity: 1;
 }
 
+.media-thumb-frame .media-waveform-strip {
+  top: auto;
+  height: 10px;
+  opacity: 0.86;
+}
+
 .media-thumb-frame video {
   opacity: 0;
 }
@@ -162,6 +242,30 @@
 
 .media-thumb-frame.loaded svg {
   opacity: 0;
+}
+
+.media-rename-input {
+  min-width: 0;
+  height: 26px;
+  min-height: 26px;
+  padding: 0 7px;
+}
+
+.media-management-status {
+  grid-column: 2;
+  align-items: center;
+}
+
+.media-status-ok {
+  color: var(--accent);
+}
+
+.media-status-warning {
+  color: #f4d58a;
+}
+
+.media-status-danger {
+  color: var(--danger);
 }
 
 .media-drag-preview {

@@ -143,6 +143,48 @@ pub fn media_preview_frame_data_url(path: String, time_us: i64) -> Result<String
 }
 
 #[tauri::command]
+pub fn media_waveform_data_url(path: String) -> Result<String, String> {
+    let ffmpeg = find_ffmpeg_executable()
+        .ok_or_else(|| "could not find ffmpeg in tools/ffmpeg/bin or PATH".to_string())?;
+
+    let bytes = run_ffmpeg_waveform(&ffmpeg, &path)?;
+    if bytes.is_empty() {
+        return Err("ffmpeg produced an empty waveform".to_string());
+    }
+
+    Ok(format!(
+        "data:image/png;base64,{}",
+        general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+#[tauri::command]
+pub fn media_proxy_status(path: String, project_path: String, needed: bool) -> Result<Value, String> {
+    let media_path = PathBuf::from(path);
+    let proxy_file_name = media_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("media");
+    let proxy_path = PathBuf::from(project_path)
+        .join("cache")
+        .join("proxies")
+        .join(proxy_file_name)
+        .with_extension("proxy.mp4");
+    let status = if !needed {
+        "not-needed"
+    } else if proxy_path.is_file() {
+        "ready"
+    } else {
+        "missing"
+    };
+
+    Ok(json!({
+        "status": status,
+        "path": proxy_path
+    }))
+}
+
+#[tauri::command]
 pub fn reveal_media_path(path: String) -> Result<(), String> {
     let media_path = PathBuf::from(path);
     let target = if media_path.is_file() {
@@ -305,6 +347,39 @@ fn run_ffmpeg_frame(
 
     Err(format!(
         "ffmpeg thumbnail failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
+}
+
+fn run_ffmpeg_waveform(ffmpeg: &Path, media_path: &str) -> Result<Vec<u8>, String> {
+    let output = Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            media_path,
+            "-filter_complex",
+            "aformat=channel_layouts=mono,showwavespic=s=160x32:colors=7bb65f",
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
+            "pipe:1",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("failed to run ffmpeg waveform command: {error}"))?;
+
+    if output.status.success() && !output.stdout.is_empty() {
+        return Ok(output.stdout);
+    }
+
+    Err(format!(
+        "ffmpeg waveform failed: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     ))
 }

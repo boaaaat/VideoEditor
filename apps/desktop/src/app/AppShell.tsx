@@ -481,6 +481,47 @@ export function AppShell() {
     }
   }
 
+  function renameMediaAsset(assetId: string, nextName: string) {
+    const trimmedName = nextName.trim();
+    if (!trimmedName) {
+      logStatus("Media rename requires a name", { level: "warning", source: "media", details: { mediaId: assetId } });
+      return;
+    }
+
+    const previousName = mediaAssets.find((asset) => asset.id === assetId)?.name ?? "";
+    setMediaAssets((existing) =>
+      existing.map((asset) => {
+        if (asset.id !== assetId) {
+          return asset;
+        }
+        return { ...asset, name: trimmedName };
+      })
+    );
+    logStatus(`Renamed media bin item to ${trimmedName}`, {
+      source: "media",
+      details: { mediaId: assetId, previousName, nextName: trimmedName }
+    });
+  }
+
+  function relinkMediaAsset(assetId: string, relinkedAsset: MediaAsset) {
+    const previousAsset = mediaAssets.find((asset) => asset.id === assetId);
+    const previousPath = previousAsset?.path ?? "";
+    setMediaAssets((existing) =>
+      existing.map((asset) => {
+        if (asset.id !== assetId) {
+          return asset;
+        }
+        return { ...relinkedAsset, id: asset.id, name: asset.name };
+      })
+    );
+    setMissingMediaPaths((existing) => existing.filter((path) => path !== previousPath && path !== relinkedAsset.path));
+    logStatus(`Relinked media: ${previousAsset?.name ?? relinkedAsset.name}`, {
+      level: "success",
+      source: "media",
+      details: { mediaId: assetId, previousPath, nextPath: relinkedAsset.path, metadata: relinkedAsset.metadata ?? null }
+    });
+  }
+
   async function refreshEngineState(reason = "manual") {
     try {
       const [mediaIndex, nextTimeline, proposalIndex] = await Promise.all([
@@ -809,6 +850,10 @@ export function AppShell() {
             onImportMedia={handleImportMedia}
             onImportMediaResult={applyImportedMedia}
             onRemoveMediaAsset={removeMediaAsset}
+            onRenameMediaAsset={renameMediaAsset}
+            onRelinkMediaAsset={relinkMediaAsset}
+            missingMediaPaths={missingMediaPaths}
+            projectPath={project.path}
             setStatusMessage={makeStatusLogger("timeline")}
           />
         );
@@ -849,7 +894,7 @@ export function AppShell() {
       default:
         return null;
     }
-  }, [activeTab, aiProposals, engineStatus, mediaAssets, projectSettings, recentProjects, timeline]);
+  }, [activeTab, aiProposals, engineStatus, mediaAssets, missingMediaPaths, project.path, projectSettings, recentProjects, timeline]);
 
   return (
     <main className="app-shell">
