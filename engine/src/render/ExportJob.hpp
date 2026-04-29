@@ -23,6 +23,14 @@ struct ExportMediaAsset {
   bool hasAudio = false;
 };
 
+struct ExportClipEffect {
+  std::string id;
+  std::string type;
+  std::string label;
+  bool enabled = false;
+  double amount = 0.0;
+};
+
 struct ExportTimelineClip {
   std::string mediaId;
   std::string trackId;
@@ -39,6 +47,20 @@ struct ExportTimelineClip {
   std::int64_t audioFadeOutUs = 0;
   bool audioNormalize = false;
   bool audioCleanup = false;
+  double brightness = 0.0;
+  double contrast = 0.0;
+  double saturation = 1.0;
+  double temperature = 0.0;
+  double tint = 0.0;
+  std::string lutId;
+  double lutStrength = 1.0;
+  bool transformEnabled = true;
+  double scale = 1.0;
+  double positionX = 0.0;
+  double positionY = 0.0;
+  double rotation = 0.0;
+  double opacity = 1.0;
+  std::vector<ExportClipEffect> effects;
 };
 
 struct ExportTimelineSegment {

@@ -328,12 +328,7 @@ class ExportEngine {
       } else {
         const auto* media = findMedia(job.timeline.media, segment.clip->mediaId);
         args.insert(args.end(), {"-i", media ? media->path : std::string{}});
-        const auto input = std::to_string(inputIndex);
-        filters.push_back("[" + input + ":v]trim=start=" + formatSeconds(segment.sourceInUs) + ":duration=" + durationSeconds +
-                          ",setpts=PTS-STARTPTS,fps=" + std::to_string(job.fps) +
-                          ",scale=" + std::to_string(job.width) + ":" + std::to_string(job.height) +
-                          ":force_original_aspect_ratio=decrease,pad=" + std::to_string(job.width) + ":" + std::to_string(job.height) +
-                          ":(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v" + std::to_string(segmentIndex) + "]");
+        filters.push_back(videoSegmentFilter(inputIndex, segmentIndex, *segment.clip, job, segment.sourceInUs, segment.durationUs));
         inputIndex += 1;
       }
 
@@ -427,6 +422,100 @@ class ExportEngine {
       filters.push_back(audioInputs.front() + finalFilter + "[outa]");
     } else {
       filters.push_back(join(audioInputs, "") + "amix=inputs=" + std::to_string(audioInputs.size()) + ":duration=longest:dropout_transition=0:normalize=0," + finalFilter + "[outa]");
+    }
+  }
+
+  [[nodiscard]] static std::string videoSegmentFilter(
+      int inputIndex,
+      int segmentIndex,
+      const ExportTimelineClip& clip,
+      const ExportJob& job,
+      std::int64_t sourceInUs,
+      std::int64_t durationUs) {
+    std::vector<std::string> filters = {
+        "[" + std::to_string(inputIndex) + ":v]trim=start=" + formatSeconds(sourceInUs) + ":duration=" + formatSeconds(durationUs),
+        "setpts=PTS-STARTPTS",
+        "fps=" + std::to_string(job.fps),
+        "scale=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":force_original_aspect_ratio=decrease",
+        "pad=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":(ow-iw)/2:(oh-ih)/2",
+        "setsar=1",
+        "format=rgba",
+    };
+
+    appendColorFilters(clip, filters);
+    appendEffectFilters(clip, filters);
+
+    if (clip.transformEnabled) {
+      const auto scale = std::clamp(clip.scale, 0.1, 4.0);
+      const auto opacity = std::clamp(clip.opacity, 0.0, 1.0);
+      if (std::abs(scale - 1.0) > 0.001) {
+        filters.push_back("scale=round(iw*" + formatDouble(scale) + "/2)*2:round(ih*" + formatDouble(scale) + "/2)*2");
+      }
+      if (std::abs(clip.rotation) > 0.001) {
+        filters.push_back("rotate=" + formatDouble(clip.rotation * 3.14159265358979323846 / 180.0) + ":ow=rotw(iw):oh=roth(ih):c=black@0");
+      }
+      if (opacity < 0.999) {
+        filters.push_back("colorchannelmixer=aa=" + formatDouble(opacity));
+      }
+      filters.push_back("format=rgba[fg" + std::to_string(segmentIndex) + "]");
+      return join(filters, ",") + ";color=c=black:s=" + std::to_string(job.width) + "x" + std::to_string(job.height) + ":r=" + std::to_string(job.fps) +
+             ":d=" + formatSeconds(durationUs) + "[base" + std::to_string(segmentIndex) + "];[base" + std::to_string(segmentIndex) + "][fg" +
+             std::to_string(segmentIndex) + "]overlay=x=(W-w)/2+" + formatDouble(clip.positionX) + ":y=(H-h)/2+" + formatDouble(clip.positionY) +
+             ":format=auto,format=yuv420p[v" + std::to_string(segmentIndex) + "]";
+    }
+
+    filters.push_back("format=yuv420p");
+    return join(filters, ",") + "[v" + std::to_string(segmentIndex) + "]";
+  }
+
+  static void appendColorFilters(const ExportTimelineClip& clip, std::vector<std::string>& filters) {
+    const auto brightness = std::clamp(clip.brightness / 100.0, -1.0, 1.0);
+    const auto contrast = std::max(0.0, 1.0 + clip.contrast / 100.0);
+    const auto saturation = std::max(0.0, clip.saturation);
+    if (std::abs(brightness) > 0.001 || std::abs(contrast - 1.0) > 0.001 || std::abs(saturation - 1.0) > 0.001) {
+      filters.push_back("eq=brightness=" + formatDouble(brightness) + ":contrast=" + formatDouble(contrast) + ":saturation=" + formatDouble(saturation));
+    }
+    if (std::abs(clip.temperature) > 0.001 || std::abs(clip.tint) > 0.001) {
+      filters.push_back("hue=h=" + formatDouble((clip.tint + clip.temperature * 0.35) * 3.14159265358979323846 / 180.0));
+    }
+    appendLutPresetFilters(clip, filters);
+  }
+
+  static void appendLutPresetFilters(const ExportTimelineClip& clip, std::vector<std::string>& filters) {
+    if (clip.lutId.empty() || clip.lutStrength <= 0) {
+      return;
+    }
+    const auto strength = std::clamp(clip.lutStrength, 0.0, 1.0);
+    if (clip.lutId == "warm") {
+      filters.push_back("colorbalance=rs=" + formatDouble(0.12 * strength) + ":bs=" + formatDouble(-0.08 * strength));
+      filters.push_back("eq=saturation=" + formatDouble(1.0 + 0.18 * strength));
+    } else if (clip.lutId == "cool") {
+      filters.push_back("colorbalance=bs=" + formatDouble(0.12 * strength) + ":rs=" + formatDouble(-0.06 * strength));
+      filters.push_back("eq=saturation=" + formatDouble(1.0 + 0.08 * strength));
+    } else if (clip.lutId == "filmic") {
+      filters.push_back("curves=preset=medium_contrast");
+      filters.push_back("eq=saturation=" + formatDouble(1.0 - 0.12 * strength));
+    } else if (clip.lutId == "mono") {
+      filters.push_back("hue=s=0");
+      filters.push_back("eq=contrast=" + formatDouble(1.0 + 0.12 * strength));
+    }
+  }
+
+  static void appendEffectFilters(const ExportTimelineClip& clip, std::vector<std::string>& filters) {
+    for (const auto& effect : clip.effects) {
+      if (!effect.enabled || effect.amount <= 0) {
+        continue;
+      }
+      const auto amount = std::clamp(effect.amount, 0.0, 100.0);
+      if (effect.type == "blur") {
+        filters.push_back("gblur=sigma=" + formatDouble(amount / 18.0));
+      } else if (effect.type == "sharpen") {
+        filters.push_back("unsharp=5:5:" + formatDouble(amount / 40.0) + ":3:3:0");
+      } else if (effect.type == "vignette") {
+        filters.push_back("vignette=angle=" + formatDouble(0.25 + amount / 140.0));
+      } else if (effect.type == "grayscale") {
+        filters.push_back("hue=s=" + formatDouble(1.0 - amount / 100.0));
+      }
     }
   }
 
@@ -682,6 +771,41 @@ class ExportEngine {
           clip.audioNormalize = audio.value("normalize", false);
           clip.audioCleanup = audio.value("cleanup", false);
         }
+        if (item.contains("color") && item.at("color").is_object()) {
+          const auto& color = item.at("color");
+          clip.brightness = color.value("brightness", 0.0);
+          clip.contrast = color.value("contrast", 0.0);
+          clip.saturation = color.value("saturation", 1.0);
+          clip.temperature = color.value("temperature", 0.0);
+          clip.tint = color.value("tint", 0.0);
+        }
+        if (item.contains("lut") && item.at("lut").is_object()) {
+          const auto& lut = item.at("lut");
+          clip.lutId = lut.value("lutId", std::string{});
+          clip.lutStrength = lut.value("strength", 1.0);
+        }
+        if (item.contains("transform") && item.at("transform").is_object()) {
+          const auto& transform = item.at("transform");
+          clip.transformEnabled = transform.value("enabled", true);
+          clip.scale = transform.value("scale", 1.0);
+          clip.positionX = transform.value("positionX", 0.0);
+          clip.positionY = transform.value("positionY", 0.0);
+          clip.rotation = transform.value("rotation", 0.0);
+          clip.opacity = transform.value("opacity", 1.0);
+        }
+        if (item.contains("effects") && item.at("effects").is_array()) {
+          for (const auto& effectItem : item.at("effects")) {
+            ExportClipEffect effect;
+            effect.id = effectItem.value("id", std::string{});
+            effect.type = effectItem.value("type", std::string{});
+            effect.label = effectItem.value("label", effect.type);
+            effect.enabled = effectItem.value("enabled", false);
+            effect.amount = effectItem.value("amount", 0.0);
+            if (!effect.type.empty()) {
+              clip.effects.push_back(effect);
+            }
+          }
+        }
         if (!clip.mediaId.empty()) {
           timeline.clips.push_back(clip);
         }
@@ -859,6 +983,14 @@ class ExportEngine {
     stream.setf(std::ios::fixed);
     stream.precision(2);
     stream << gainDb << "dB";
+    return stream.str();
+  }
+
+  [[nodiscard]] static std::string formatDouble(double value) {
+    std::ostringstream stream;
+    stream.setf(std::ios::fixed);
+    stream.precision(4);
+    stream << value;
     return stream.str();
   }
 

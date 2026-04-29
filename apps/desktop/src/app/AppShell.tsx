@@ -874,9 +874,9 @@ export function AppShell() {
           />
         );
       case "color":
-        return <ColorTab />;
+        return <ColorTab timeline={timeline} setTimeline={setTimeline} setStatusMessage={makeStatusLogger("timeline")} />;
       case "effects":
-        return <EffectsTab />;
+        return <EffectsTab timeline={timeline} setTimeline={setTimeline} setStatusMessage={makeStatusLogger("timeline")} />;
       case "shortcuts":
         return <ShortcutsTab />;
       case "plugins":

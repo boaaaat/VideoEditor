@@ -598,6 +598,20 @@
   gap: 8px;
 }
 
+.effects-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.effect-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #1b1b19;
+}
+
 .feature-list span,
 .muted-line {
   display: inline-flex;

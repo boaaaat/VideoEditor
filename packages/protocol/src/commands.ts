@@ -1,4 +1,4 @@
-import type { AudioAdjustment, ColorAdjustment } from "./timeline";
+import type { AudioAdjustment, ClipEffect, ClipTransform, ColorAdjustment } from "./timeline";
 import type { ColorMode, ExportCodec, ExportContainer, ExportFps, ExportQuality, ExportResolution } from "./media";
 
 export type CommandType =
@@ -14,6 +14,8 @@ export type CommandType =
   | "ripple_delete_clip"
   | "apply_color_adjustment"
   | "apply_audio_adjustment"
+  | "apply_transform"
+  | "apply_effect_stack"
   | "apply_lut"
   | "export_timeline";
 
@@ -97,6 +99,18 @@ export interface ApplyAudioAdjustmentCommand {
   adjustment: Partial<AudioAdjustment>;
 }
 
+export interface ApplyTransformCommand {
+  type: "apply_transform";
+  clipId: string;
+  transform: Partial<ClipTransform>;
+}
+
+export interface ApplyEffectStackCommand {
+  type: "apply_effect_stack";
+  clipId: string;
+  effects: ClipEffect[];
+}
+
 export interface ApplyLutCommand {
   type: "apply_lut";
   clipId: string;
@@ -137,6 +151,8 @@ export type EditorCommand =
   | RippleDeleteClipCommand
   | ApplyColorAdjustmentCommand
   | ApplyAudioAdjustmentCommand
+  | ApplyTransformCommand
+  | ApplyEffectStackCommand
   | ApplyLutCommand
   | ExportTimelineCommand;
 

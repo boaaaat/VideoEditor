@@ -28,6 +28,8 @@ export interface TimelineClip {
   outUs: number;
   color: ColorAdjustment;
   audio?: AudioAdjustment;
+  transform?: ClipTransform;
+  effects?: ClipEffect[];
   lut?: ClipLut;
 }
 
@@ -42,6 +44,25 @@ export interface ColorAdjustment {
 export interface ClipLut {
   lutId: string;
   strength: number;
+}
+
+export interface ClipTransform {
+  enabled: boolean;
+  scale: number;
+  positionX: number;
+  positionY: number;
+  rotation: number;
+  opacity: number;
+}
+
+export type ClipEffectType = "blur" | "sharpen" | "vignette" | "grayscale";
+
+export interface ClipEffect {
+  id: string;
+  type: ClipEffectType;
+  label: string;
+  enabled: boolean;
+  amount: number;
 }
 
 export interface AudioAdjustment {
@@ -69,3 +90,19 @@ export const defaultAudioAdjustment: AudioAdjustment = {
   normalize: false,
   cleanup: false
 };
+
+export const defaultClipTransform: ClipTransform = {
+  enabled: true,
+  scale: 1,
+  positionX: 0,
+  positionY: 0,
+  rotation: 0,
+  opacity: 1
+};
+
+export const defaultClipEffects: ClipEffect[] = [
+  { id: "blur", type: "blur", label: "Blur", enabled: false, amount: 0 },
+  { id: "sharpen", type: "sharpen", label: "Sharpen", enabled: false, amount: 0 },
+  { id: "vignette", type: "vignette", label: "Vignette", enabled: false, amount: 0 },
+  { id: "grayscale", type: "grayscale", label: "Grayscale", enabled: false, amount: 0 }
+];

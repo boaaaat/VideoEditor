@@ -45,7 +45,21 @@ import {
   ZoomIn,
   ZoomOut
 } from "lucide-react";
-import { defaultAudioAdjustment, type AudioAdjustment, type CommandResult, type EditorCommand, type PreviewState, type ProjectSettings, type Timeline, type TimelineClip } from "@ai-video-editor/protocol";
+import {
+  defaultAudioAdjustment,
+  defaultClipEffects,
+  defaultClipTransform,
+  type AudioAdjustment,
+  type ClipEffect,
+  type ClipTransform,
+  type ColorAdjustment,
+  type CommandResult,
+  type EditorCommand,
+  type PreviewState,
+  type ProjectSettings,
+  type Timeline,
+  type TimelineClip
+} from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 import { IconButton } from "../../components/IconButton";
@@ -2289,9 +2303,10 @@ function PreviewSurface({
   const activeAsset = videoAsset ?? audioAsset;
   const activeClip = videoClip ?? audioClip;
   const activeTime = activeClip ? formatTimelineTime(Math.max(0, Math.floor((playheadUs - activeClip.startUs) / 1_000_000))) : "";
-  const nativePreviewActive = Boolean(stats?.childHwnd);
   const displayedPreviewFps = playing ? Math.round(stats?.previewFps || projectSettings.fps) : Math.round(stats?.previewFps ?? 0);
   const previewScaleStyle = getPreviewScaleStyle(previewScale, projectSettings);
+  const visualPreviewStyle = getClipVisualPreviewStyle(videoClip, previewScaleStyle);
+  const nativePreviewActive = Boolean(stats?.childHwnd) && !clipHasVisualEdits(videoClip);
   const frameClassName = activeAsset
     ? nativePreviewActive
       ? "preview-frame has-native"
@@ -2304,9 +2319,9 @@ function PreviewSurface({
     <div ref={frameRef} className={frameClassName}>
       {nativePreviewActive ? <div className="native-preview-surface" style={previewScaleStyle} /> : null}
       {!nativePreviewActive && videoAsset && videoClip && videoSrc ? (
-        <video ref={videoRef} src={videoSrc} muted={false} playsInline style={previewScaleStyle} onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, playheadUs, playing)} />
+        <video ref={videoRef} src={videoSrc} muted={false} playsInline style={visualPreviewStyle} onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, playheadUs, playing)} />
       ) : null}
-      {!nativePreviewActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" style={previewScaleStyle} /> : null}
+      {!nativePreviewActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" style={visualPreviewStyle} /> : null}
       {!nativePreviewActive && !videoAsset && audioAsset && audioClip && audioSrc ? (
         <>
           <audio ref={audioRef} src={audioSrc} onLoadedMetadata={() => syncMediaElement(audioRef, audioClip, playheadUs, playing)} />
@@ -2547,6 +2562,125 @@ function getPreviewScaleStyle(previewScale: PreviewScaleMode, projectSettings: P
     maxHeight: "none",
     objectFit: "contain"
   };
+}
+
+function getClipVisualPreviewStyle(clip: TimelineClip | undefined, baseStyle: CSSProperties | undefined): CSSProperties | undefined {
+  if (!clip) {
+    return baseStyle;
+  }
+
+  const transform = normalizeTransform(clip.transform);
+  const effects = normalizeEffects(clip.effects);
+  const style: CSSProperties = {
+    ...baseStyle,
+    filter: buildCssFilter(clip.color, clip.lut, effects),
+    opacity: transform.enabled ? transform.opacity : 1
+  };
+
+  if (transform.enabled) {
+    const baseTransform = baseStyle?.transform ? `${baseStyle.transform} ` : "";
+    style.transform = `${baseTransform}translate(${transform.positionX}px, ${transform.positionY}px) rotate(${transform.rotation}deg) scale(${transform.scale})`;
+  }
+  return style;
+}
+
+function clipHasVisualEdits(clip: TimelineClip | undefined) {
+  if (!clip) {
+    return false;
+  }
+  const color = normalizeColor(clip.color);
+  const transform = normalizeTransform(clip.transform);
+  const effects = normalizeEffects(clip.effects);
+  return (
+    Math.abs(color.brightness) > 0.001 ||
+    Math.abs(color.contrast) > 0.001 ||
+    Math.abs(color.saturation - 1) > 0.001 ||
+    Math.abs(color.temperature) > 0.001 ||
+    Math.abs(color.tint) > 0.001 ||
+    Boolean(clip.lut?.lutId && (clip.lut.strength ?? 0) > 0) ||
+    (transform.enabled &&
+      (Math.abs(transform.scale - 1) > 0.001 ||
+        Math.abs(transform.positionX) > 0.001 ||
+        Math.abs(transform.positionY) > 0.001 ||
+        Math.abs(transform.rotation) > 0.001 ||
+        Math.abs(transform.opacity - 1) > 0.001)) ||
+    effects.some((effect) => effect.enabled && effect.amount > 0)
+  );
+}
+
+function buildCssFilter(colorValue: TimelineClip["color"], lut: TimelineClip["lut"], effects: ClipEffect[]) {
+  const color = normalizeColor(colorValue);
+  const filters = [
+    `brightness(${Math.max(0, 1 + color.brightness / 100)})`,
+    `contrast(${Math.max(0, 1 + color.contrast / 100)})`,
+    `saturate(${Math.max(0, color.saturation)})`
+  ];
+
+  if (color.temperature || color.tint) {
+    filters.push(`hue-rotate(${(color.tint + color.temperature * 0.35).toFixed(1)}deg)`);
+  }
+
+  if (lut?.lutId && lut.strength > 0) {
+    filters.push(cssLutFilter(lut.lutId, lut.strength));
+  }
+
+  for (const effect of effects) {
+    if (!effect.enabled || effect.amount <= 0) {
+      continue;
+    }
+    if (effect.type === "blur") {
+      filters.push(`blur(${(effect.amount / 12).toFixed(2)}px)`);
+    } else if (effect.type === "grayscale") {
+      filters.push(`grayscale(${Math.min(1, effect.amount / 100)})`);
+    } else if (effect.type === "vignette") {
+      filters.push(`drop-shadow(0 0 ${(effect.amount / 2).toFixed(0)}px rgba(0,0,0,0.55))`);
+    }
+  }
+
+  return filters.join(" ");
+}
+
+function cssLutFilter(lutId: string, strength: number) {
+  const amount = Math.max(0, Math.min(1, strength));
+  if (lutId === "warm") {
+    return `sepia(${0.18 * amount}) saturate(${1 + 0.18 * amount})`;
+  }
+  if (lutId === "cool") {
+    return `hue-rotate(${-10 * amount}deg) saturate(${1 + 0.08 * amount})`;
+  }
+  if (lutId === "filmic") {
+    return `contrast(${1 + 0.22 * amount}) saturate(${1 - 0.12 * amount})`;
+  }
+  if (lutId === "mono") {
+    return `grayscale(${0.9 * amount}) contrast(${1 + 0.12 * amount})`;
+  }
+  return "";
+}
+
+function normalizeColor(value?: Partial<ColorAdjustment>): ColorAdjustment {
+  return {
+    brightness: 0,
+    contrast: 0,
+    saturation: 1,
+    temperature: 0,
+    tint: 0,
+    ...value
+  };
+}
+
+function normalizeTransform(value?: Partial<ClipTransform>): ClipTransform {
+  return {
+    ...defaultClipTransform,
+    ...value
+  };
+}
+
+function normalizeEffects(value?: ClipEffect[]): ClipEffect[] {
+  const existingById = new Map((value ?? []).map((effect) => [effect.id, effect]));
+  return defaultClipEffects.map((effect) => ({
+    ...effect,
+    ...existingById.get(effect.id)
+  }));
 }
 
 function formatMediaAssetDetail(asset: MediaAsset) {

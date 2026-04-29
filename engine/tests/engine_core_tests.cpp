@@ -131,6 +131,13 @@ int runTests() {
   timelineExportJob.normalizeAudio = true;
   timelineExportJob.timeline.media.push_back({"media_a", "C:\\media\\clip-a.mp4", "video", true});
   timelineExportJob.timeline.clips.push_back({"media_a", "v1", "video", 1, true, false, 1'000'000, 500'000, 3'500'000, 4, false, 250'000, 500'000, true, true});
+  timelineExportJob.timeline.clips.back().brightness = 12;
+  timelineExportJob.timeline.clips.back().contrast = 20;
+  timelineExportJob.timeline.clips.back().lutId = "filmic";
+  timelineExportJob.timeline.clips.back().lutStrength = 0.75;
+  timelineExportJob.timeline.clips.back().scale = 1.15;
+  timelineExportJob.timeline.clips.back().positionX = 24;
+  timelineExportJob.timeline.clips.back().effects.push_back({"blur", "blur", "Blur", true, 18});
   const auto timelineCommand = ai_editor::ExportEngine::buildFfmpegCommand(timelineExportJob);
   assert(timelineCommand.find("C:\\media\\clip-a.mp4") != std::string::npos);
   assert(timelineCommand.find("filter_complex") != std::string::npos);
@@ -140,6 +147,10 @@ int runTests() {
   assert(timelineCommand.find("volume=-3.00dB") != std::string::npos);
   assert(timelineCommand.find("afade=t=in") != std::string::npos);
   assert(timelineCommand.find("loudnorm") != std::string::npos);
+  assert(timelineCommand.find("eq=brightness=0.1200") != std::string::npos);
+  assert(timelineCommand.find("curves=preset=medium_contrast") != std::string::npos);
+  assert(timelineCommand.find("overlay=x=(W-w)/2+24.0000") != std::string::npos);
+  assert(timelineCommand.find("gblur=sigma=1.0000") != std::string::npos);
 
   ai_editor::GpuStatus gpu;
   gpu.nvencAvailable = true;

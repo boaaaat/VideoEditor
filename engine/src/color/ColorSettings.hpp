@@ -11,6 +11,7 @@ struct ColorSettings {
   double temperature = 0.0;
   double tint = 0.0;
   std::string lutPath;
+  std::string lutId;
   double lutStrength = 1.0;
 };
 

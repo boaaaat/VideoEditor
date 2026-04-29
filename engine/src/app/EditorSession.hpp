@@ -205,6 +205,10 @@ class EditorSession {
       applyClipLook(command);
     } else if (type == "apply_audio_adjustment") {
       applyClipAudio(command);
+    } else if (type == "apply_transform") {
+      applyClipTransform(command);
+    } else if (type == "apply_effect_stack") {
+      applyClipEffects(command);
     } else {
       throw std::runtime_error("unknown command type: " + type);
     }
@@ -355,10 +359,14 @@ class EditorSession {
         in_us INTEGER NOT NULL,
         out_us INTEGER NOT NULL,
         color_json TEXT NOT NULL,
-        audio_json TEXT NOT NULL DEFAULT '{}'
+        audio_json TEXT NOT NULL DEFAULT '{}',
+        transform_json TEXT NOT NULL DEFAULT '{}',
+        effects_json TEXT NOT NULL DEFAULT '[]'
       );
     )sql");
     ensureColumn("timeline_clips", "audio_json", "TEXT NOT NULL DEFAULT '{}'");
+    ensureColumn("timeline_clips", "transform_json", "TEXT NOT NULL DEFAULT '{}'");
+    ensureColumn("timeline_clips", "effects_json", "TEXT NOT NULL DEFAULT '[]'");
     exec(R"sql(
       CREATE TABLE IF NOT EXISTS ai_proposals (
         id TEXT PRIMARY KEY,
@@ -420,7 +428,7 @@ class EditorSession {
 
   void loadClips() {
     sqlite3_stmt* statement = nullptr;
-    prepare("SELECT id,media_id,track_id,start_us,in_us,out_us,color_json,audio_json FROM timeline_clips ORDER BY start_us ASC;", &statement);
+    prepare("SELECT id,media_id,track_id,start_us,in_us,out_us,color_json,audio_json,transform_json,effects_json FROM timeline_clips ORDER BY start_us ASC;", &statement);
     while (sqlite3_step(statement) == SQLITE_ROW) {
       Clip clip;
       clip.id = columnText(statement, 0);
@@ -435,6 +443,8 @@ class EditorSession {
       clip.color.saturation = color.value("saturation", 1.0);
       clip.color.temperature = color.value("temperature", 0.0);
       clip.color.tint = color.value("tint", 0.0);
+      clip.color.lutId = color.value("lutId", std::string{});
+      clip.color.lutStrength = color.value("lutStrength", 1.0);
       const auto audio = parseJson(columnText(statement, 7), defaultAudioJson());
       clip.audioGainDb = audio.value("gainDb", 0.0);
       clip.audioMuted = audio.value("muted", false);
@@ -442,6 +452,8 @@ class EditorSession {
       clip.audioFadeOutUs = audio.value("fadeOutUs", 0LL);
       clip.audioNormalize = audio.value("normalize", false);
       clip.audioCleanup = audio.value("cleanup", false);
+      clip.transform = transformFromJson(parseJson(columnText(statement, 8), defaultTransformJson()));
+      clip.effects = effectsFromJson(parseJson(columnText(statement, 9), defaultEffectsJson()));
       auto* track = findTrack(clip.trackId);
       if (track) {
         track->clips.push_back(clip);
@@ -500,7 +512,7 @@ class EditorSession {
 
       for (const auto& clip : track.clips) {
         sqlite3_stmt* clipStatement = nullptr;
-        prepare("INSERT INTO timeline_clips(id,media_id,track_id,start_us,in_us,out_us,color_json,audio_json) VALUES(?,?,?,?,?,?,?,?);", &clipStatement);
+        prepare("INSERT INTO timeline_clips(id,media_id,track_id,start_us,in_us,out_us,color_json,audio_json,transform_json,effects_json) VALUES(?,?,?,?,?,?,?,?,?,?);", &clipStatement);
         bindText(clipStatement, 1, clip.id);
         bindText(clipStatement, 2, clip.mediaId);
         bindText(clipStatement, 3, clip.trackId);
@@ -509,6 +521,8 @@ class EditorSession {
         sqlite3_bind_int64(clipStatement, 6, clip.outUs);
         bindText(clipStatement, 7, colorJson(clip).dump());
         bindText(clipStatement, 8, audioJson(clip).dump());
+        bindText(clipStatement, 9, transformJson(clip.transform).dump());
+        bindText(clipStatement, 10, effectsJson(clip.effects).dump());
         stepDone(clipStatement);
       }
     }
@@ -647,6 +661,14 @@ class EditorSession {
       clip->color.temperature = adjustment.value("temperature", clip->color.temperature);
       clip->color.tint = adjustment.value("tint", clip->color.tint);
     }
+    if (command.contains("lutId")) {
+      if (command.at("lutId").is_null()) {
+        clip->color.lutId.clear();
+      } else {
+        clip->color.lutId = command.at("lutId").get<std::string>();
+      }
+      clip->color.lutStrength = command.value("strength", clip->color.lutStrength);
+    }
   }
 
   void applyClipAudio(const nlohmann::json& command) {
@@ -665,6 +687,32 @@ class EditorSession {
     }
   }
 
+  void applyClipTransform(const nlohmann::json& command) {
+    auto* clip = findClip(command.value("clipId", std::string{}));
+    if (!clip) {
+      throw std::runtime_error("clip not found");
+    }
+    if (command.contains("transform")) {
+      const auto transform = command.at("transform");
+      clip->transform.enabled = transform.value("enabled", clip->transform.enabled);
+      clip->transform.scale = transform.value("scale", clip->transform.scale);
+      clip->transform.positionX = transform.value("positionX", clip->transform.positionX);
+      clip->transform.positionY = transform.value("positionY", clip->transform.positionY);
+      clip->transform.rotation = transform.value("rotation", clip->transform.rotation);
+      clip->transform.opacity = transform.value("opacity", clip->transform.opacity);
+    }
+  }
+
+  void applyClipEffects(const nlohmann::json& command) {
+    auto* clip = findClip(command.value("clipId", std::string{}));
+    if (!clip) {
+      throw std::runtime_error("clip not found");
+    }
+    if (command.contains("effects")) {
+      clip->effects = effectsFromJson(command.at("effects"));
+    }
+  }
+
   [[nodiscard]] nlohmann::json tracksJson() const {
     auto rows = nlohmann::json::array();
     for (const auto& track : timeline_.tracks) {
@@ -679,6 +727,9 @@ class EditorSession {
             {"outUs", clip.outUs},
             {"color", colorJson(clip)},
             {"audio", audioJson(clip)},
+            {"transform", transformJson(clip.transform)},
+            {"effects", effectsJson(clip.effects)},
+            {"lut", clip.color.lutId.empty() ? nlohmann::json(nullptr) : nlohmann::json{{"lutId", clip.color.lutId}, {"strength", clip.color.lutStrength}}},
         });
       }
       rows.push_back({
@@ -816,6 +867,8 @@ class EditorSession {
         {"saturation", clip.color.saturation},
         {"temperature", clip.color.temperature},
         {"tint", clip.color.tint},
+        {"lutId", clip.color.lutId},
+        {"lutStrength", clip.color.lutStrength},
     };
   }
 
@@ -830,12 +883,75 @@ class EditorSession {
     };
   }
 
+  static nlohmann::json transformJson(const ClipTransform& transform) {
+    return {
+        {"enabled", transform.enabled},
+        {"scale", transform.scale},
+        {"positionX", transform.positionX},
+        {"positionY", transform.positionY},
+        {"rotation", transform.rotation},
+        {"opacity", transform.opacity},
+    };
+  }
+
+  static ClipTransform transformFromJson(const nlohmann::json& value) {
+    ClipTransform transform;
+    transform.enabled = value.value("enabled", true);
+    transform.scale = value.value("scale", 1.0);
+    transform.positionX = value.value("positionX", 0.0);
+    transform.positionY = value.value("positionY", 0.0);
+    transform.rotation = value.value("rotation", 0.0);
+    transform.opacity = value.value("opacity", 1.0);
+    return transform;
+  }
+
+  static nlohmann::json effectsJson(const std::vector<ClipEffect>& effects) {
+    auto rows = nlohmann::json::array();
+    for (const auto& effect : effects) {
+      rows.push_back({
+          {"id", effect.id},
+          {"type", effect.type},
+          {"label", effect.label},
+          {"enabled", effect.enabled},
+          {"amount", effect.amount},
+      });
+    }
+    return rows;
+  }
+
+  static std::vector<ClipEffect> effectsFromJson(const nlohmann::json& value) {
+    std::vector<ClipEffect> effects;
+    if (!value.is_array()) {
+      return effects;
+    }
+    for (const auto& item : value) {
+      ClipEffect effect;
+      effect.id = item.value("id", std::string{});
+      effect.type = item.value("type", std::string{});
+      effect.label = item.value("label", effect.type);
+      effect.enabled = item.value("enabled", false);
+      effect.amount = item.value("amount", 0.0);
+      if (!effect.id.empty() && !effect.type.empty()) {
+        effects.push_back(effect);
+      }
+    }
+    return effects;
+  }
+
   static nlohmann::json defaultColorJson() {
-    return {{"brightness", 0}, {"contrast", 0}, {"saturation", 1}, {"temperature", 0}, {"tint", 0}};
+    return {{"brightness", 0}, {"contrast", 0}, {"saturation", 1}, {"temperature", 0}, {"tint", 0}, {"lutId", ""}, {"lutStrength", 1}};
   }
 
   static nlohmann::json defaultAudioJson() {
     return {{"gainDb", 0}, {"muted", false}, {"fadeInUs", 0}, {"fadeOutUs", 0}, {"normalize", false}, {"cleanup", false}};
+  }
+
+  static nlohmann::json defaultTransformJson() {
+    return {{"enabled", true}, {"scale", 1}, {"positionX", 0}, {"positionY", 0}, {"rotation", 0}, {"opacity", 1}};
+  }
+
+  static nlohmann::json defaultEffectsJson() {
+    return nlohmann::json::array();
   }
 
   static nlohmann::json probeOrFallback(const std::string& path, const std::string& kind, const FfprobeService& ffprobeService) {
