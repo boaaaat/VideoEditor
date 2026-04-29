@@ -27,6 +27,7 @@ class EngineApp {
   nlohmann::json createProject(const nlohmann::json& params);
   nlohmann::json probeMedia(const nlohmann::json& params) const;
   nlohmann::json generateProposal(const nlohmann::json& params);
+  nlohmann::json createProposal(const nlohmann::json& params);
   nlohmann::json applyProposal(const nlohmann::json& params);
   nlohmann::json rejectProposal(const nlohmann::json& params);
 

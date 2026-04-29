@@ -1,4 +1,5 @@
 use crate::engine_rpc::send_engine_request;
+use crate::openai_planner::{generate_openai_proposal, has_api_key};
 use crate::preview_url::default_preview_url;
 use crate::AppState;
 use base64::{engine::general_purpose, Engine as _};
@@ -37,6 +38,58 @@ pub fn engine_rpc(
     params: Option<Value>,
 ) -> Result<Value, String> {
     send_engine_request(state, method, params)
+}
+
+#[tauri::command]
+pub fn ai_generate_rough_cut_proposal(
+    state: State<'_, AppState>,
+    goal: String,
+    media_ids: Vec<String>,
+) -> Result<Value, String> {
+    let fallback_params = json!({
+        "goal": goal,
+        "mediaIds": media_ids
+    });
+
+    if !has_api_key() {
+        return send_engine_request(
+            state,
+            "ai.proposal.generate".to_string(),
+            Some(fallback_params),
+        );
+    }
+
+    let media_index = send_engine_request(state.clone(), "media.index".to_string(), None)?;
+    let timeline = send_engine_request(state.clone(), "timeline.state".to_string(), None)?;
+    let selected_media = selected_media_context(&media_index, &media_ids);
+    if selected_media.as_array().map(Vec::is_empty).unwrap_or(true) {
+        return send_engine_request(
+            state,
+            "ai.proposal.generate".to_string(),
+            Some(fallback_params),
+        );
+    }
+
+    let proposal = generate_openai_proposal(&goal, &selected_media, &timeline)?;
+    let explanation = proposal
+        .get("explanation")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "OpenAI proposal is missing explanation".to_string())?;
+    let commands = proposal
+        .get("commands")
+        .cloned()
+        .ok_or_else(|| "OpenAI proposal is missing commands".to_string())?;
+
+    send_engine_request(
+        state,
+        "ai.proposal.create".to_string(),
+        Some(json!({
+            "goal": goal,
+            "explanation": format!("OpenAI planned this rough cut: {explanation}"),
+            "commands": commands,
+            "provider": "openai"
+        })),
+    )
 }
 
 #[tauri::command]
@@ -155,6 +208,27 @@ fn parent_hwnd(window: &tauri::Window) -> Result<String, String> {
         let _ = window;
         Err("native preview embedding is only supported on Windows".to_string())
     }
+}
+
+fn selected_media_context(media_index: &Value, media_ids: &[String]) -> Value {
+    let selected_ids: std::collections::HashSet<&str> = media_ids.iter().map(String::as_str).collect();
+    let rows = media_index
+        .get("media")
+        .and_then(Value::as_array)
+        .map(|media| {
+            media
+                .iter()
+                .filter(|item| {
+                    let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
+                    let kind = item.get("kind").and_then(Value::as_str).unwrap_or_default();
+                    kind == "video" && (selected_ids.is_empty() || selected_ids.contains(id))
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    json!(rows)
 }
 
 fn run_ffmpeg_thumbnail(

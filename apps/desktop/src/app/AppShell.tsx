@@ -15,7 +15,7 @@ import type { AiEditProposal, EngineStatus, MediaMetadata, ProjectSettings, Time
 import { Tabs, type TabItem } from "../components/Tabs";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
-import { engineRpc, getEngineStatus } from "../features/commands/commandClient";
+import { engineRpc, generateAiRoughCutProposal, getEngineStatus } from "../features/commands/commandClient";
 import { isTypingTarget, shortcutDefinitions } from "../features/commands/shortcuts";
 import { importMediaFiles, type ImportMediaResult } from "../features/media/importMedia";
 import type { MediaAsset } from "../features/media/mediaTypes";
@@ -199,9 +199,9 @@ export function AppShell() {
   }
 
   async function generateRoughCutProposal(goal: string, mediaIds: string[]) {
-    const proposal = await engineRpc<AiEditProposal>("ai.proposal.generate", { goal, mediaIds });
+    const proposal = await generateAiRoughCutProposal(goal, mediaIds);
     setAiProposals((current) => [proposal, ...current.filter((item) => item.id !== proposal.id)]);
-    setStatusMessage("Rough cut proposal generated");
+    setStatusMessage(proposal.explanation.startsWith("OpenAI") ? "OpenAI rough cut proposal generated" : "Heuristic rough cut proposal generated");
     setActiveTab("future-ai");
   }
 

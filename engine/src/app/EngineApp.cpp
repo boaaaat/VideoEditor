@@ -48,6 +48,10 @@ nlohmann::json EngineApp::handleRequest(const nlohmann::json& request) {
     return generateProposal(params);
   }
 
+  if (method == "ai.proposal.create") {
+    return createProposal(params);
+  }
+
   if (method == "ai.proposal.apply") {
     return applyProposal(params);
   }
@@ -152,6 +156,10 @@ nlohmann::json EngineApp::probeMedia(const nlohmann::json& params) const {
 
 nlohmann::json EngineApp::generateProposal(const nlohmann::json& params) {
   return session_.generateProposal(params);
+}
+
+nlohmann::json EngineApp::createProposal(const nlohmann::json& params) {
+  return session_.createProposal(params);
 }
 
 nlohmann::json EngineApp::applyProposal(const nlohmann::json& params) {

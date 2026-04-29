@@ -1,6 +1,7 @@
 mod commands;
 mod engine_rpc;
 mod engine_sidecar;
+mod openai_planner;
 mod preview_url;
 
 use engine_sidecar::EngineSidecar;
@@ -23,6 +24,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            commands::ai_generate_rough_cut_proposal,
             commands::engine_rpc,
             commands::engine_status,
             commands::media_probe,

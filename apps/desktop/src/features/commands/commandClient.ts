@@ -173,6 +173,15 @@ export function getEngineStatus(): Promise<EngineStatus> {
   return engineRpc<EngineStatus>("engine.status");
 }
 
+export async function generateAiRoughCutProposal(goal: string, mediaIds: string[]): Promise<AiEditProposal> {
+  const invoke = await getInvoke();
+  if (!invoke) {
+    return engineRpc<AiEditProposal>("ai.proposal.generate", { goal, mediaIds });
+  }
+
+  return invoke<AiEditProposal>("ai_generate_rough_cut_proposal", { goal, mediaIds });
+}
+
 export function executeCommand(command: EditorCommand): Promise<CommandResult> {
   return engineRpc<CommandResult>("command.execute", command);
 }

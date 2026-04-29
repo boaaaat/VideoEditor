@@ -177,11 +177,36 @@ int runTests() {
   assert(proposal.at("commands").is_array());
   assert(!proposal.at("commands").empty());
 
+  const auto llmProposal = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 8},
+      {"method", "ai.proposal.create"},
+      {"params",
+       {
+           {"goal", "make a 6 second cold open"},
+           {"explanation", "OpenAI selected the strongest short opening and kept the edit as an approval-only proposal."},
+           {"commands",
+            {{
+                {"type", "add_clip"},
+                {"clipId", "openai_clip_1"},
+                {"mediaId", mediaId},
+                {"trackId", "v1"},
+                {"startUs", 0},
+                {"inUs", 0},
+                {"outUs", 6000000},
+            }}},
+           {"provider", "openai"},
+       }},
+  });
+  assert(llmProposal.at("status") == "pending");
+  assert(llmProposal.at("explanation").get<std::string>().find("OpenAI") != std::string::npos);
+  assert(llmProposal.at("commands").at(0).at("clipId") == "openai_clip_1");
+
   const auto appliedProposal = reloadedApp.handleRequest({
       {"jsonrpc", "2.0"},
-      {"id", 7},
+      {"id", 9},
       {"method", "ai.proposal.apply"},
-      {"params", {{"proposalId", proposal.at("id")}}},
+      {"params", {{"proposalId", llmProposal.at("id")}}},
   });
   assert(appliedProposal.at("status") == "applied");
 

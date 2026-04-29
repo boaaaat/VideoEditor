@@ -240,6 +240,36 @@ class EditorSession {
     return proposal.toJson();
   }
 
+  nlohmann::json createProposal(const nlohmann::json& params) {
+    const auto goal = params.value("goal", std::string{});
+    const auto explanation = params.value("explanation", std::string{});
+    if (goal.empty()) {
+      throw std::runtime_error("ai.proposal.create requires goal");
+    }
+    if (explanation.empty()) {
+      throw std::runtime_error("ai.proposal.create requires explanation");
+    }
+    if (!params.contains("commands") || !params.at("commands").is_array() || params.at("commands").empty()) {
+      throw std::runtime_error("ai.proposal.create requires at least one command");
+    }
+
+    auto commands = params.at("commands");
+    for (const auto& command : commands) {
+      validateProposalCommand(command);
+    }
+
+    AiEditProposal proposal;
+    proposal.id = params.value("proposalId", std::string{"proposal_" + stableHash(idSeed() + goal + commands.dump())});
+    proposal.goal = goal;
+    proposal.status = "pending";
+    proposal.explanation = explanation;
+    proposal.commands = commands;
+    proposal.createdAt = nowStamp();
+    upsertProposal(proposal);
+    saveProposals();
+    return proposal.toJson();
+  }
+
   nlohmann::json applyProposal(const nlohmann::json& params) {
     const auto proposalId = params.value("proposalId", std::string{});
     auto proposal = proposalById(proposalId);
@@ -695,6 +725,11 @@ class EditorSession {
     return item == timeline_.tracks.end() ? nullptr : &(*item);
   }
 
+  [[nodiscard]] const Track* findTrack(const std::string& id) const {
+    const auto item = std::find_if(timeline_.tracks.begin(), timeline_.tracks.end(), [&](const Track& track) { return track.id == id; });
+    return item == timeline_.tracks.end() ? nullptr : &(*item);
+  }
+
   [[nodiscard]] Clip* findClip(const std::string& id) {
     for (auto& track : timeline_.tracks) {
       auto item = std::find_if(track.clips.begin(), track.clips.end(), [&](const Clip& clip) { return clip.id == id; });
@@ -743,6 +778,35 @@ class EditorSession {
     } else {
       proposals_.push_back(proposal);
     }
+  }
+
+  void validateProposalCommand(const nlohmann::json& command) const {
+    const auto type = command.value("type", std::string{});
+    if (type == "add_clip") {
+      const auto mediaId = command.value("mediaId", std::string{});
+      if (!findMedia(mediaId)) {
+        throw std::runtime_error("proposal add_clip media not found: " + mediaId);
+      }
+      const auto trackId = command.value("trackId", std::string{});
+      if (!findTrack(trackId)) {
+        throw std::runtime_error("proposal add_clip track not found: " + trackId);
+      }
+      if (command.value("startUs", -1LL) < 0 || command.value("inUs", -1LL) < 0) {
+        throw std::runtime_error("proposal add_clip requires non-negative startUs and inUs");
+      }
+      if (command.value("outUs", 0LL) <= command.value("inUs", 0LL)) {
+        throw std::runtime_error("proposal add_clip requires outUs after inUs");
+      }
+      return;
+    }
+
+    if (type == "trim_clip" || type == "move_clip" || type == "split_clip" || type == "delete_clip" ||
+        type == "ripple_delete_clip" || type == "apply_color_adjustment" || type == "apply_lut" ||
+        type == "add_track" || type == "delete_track") {
+      return;
+    }
+
+    throw std::runtime_error("unsupported proposal command type: " + type);
   }
 
   static void sortTrack(Track& track) {
