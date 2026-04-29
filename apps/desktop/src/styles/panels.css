@@ -736,12 +736,38 @@
   padding: 12px;
 }
 
+.command-palette {
+  display: grid;
+  gap: 10px;
+}
+
+.command-palette-search {
+  display: grid;
+  gap: 6px;
+}
+
+.command-palette-search span {
+  color: var(--muted);
+}
+
+.command-palette-list {
+  display: grid;
+  gap: 6px;
+  max-height: min(420px, 52vh);
+  overflow: auto;
+}
+
 .command-palette button {
   grid-template-columns: minmax(0, 1fr) auto;
   width: 100%;
   min-height: 40px;
   padding: 0 10px;
   text-align: left;
+}
+
+.command-palette button.active {
+  border-color: var(--accent);
+  background: #20312d;
 }
 
 .settings-grid div {
@@ -952,6 +978,10 @@
   gap: 12px;
 }
 
+.shortcut-tools {
+  margin-bottom: 12px;
+}
+
 .shortcut-table-header,
 .shortcut-row {
   display: grid;
@@ -988,6 +1018,12 @@
 
 .shortcut-row kbd {
   width: fit-content;
+}
+
+.shortcut-key-button {
+  justify-self: start;
+  min-height: 30px;
+  padding: 0 8px;
 }
 
 .shortcut-state {

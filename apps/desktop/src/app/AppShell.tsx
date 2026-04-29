@@ -17,7 +17,7 @@ import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { LogsDrawer, logsToText } from "../components/LogsDrawer";
 import { engineRpc, getEngineStatus, type CommandExecutionEventDetail } from "../features/commands/commandClient";
-import { isTypingTarget, shortcutDefinitions } from "../features/commands/shortcuts";
+import { isTypingTarget, loadShortcutMap, matchesShortcut, resetShortcutMap, saveShortcutMap, shortcutFor, type ShortcutMap } from "../features/commands/shortcuts";
 import { appendProjectLog, createAppLogEntry, type AppLogEntry, type AppLogSource, type LogStatusOptions } from "../features/logging/appLog";
 import { importMediaFiles, type ImportMediaResult } from "../features/media/importMedia";
 import type { MediaAsset } from "../features/media/mediaTypes";
@@ -87,6 +87,9 @@ export function AppShell() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
+  const [commandIndex, setCommandIndex] = useState(0);
+  const [shortcuts, setShortcuts] = useState<ShortcutMap>(() => loadShortcutMap());
   const [projectDirty, setProjectDirty] = useState(false);
   const [savingProject, setSavingProject] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
@@ -303,31 +306,41 @@ export function AppShell() {
         return;
       }
 
-      if (event.ctrlKey && event.key.toLowerCase() === "k") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "command_search"))) {
         event.preventDefault();
-        setCommandPaletteOpen(true);
-        recordLog("Command search opened", { source: "ui" }, false);
+        openCommandPalette();
+        return;
       }
 
-      if (event.ctrlKey && event.key.toLowerCase() === "e") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "export"))) {
         event.preventDefault();
         openWorkspaceTab("export");
+        return;
       }
 
-      if (event.ctrlKey && event.key.toLowerCase() === "i") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "open_logs"))) {
+        event.preventDefault();
+        setLogsOpen(true);
+        recordLog("Logs opened from shortcut", { source: "ui" }, false);
+        return;
+      }
+
+      if (matchesShortcut(event, shortcutFor(shortcuts, "import"))) {
         event.preventDefault();
         await handleImportMedia();
+        return;
       }
 
-      if (event.ctrlKey && event.key.toLowerCase() === "s") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "save"))) {
         event.preventDefault();
         await saveProject("manual");
+        return;
       }
 
-      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "z") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "redo"))) {
         event.preventDefault();
         redoProjectState();
-      } else if (event.ctrlKey && event.key.toLowerCase() === "z") {
+      } else if (matchesShortcut(event, shortcutFor(shortcuts, "undo"))) {
         event.preventDefault();
         undoProjectState();
       }
@@ -335,7 +348,7 @@ export function AppShell() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [aiProposals, autosaveState, mediaAssets, projectSettings, redoStack, shortcuts, timeline, undoStack]);
 
   async function applyProject(nextProject: ActiveProject) {
     loadingProjectRef.current = true;
@@ -804,6 +817,25 @@ export function AppShell() {
     recordLog(`Opened ${workspaceTabs.find((tab) => tab.id === nextTab)?.label ?? nextTab} workspace`, { source: "ui", details: { tab: nextTab } }, false);
   }
 
+  function openCommandPalette() {
+    setCommandQuery("");
+    setCommandIndex(0);
+    setCommandPaletteOpen(true);
+    recordLog("Command search opened", { source: "ui" }, false);
+  }
+
+  function updateShortcuts(nextShortcuts: ShortcutMap) {
+    setShortcuts(nextShortcuts);
+    saveShortcutMap(nextShortcuts);
+    logStatus("Shortcut binding updated", { source: "ui", details: { shortcuts: nextShortcuts } });
+  }
+
+  function resetShortcuts() {
+    const defaults = resetShortcutMap();
+    setShortcuts(defaults);
+    logStatus("Keyboard shortcuts reset", { source: "ui" });
+  }
+
   async function copyLogs() {
     const text = logsToText(appLogs);
     try {
@@ -835,6 +867,36 @@ export function AppShell() {
     void appendProjectLog(entry, projectRef.current.path).catch(() => undefined);
   }
 
+  const commandActions = useMemo(
+    () => [
+      { id: "import", label: "Import Media", keys: shortcutFor(shortcuts, "import"), run: () => void handleImportMedia() },
+      { id: "save", label: "Save Project", keys: shortcutFor(shortcuts, "save"), run: () => void saveProject("manual") },
+      { id: "export", label: "Open Export", keys: shortcutFor(shortcuts, "export"), run: () => openWorkspaceTab("export") },
+      { id: "undo", label: "Undo", keys: shortcutFor(shortcuts, "undo"), run: undoProjectState },
+      { id: "redo", label: "Redo", keys: shortcutFor(shortcuts, "redo"), run: redoProjectState },
+      { id: "logs", label: "Open Logs", keys: shortcutFor(shortcuts, "open_logs"), run: () => setLogsOpen(true) },
+      { id: "settings", label: "Open Settings", keys: "", run: () => setSettingsOpen(true) },
+      { id: "edit", label: "Open Edit Workspace", keys: "", run: () => openWorkspaceTab("edit") },
+      { id: "audio", label: "Open Audio Workspace", keys: "", run: () => openWorkspaceTab("audio") },
+      { id: "color", label: "Open Color Workspace", keys: "", run: () => openWorkspaceTab("color") },
+      { id: "effects", label: "Open Effects Workspace", keys: "", run: () => openWorkspaceTab("effects") },
+      { id: "shortcuts", label: "Edit Keyboard Shortcuts", keys: "", run: () => openWorkspaceTab("shortcuts") }
+    ],
+    [aiProposals, autosaveState, mediaAssets, projectSettings, redoStack, shortcuts, timeline, undoStack]
+  );
+
+  const visibleCommandActions = useMemo(() => {
+    const query = commandQuery.trim().toLowerCase();
+    const actions = query
+      ? commandActions.filter((action) => `${action.label} ${action.keys}`.toLowerCase().includes(query))
+      : commandActions;
+    return actions;
+  }, [commandActions, commandQuery]);
+
+  useEffect(() => {
+    setCommandIndex((index) => Math.min(index, Math.max(0, visibleCommandActions.length - 1)));
+  }, [visibleCommandActions.length]);
+
   const activeContent = useMemo(() => {
     switch (activeTab) {
       case "home":
@@ -856,6 +918,7 @@ export function AppShell() {
             onRelinkMediaAsset={relinkMediaAsset}
             missingMediaPaths={missingMediaPaths}
             projectPath={project.path}
+            shortcuts={shortcuts}
             setStatusMessage={makeStatusLogger("timeline")}
           />
         );
@@ -878,7 +941,7 @@ export function AppShell() {
       case "effects":
         return <EffectsTab timeline={timeline} setTimeline={setTimeline} setStatusMessage={makeStatusLogger("timeline")} />;
       case "shortcuts":
-        return <ShortcutsTab />;
+        return <ShortcutsTab shortcuts={shortcuts} onShortcutsChange={updateShortcuts} onResetShortcuts={resetShortcuts} />;
       case "plugins":
         return <PluginsTab />;
       case "export":
@@ -910,10 +973,10 @@ export function AppShell() {
       default:
         return null;
     }
-  }, [activeTab, aiProposals, engineStatus, mediaAssets, missingMediaPaths, project.path, projectSettings, recentProjects, timeline]);
+  }, [activeTab, aiProposals, engineStatus, mediaAssets, missingMediaPaths, project.path, projectSettings, recentProjects, shortcuts, timeline]);
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" aria-busy={savingProject || autosaveState === "saving"}>
       <TopBar
         projectName={`${project.name}${projectDirty ? " *" : ""}`}
         onImportMedia={handleImportMedia}
@@ -923,8 +986,7 @@ export function AppShell() {
         canUndo={undoStack.length > 0}
         canRedo={redoStack.length > 0}
         onOpenCommandPalette={() => {
-          setCommandPaletteOpen(true);
-          recordLog("Command search opened", { source: "ui" }, false);
+          openCommandPalette();
         }}
         onOpenSettings={() => {
           setSettingsOpen(true);
@@ -934,8 +996,8 @@ export function AppShell() {
       />
       <Tabs items={workspaceTabs} activeId={activeTab} onChange={openWorkspaceTab} />
       <section className="workspace">{activeContent}</section>
-      <footer className="status-bar">
-        <button type="button" className="status-message-button" onClick={() => setLogsOpen(true)} title="Open application logs">
+      <footer className="status-bar" aria-live="polite">
+        <button type="button" className="status-message-button" onClick={() => setLogsOpen(true)} title="Open application logs" aria-label="Open application logs">
           <span>{statusMessage}</span>
         </button>
         <span className="status-pill">
@@ -959,12 +1021,54 @@ export function AppShell() {
 
       <Modal title="Command Search" open={commandPaletteOpen} onClose={() => setCommandPaletteOpen(false)}>
         <div className="command-palette">
-          {shortcutDefinitions.map((shortcut) => (
-            <button key={shortcut.id} type="button" onClick={() => setCommandPaletteOpen(false)}>
-              <span>{shortcut.command}</span>
-              <kbd>{shortcut.keys}</kbd>
-            </button>
-          ))}
+          <label className="command-palette-search">
+            <span>Search commands</span>
+            <input
+              autoFocus
+              value={commandQuery}
+              onChange={(event) => {
+                setCommandQuery(event.target.value);
+                setCommandIndex(0);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setCommandIndex((index) => Math.min(index + 1, visibleCommandActions.length - 1));
+                } else if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setCommandIndex((index) => Math.max(0, index - 1));
+                } else if (event.key === "Enter") {
+                  event.preventDefault();
+                  const action = visibleCommandActions[commandIndex];
+                  if (action) {
+                    setCommandPaletteOpen(false);
+                    action.run();
+                  }
+                }
+              }}
+              placeholder="Type a command"
+            />
+          </label>
+          <div className="command-palette-list" role="listbox" aria-label="Commands">
+            {visibleCommandActions.map((action, index) => (
+              <button
+                key={action.id}
+                type="button"
+                role="option"
+                aria-selected={index === commandIndex}
+                className={index === commandIndex ? "active" : ""}
+                onMouseEnter={() => setCommandIndex(index)}
+                onClick={() => {
+                  setCommandPaletteOpen(false);
+                  action.run();
+                }}
+              >
+                <span>{action.label}</span>
+                {action.keys ? <kbd>{action.keys}</kbd> : null}
+              </button>
+            ))}
+            {visibleCommandActions.length === 0 ? <div className="empty-state">No commands match the search.</div> : null}
+          </div>
         </div>
       </Modal>
 

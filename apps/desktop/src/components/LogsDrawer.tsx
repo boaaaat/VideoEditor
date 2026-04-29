@@ -16,12 +16,17 @@ interface LogsDrawerProps {
 
 export function LogsDrawer({ open, logs, onClose, onClear, onCopy, onExport }: LogsDrawerProps) {
   const logListRef = useRef<HTMLDivElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
   const wasNearBottomRef = useRef(true);
 
   useEffect(() => {
     if (!open) {
       return;
     }
+    const previousActive = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    window.setTimeout(() => {
+      drawerRef.current?.querySelector<HTMLElement>("button")?.focus();
+    }, 0);
 
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
@@ -30,7 +35,10 @@ export function LogsDrawer({ open, logs, onClose, onClear, onCopy, onExport }: L
     }
 
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      previousActive?.focus();
+    };
   }, [onClose, open]);
 
   useEffect(() => {
@@ -48,7 +56,7 @@ export function LogsDrawer({ open, logs, onClose, onClear, onCopy, onExport }: L
 
   return (
     <div className="logs-drawer-backdrop" role="presentation" onMouseDown={onClose}>
-      <aside className="logs-drawer" role="dialog" aria-modal="true" aria-label="Application logs" onMouseDown={(event) => event.stopPropagation()}>
+      <aside ref={drawerRef} className="logs-drawer" role="dialog" aria-modal="true" aria-label="Application logs" onMouseDown={(event) => event.stopPropagation()}>
         <header className="logs-drawer-header">
           <div>
             <h2>Application Logs</h2>

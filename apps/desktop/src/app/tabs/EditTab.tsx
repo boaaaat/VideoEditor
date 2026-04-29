@@ -66,7 +66,7 @@ import { IconButton } from "../../components/IconButton";
 import { Panel } from "../../components/Panel";
 import { Toggle } from "../../components/Toggle";
 import { executeCommand } from "../../features/commands/commandClient";
-import { isTypingTarget } from "../../features/commands/shortcuts";
+import { isTypingTarget, matchesShortcut, shortcutFor, type ShortcutMap } from "../../features/commands/shortcuts";
 import type { LogStatus } from "../../features/logging/appLog";
 import { importMediaPaths, type ImportMediaResult } from "../../features/media/importMedia";
 import {
@@ -101,6 +101,7 @@ const timelineHeaderWidth = 128;
 const minTimelineZoom = 32;
 const maxTimelineZoom = 180;
 const timelineZoomStep = 8;
+const maxRenderedMediaCards = 400;
 const snapIntervalUs = 500_000;
 const snapThresholdPx = 18;
 const visualClipGapPx = 2;
@@ -127,6 +128,7 @@ interface EditTabProps {
   onRelinkMediaAsset: (assetId: string, asset: MediaAsset) => void;
   missingMediaPaths: string[];
   projectPath?: string;
+  shortcuts: ShortcutMap;
   setStatusMessage: LogStatus;
 }
 
@@ -205,6 +207,7 @@ export function EditTab({
   onRelinkMediaAsset,
   missingMediaPaths,
   projectPath,
+  shortcuts,
   setStatusMessage
 }: EditTabProps) {
   const playbackFrameRef = useRef<number | null>(null);
@@ -255,6 +258,7 @@ export function EditTab({
     }),
     [mediaAssets, mediaSearch, mediaTypeFilter, mediaDurationFilter, mediaResolutionFilter, mediaFpsFilter, mediaSort, missingMediaSet]
   );
+  const renderedMediaAssets = useMemo(() => visibleMediaAssets.slice(0, maxRenderedMediaCards), [visibleMediaAssets]);
 
   function applyEngineTimeline(data: unknown) {
     const nextTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
@@ -1295,9 +1299,10 @@ export function EditTab({
         return;
       }
 
-      if (event.code === "Space") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "play_pause"))) {
         event.preventDefault();
         setPlaying((value) => !value);
+        return;
       }
 
       if (!event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "l") {
@@ -1350,31 +1355,35 @@ export function EditTab({
         return;
       }
 
-      if (!event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "s") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "split"))) {
         event.preventDefault();
         void splitAtPlayhead();
+        return;
       }
 
-      if (!event.ctrlKey && !event.altKey && event.key === "Delete") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "delete")) || matchesShortcut(event, shortcutFor(shortcuts, "ripple_delete"))) {
         event.preventDefault();
-        if (event.shiftKey) {
+        if (matchesShortcut(event, shortcutFor(shortcuts, "ripple_delete"))) {
           void rippleDelete();
         } else {
           void deleteSelectedClip();
         }
+        return;
       }
 
-      if (!event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "n") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "toggle_snapping"))) {
         event.preventDefault();
         setSnapping((value) => !value);
+        return;
       }
 
-      if (event.altKey && event.key === "ArrowLeft") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "nudge_left"))) {
         event.preventDefault();
         void nudgeSelectedClip(-1);
+        return;
       }
 
-      if (event.altKey && event.key === "ArrowRight") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "nudge_right"))) {
         event.preventDefault();
         void nudgeSelectedClip(1);
       }
@@ -1382,7 +1391,7 @@ export function EditTab({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [loopPlayback, playheadUs, projectSettings.fps, selectedClip, selectedClipIds, snapping, timeline, timelineClipboard]);
+  }, [loopPlayback, playheadUs, projectSettings.fps, selectedClip, selectedClipIds, shortcuts, snapping, timeline, timelineClipboard]);
 
   return (
     <div className="edit-workspace">
@@ -1449,7 +1458,7 @@ export function EditTab({
         >
           {mediaAssets.length > 0 ? (
             <div className="media-list">
-              {visibleMediaAssets.map((asset) => {
+              {renderedMediaAssets.map((asset) => {
                 const missing = missingMediaSet.has(asset.path);
                 return (
                   <div key={asset.id} className={["media-card-shell", missing ? "missing" : ""].filter(Boolean).join(" ")}>
@@ -1499,6 +1508,11 @@ export function EditTab({
                   </div>
                 );
               })}
+              {visibleMediaAssets.length > renderedMediaAssets.length ? (
+                <div className="media-empty filtered">
+                  Showing {renderedMediaAssets.length} of {visibleMediaAssets.length}. Narrow filters or search to render fewer cards.
+                </div>
+              ) : null}
               {visibleMediaAssets.length === 0 ? <div className="media-empty filtered">No media matches the current filters.</div> : null}
             </div>
           ) : (
@@ -1699,10 +1713,14 @@ function TimelineSurface({
   const [draggingPlayhead, setDraggingPlayhead] = useState(false);
   const [clipInteraction, setClipInteraction] = useState<ClipInteraction | null>(null);
   const [previewClip, setPreviewClip] = useState<PreviewClipState | null>(null);
+  const [visibleTimelineRange, setVisibleTimelineRange] = useState({ left: 0, right: 2400 });
   const durationSeconds = getTimelineDurationSeconds(timeline.durationUs);
   const timelineWidth = Math.max(1200, durationSeconds * zoomPxPerSecond);
   const playheadLeft = timelineHeaderWidth + (playheadUs / 1_000_000) * zoomPxPerSecond;
   const marks = createTimeMarks(durationSeconds);
+  const mediaById = useMemo(() => new Map(mediaAssets.map((asset) => [asset.id, asset])), [mediaAssets]);
+  const visibleLaneStartPx = Math.max(0, visibleTimelineRange.left - timelineHeaderWidth);
+  const visibleLaneEndPx = Math.max(0, visibleTimelineRange.right - timelineHeaderWidth);
 
   useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -1718,6 +1736,26 @@ function TimelineSurface({
       scrollElement.scrollLeft = Math.max(0, playheadLeft - timelineHeaderWidth - 40);
     }
   }, [playheadLeft]);
+
+  useEffect(() => {
+    const scrollElement = scrollRef.current;
+    if (!scrollElement) {
+      return;
+    }
+
+    updateVisibleTimelineRange(scrollElement);
+    const resizeObserver = new ResizeObserver(() => updateVisibleTimelineRange(scrollElement));
+    resizeObserver.observe(scrollElement);
+    return () => resizeObserver.disconnect();
+  }, [timelineWidth]);
+
+  function updateVisibleTimelineRange(scrollElement: HTMLDivElement) {
+    const overscanPx = 900;
+    setVisibleTimelineRange({
+      left: Math.max(0, scrollElement.scrollLeft - overscanPx),
+      right: scrollElement.scrollLeft + scrollElement.clientWidth + overscanPx
+    });
+  }
 
   function clientXToPlayheadUs(clientX: number) {
     const scrollElement = scrollRef.current;
@@ -1921,6 +1959,7 @@ function TimelineSurface({
       onPointerUp={handlePointerUp}
       onPointerCancel={() => setDraggingPlayhead(false)}
       onWheel={handleWheel}
+      onScroll={(event) => updateVisibleTimelineRange(event.currentTarget)}
     >
       <div className="timeline-surface" style={{ width: `${timelineHeaderWidth + timelineWidth}px` }}>
         <div className="time-ruler" style={{ gridTemplateColumns: `${timelineHeaderWidth}px ${timelineWidth}px` }}>
@@ -2003,7 +2042,7 @@ function TimelineSurface({
               style={{ width: `${timelineWidth}px` }}
               onDragOver={(event) => {
                 event.preventDefault();
-                const asset = mediaAssets.find((item) => item.id === draggingMediaId);
+                const asset = draggingMediaId ? mediaById.get(draggingMediaId) : undefined;
                 event.dataTransfer.dropEffect = asset && asset.kind === track.kind && !track.locked ? "copy" : "none";
                 onMediaDropTrackChange(track.id);
               }}
@@ -2020,7 +2059,7 @@ function TimelineSurface({
                   event.dataTransfer.getData("application/x-ai-video-media-id") ||
                   readMediaIdFromJsonDrop(event.dataTransfer.getData("application/json")) ||
                   event.dataTransfer.getData("text/plain");
-                const asset = mediaAssets.find((item) => item.id === mediaId);
+                const asset = mediaById.get(mediaId);
                 if (!asset) {
                   setStatusMessage("Drop an imported media card from the media bin", { level: "warning", source: "media" });
                   return;
@@ -2047,17 +2086,25 @@ function TimelineSurface({
                       width: `${getClipVisualWidth(mediaDropPreview.durationUs, zoomPxPerSecond)}px`
                     }}
                   >
-                    <span>{mediaAssets.find((asset) => asset.id === draggingMediaId)?.name ?? "New clip"}</span>
+                    <span>{draggingMediaId ? mediaById.get(draggingMediaId)?.name ?? "New clip" : "New clip"}</span>
                     {track.kind === "audio" ? <VolumeX size={13} /> : null}
                   </div>
                 </>
               ) : null}
-              {track.clips.map((clip) => {
+              {track.clips.filter((clip) => {
+                if (selectedClipIds.includes(clip.id) || clipInteraction?.clipId === clip.id) {
+                  return true;
+                }
+                const displayClip = previewClip?.clipId === clip.id ? { ...clip, ...previewClip } : clip;
+                const start = getClipVisualLeft(displayClip.startUs, zoomPxPerSecond);
+                const end = start + getClipVisualWidth(displayClip.outUs - displayClip.inUs, zoomPxPerSecond);
+                return end >= visibleLaneStartPx && start <= visibleLaneEndPx;
+              }).map((clip) => {
                 const displayClip = previewClip?.clipId === clip.id ? { ...clip, ...previewClip } : clip;
                 const durationUs = displayClip.outUs - displayClip.inUs;
                 const start = getClipVisualLeft(displayClip.startUs, zoomPxPerSecond);
                 const width = getClipVisualWidth(durationUs, zoomPxPerSecond);
-                const mediaName = mediaAssets.find((asset) => asset.id === clip.mediaId)?.name ?? clip.mediaId;
+                const mediaName = mediaById.get(clip.mediaId)?.name ?? clip.mediaId;
                 return (
                   <button
                     type="button"

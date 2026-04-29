@@ -54,6 +54,23 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
       if (event.key === "Escape") {
         event.preventDefault();
         onClose();
+        return;
+      }
+
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const buttons = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+        const activeIndex = buttons.findIndex((button) => button === document.activeElement);
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        const nextIndex = activeIndex < 0 ? 0 : (activeIndex + direction + buttons.length) % buttons.length;
+        buttons.at(nextIndex)?.focus();
+        return;
+      }
+
+      if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        const buttons = Array.from(menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+        buttons.at(event.key === "Home" ? 0 : -1)?.focus();
       }
     }
 
