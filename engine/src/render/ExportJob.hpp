@@ -16,6 +16,38 @@ struct ExportProgressEvent {
   double progress = 0.0;
 };
 
+struct ExportMediaAsset {
+  std::string id;
+  std::string path;
+  std::string kind = "video";
+  bool hasAudio = false;
+};
+
+struct ExportTimelineClip {
+  std::string mediaId;
+  std::string trackId;
+  std::string trackKind = "video";
+  int trackIndex = 0;
+  bool trackVisible = true;
+  bool trackMuted = false;
+  std::int64_t startUs = 0;
+  std::int64_t inUs = 0;
+  std::int64_t outUs = 0;
+};
+
+struct ExportTimelineSegment {
+  const ExportTimelineClip* clip = nullptr;
+  std::int64_t startUs = 0;
+  std::int64_t sourceInUs = 0;
+  std::int64_t durationUs = 0;
+  bool gap = false;
+};
+
+struct ExportRequestTimeline {
+  std::vector<ExportMediaAsset> media;
+  std::vector<ExportTimelineClip> clips;
+};
+
 struct ExportRequest {
   std::string outputPath;
   std::string resolution = "1080p";
@@ -30,6 +62,7 @@ struct ExportRequest {
   bool audioEnabled = true;
   std::string colorMode = "SDR";
   bool overwrite = false;
+  ExportRequestTimeline timeline;
 };
 
 struct ExportJob {
@@ -53,6 +86,7 @@ struct ExportJob {
   std::string ffmpegCommand;
   std::vector<std::string> logs;
   bool cancelled = false;
+  ExportRequestTimeline timeline;
 
   [[nodiscard]] nlohmann::json toJson() const {
     return {

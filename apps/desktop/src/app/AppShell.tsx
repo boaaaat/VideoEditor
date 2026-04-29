@@ -877,6 +877,7 @@ export function AppShell() {
             }}
             firstMediaMetadata={mediaAssets.find((asset) => asset.kind === "video" && asset.metadata)?.metadata}
             mediaAssets={mediaAssets}
+            timeline={timeline}
             timelineDurationUs={timeline.durationUs}
             gpuStatus={engineStatus?.gpu ?? null}
             setStatusMessage={makeStatusLogger("export")}

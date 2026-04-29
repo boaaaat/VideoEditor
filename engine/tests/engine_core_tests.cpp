@@ -116,6 +116,25 @@ int runTests() {
   assert(command.find("p010le") != std::string::npos);
   assert(command.find("-an") != std::string::npos);
 
+  ai_editor::ExportJob timelineExportJob;
+  timelineExportJob.outputPath = request.outputPath;
+  timelineExportJob.width = 1920;
+  timelineExportJob.height = 1080;
+  timelineExportJob.fps = 30;
+  timelineExportJob.durationUs = 6'000'000;
+  timelineExportJob.codec = "h264_nvenc";
+  timelineExportJob.container = "mp4";
+  timelineExportJob.quality = "medium";
+  timelineExportJob.audioEnabled = true;
+  timelineExportJob.bitrateMbps = 16;
+  timelineExportJob.timeline.media.push_back({"media_a", "C:\\media\\clip-a.mp4", "video", true});
+  timelineExportJob.timeline.clips.push_back({"media_a", "v1", "video", 1, true, false, 1'000'000, 500'000, 3'500'000});
+  const auto timelineCommand = ai_editor::ExportEngine::buildFfmpegCommand(timelineExportJob);
+  assert(timelineCommand.find("C:\\media\\clip-a.mp4") != std::string::npos);
+  assert(timelineCommand.find("filter_complex") != std::string::npos);
+  assert(timelineCommand.find("concat=n=3") != std::string::npos);
+  assert(timelineCommand.find("atrim=start=0.500") != std::string::npos);
+
   ai_editor::GpuStatus gpu;
   gpu.nvencAvailable = true;
   gpu.h264NvencAvailable = true;

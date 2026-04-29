@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Ban, Download, FolderOpen, RefreshCw } from "lucide-react";
-import type { ExportCodec, ExportContainer, ExportQuality, ExportStatus, GpuStatus, MediaMetadata, ProjectSettings } from "@ai-video-editor/protocol";
+import type { ExportCodec, ExportContainer, ExportQuality, ExportStatus, GpuStatus, MediaMetadata, ProjectSettings, Timeline } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Toggle } from "../../components/Toggle";
@@ -36,12 +36,13 @@ interface ExportTabProps {
   onProjectSettingsChange: (settings: ProjectSettings) => void;
   firstMediaMetadata?: MediaMetadata;
   mediaAssets: MediaAsset[];
+  timeline: Timeline;
   timelineDurationUs: number;
   gpuStatus: GpuStatus | null;
   setStatusMessage: LogStatus;
 }
 
-export function ExportTab({ projectSettings, onProjectSettingsChange, firstMediaMetadata, mediaAssets, timelineDurationUs, gpuStatus, setStatusMessage }: ExportTabProps) {
+export function ExportTab({ projectSettings, onProjectSettingsChange, firstMediaMetadata, mediaAssets, timeline, timelineDurationUs, gpuStatus, setStatusMessage }: ExportTabProps) {
   const [codec, setCodec] = useState<ExportCodec>(projectSettings.defaultCodec);
   const [container, setContainer] = useState<ExportContainer>(projectSettings.defaultContainer);
   const [quality, setQuality] = useState<ExportQuality>("medium");
@@ -209,7 +210,9 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
       bitrateMbps,
       audioEnabled,
       colorMode: projectSettings.colorMode,
-      overwrite
+      overwrite,
+      mediaAssets,
+      timeline
     }).catch((error) => {
       const message = error instanceof Error ? error.message : "Export failed";
       const failed: ExportStatus = { jobId: null, state: "error", progress: 0, logs: [message] };

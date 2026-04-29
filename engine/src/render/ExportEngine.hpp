@@ -11,8 +11,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
 #include <cmath>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
@@ -21,6 +21,11 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace ai_editor {
 
@@ -57,6 +62,7 @@ class ExportEngine {
     job.bitrateMbps = request.bitrateMbps > 0 ? request.bitrateMbps : calculateBitrateMbps(request);
     job.audioEnabled = request.audioEnabled;
     job.colorMode = request.colorMode;
+    job.timeline = request.timeline;
     job.ffmpegCommand = buildFfmpegCommand(job);
     return job;
   }
@@ -93,6 +99,11 @@ class ExportEngine {
     job.ffmpegCommand = buildFfmpegCommand(job, ffmpeg.path, progressPath.string(), request.overwrite);
     job.logs.push_back("Export started");
     job.logs.push_back("Render duration: " + formatSeconds(job.durationUs));
+    if (hasRenderableTimeline(job)) {
+      job.logs.push_back("Rendering timeline media clips: " + std::to_string(countRenderableVideoClips(job)));
+    } else {
+      job.logs.push_back("Timeline has no visible video clips; rendering black output");
+    }
     job.logs.push_back("FFmpeg command: " + job.ffmpegCommand);
 
     {
@@ -121,6 +132,11 @@ class ExportEngine {
       activeJob_->state = "cancelled";
       activeJob_->logs.push_back("Export cancel requested");
     }
+#ifdef _WIN32
+    if (activeProcess_) {
+      TerminateProcess(activeProcess_, 1);
+    }
+#endif
     return activeJob_->toJson();
   }
 
@@ -149,6 +165,7 @@ class ExportEngine {
     request.audioEnabled = params.value("audioEnabled", true);
     request.colorMode = params.value("colorMode", std::string{"SDR"});
     request.overwrite = params.value("overwrite", false);
+    request.timeline = timelineFromJson(params);
     if (request.bitrateMbps <= 0) {
       request.bitrateMbps = calculateBitrateMbps(request);
     }
@@ -203,6 +220,13 @@ class ExportEngine {
       errors.push_back("output file extension must match selected container");
     }
 
+    for (const auto& clip : request.timeline.clips) {
+      if (clip.outUs <= clip.inUs) {
+        errors.push_back("timeline contains a clip with invalid in/out points");
+        break;
+      }
+    }
+
     return errors;
   }
 
@@ -223,6 +247,10 @@ class ExportEngine {
 
  private:
   [[nodiscard]] static std::string buildFfmpegCommand(const ExportJob& job, const std::string& ffmpegPath, const std::string& progressPath, bool overwrite) {
+    if (hasRenderableTimeline(job)) {
+      return buildTimelineFfmpegCommand(job, ffmpegPath, progressPath, overwrite);
+    }
+
     const auto durationSeconds = formatSeconds(job.durationUs);
     std::vector<std::string> args = {
         ffmpegPath.empty() ? "ffmpeg" : ffmpegPath,
@@ -271,6 +299,100 @@ class ExportEngine {
     return joinQuoted(args);
   }
 
+  [[nodiscard]] static std::string buildTimelineFfmpegCommand(const ExportJob& job, const std::string& ffmpegPath, const std::string& progressPath, bool overwrite) {
+    const auto segments = buildTimelineSegments(job);
+    std::vector<std::string> args = {
+        ffmpegPath.empty() ? "ffmpeg" : ffmpegPath,
+        "-hide_banner",
+        overwrite ? "-y" : "-n",
+    };
+    std::vector<std::string> filters;
+    std::vector<std::string> concatInputs;
+    int inputIndex = 0;
+    int segmentIndex = 0;
+
+    for (const auto& segment : segments) {
+      const auto durationSeconds = formatSeconds(segment.durationUs);
+      if (segment.gap || !segment.clip) {
+        args.insert(args.end(), {"-f", "lavfi", "-t", durationSeconds, "-i",
+                                 "color=c=black:s=" + std::to_string(job.width) + "x" + std::to_string(job.height) + ":r=" + std::to_string(job.fps)});
+        filters.push_back("[" + std::to_string(inputIndex) + ":v]setpts=PTS-STARTPTS,setsar=1,format=yuv420p[v" + std::to_string(segmentIndex) + "]");
+        inputIndex += 1;
+
+        if (job.audioEnabled) {
+          args.insert(args.end(), {"-f", "lavfi", "-t", durationSeconds, "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"});
+          filters.push_back("[" + std::to_string(inputIndex) + ":a]asetpts=PTS-STARTPTS[a" + std::to_string(segmentIndex) + "]");
+          inputIndex += 1;
+        }
+      } else {
+        const auto* media = findMedia(job.timeline.media, segment.clip->mediaId);
+        args.insert(args.end(), {"-i", media ? media->path : std::string{}});
+        const auto input = std::to_string(inputIndex);
+        filters.push_back("[" + input + ":v]trim=start=" + formatSeconds(segment.sourceInUs) + ":duration=" + durationSeconds +
+                          ",setpts=PTS-STARTPTS,fps=" + std::to_string(job.fps) +
+                          ",scale=" + std::to_string(job.width) + ":" + std::to_string(job.height) +
+                          ":force_original_aspect_ratio=decrease,pad=" + std::to_string(job.width) + ":" + std::to_string(job.height) +
+                          ":(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v" + std::to_string(segmentIndex) + "]");
+        inputIndex += 1;
+
+        if (job.audioEnabled) {
+          if (media && media->hasAudio) {
+            filters.push_back("[" + input + ":a]atrim=start=" + formatSeconds(segment.sourceInUs) + ":duration=" + durationSeconds +
+                              ",asetpts=PTS-STARTPTS,aresample=48000[a" + std::to_string(segmentIndex) + "]");
+          } else {
+            args.insert(args.end(), {"-f", "lavfi", "-t", durationSeconds, "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"});
+            filters.push_back("[" + std::to_string(inputIndex) + ":a]asetpts=PTS-STARTPTS[a" + std::to_string(segmentIndex) + "]");
+            inputIndex += 1;
+          }
+        }
+      }
+
+      concatInputs.push_back("[v" + std::to_string(segmentIndex) + "]");
+      if (job.audioEnabled) {
+        concatInputs.push_back("[a" + std::to_string(segmentIndex) + "]");
+      }
+      segmentIndex += 1;
+    }
+
+    filters.push_back(join(concatInputs, "") + "concat=n=" + std::to_string(segments.size()) + ":v=1:a=" + (job.audioEnabled ? "1[outv][outa]" : "0[outv]"));
+    args.insert(args.end(), {"-filter_complex", join(filters, ";"), "-map", "[outv]"});
+    if (job.audioEnabled) {
+      args.insert(args.end(), {"-map", "[outa]"});
+    }
+
+    args.insert(args.end(), {
+        "-t",
+        formatSeconds(job.durationUs),
+        "-r",
+        std::to_string(job.fps),
+        "-c:v",
+        job.codec,
+        "-preset",
+        presetForQuality(job.quality),
+        "-b:v",
+        std::to_string(job.bitrateMbps) + "M",
+    });
+
+    if (job.colorMode == "HDR") {
+      args.insert(args.end(), {"-pix_fmt", "p010le", "-color_primaries", "bt2020", "-colorspace", "bt2020nc", "-color_trc", "smpte2084"});
+    } else {
+      args.insert(args.end(), {"-pix_fmt", "yuv420p", "-color_primaries", "bt709", "-colorspace", "bt709", "-color_trc", "bt709"});
+    }
+
+    if (job.audioEnabled) {
+      args.insert(args.end(), {"-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-ac", "2"});
+    } else {
+      args.push_back("-an");
+    }
+
+    if (!progressPath.empty()) {
+      args.insert(args.end(), {"-progress", progressPath, "-nostats"});
+    }
+
+    args.push_back(job.outputPath);
+    return joinQuoted(args);
+  }
+
   static void prepareDestination(const ExportRequest& request) {
     const auto output = std::filesystem::path(request.outputPath);
     const auto parent = output.parent_path();
@@ -292,7 +414,7 @@ class ExportEngine {
   }
 
   void runExportProcess(const std::string& jobId, const std::string& command, const std::string& outputPath) {
-    const auto exitCode = std::system(command.c_str());
+    const auto exitCode = runCommandCancellable(command);
     std::lock_guard lock(mutex_);
     if (!activeJob_ || activeJob_->id != jobId) {
       return;
@@ -315,6 +437,44 @@ class ExportEngine {
       activeJob_->logs.push_back("FFmpeg export failed with exit code " + std::to_string(exitCode));
     }
     activeJob_->finishedAt = std::chrono::steady_clock::now();
+  }
+
+  int runCommandCancellable(const std::string& command) {
+#ifdef _WIN32
+    STARTUPINFOA startupInfo{};
+    startupInfo.cb = sizeof(startupInfo);
+    PROCESS_INFORMATION processInfo{};
+    std::string commandLine = command;
+    if (!CreateProcessA(nullptr, commandLine.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startupInfo, &processInfo)) {
+      return static_cast<int>(GetLastError());
+    }
+
+    {
+      std::lock_guard lock(mutex_);
+      activeProcess_ = processInfo.hProcess;
+    }
+    CloseHandle(processInfo.hThread);
+
+    DWORD waitResult = WAIT_TIMEOUT;
+    while ((waitResult = WaitForSingleObject(processInfo.hProcess, 200)) == WAIT_TIMEOUT) {
+      if (cancelRequested_) {
+        TerminateProcess(processInfo.hProcess, 1);
+      }
+    }
+
+    DWORD exitCode = 1;
+    GetExitCodeProcess(processInfo.hProcess, &exitCode);
+    {
+      std::lock_guard lock(mutex_);
+      if (activeProcess_ == processInfo.hProcess) {
+        activeProcess_ = nullptr;
+      }
+    }
+    CloseHandle(processInfo.hProcess);
+    return static_cast<int>(exitCode);
+#else
+    return std::system(command.c_str());
+#endif
   }
 
   void updateProgressFromFile() {
@@ -382,6 +542,120 @@ class ExportEngine {
       return {2560, 1440};
     }
     return {1920, 1080};
+  }
+
+  [[nodiscard]] static ExportRequestTimeline timelineFromJson(const nlohmann::json& params) {
+    ExportRequestTimeline timeline;
+    if (params.contains("mediaAssets") && params.at("mediaAssets").is_array()) {
+      for (const auto& item : params.at("mediaAssets")) {
+        ExportMediaAsset media;
+        media.id = item.value("id", std::string{});
+        media.path = item.value("path", std::string{});
+        media.kind = item.value("kind", std::string{"video"});
+        if (item.contains("metadata") && item.at("metadata").is_object()) {
+          media.hasAudio = item.at("metadata").value("hasAudio", media.kind == "audio");
+        } else {
+          media.hasAudio = media.kind == "audio";
+        }
+        if (!media.id.empty() && !media.path.empty()) {
+          timeline.media.push_back(media);
+        }
+      }
+    }
+
+    if (!params.contains("timeline") || !params.at("timeline").is_object()) {
+      return timeline;
+    }
+
+    const auto& sourceTimeline = params.at("timeline");
+    if (!sourceTimeline.contains("tracks") || !sourceTimeline.at("tracks").is_array()) {
+      return timeline;
+    }
+
+    for (const auto& track : sourceTimeline.at("tracks")) {
+      if (!track.contains("clips") || !track.at("clips").is_array()) {
+        continue;
+      }
+      for (const auto& item : track.at("clips")) {
+        ExportTimelineClip clip;
+        clip.mediaId = item.value("mediaId", std::string{});
+        clip.trackId = track.value("id", item.value("trackId", std::string{}));
+        clip.trackKind = track.value("kind", std::string{"video"});
+        clip.trackIndex = track.value("index", 0);
+        clip.trackVisible = track.value("visible", true);
+        clip.trackMuted = track.value("muted", false);
+        clip.startUs = item.value("startUs", 0LL);
+        clip.inUs = item.value("inUs", 0LL);
+        clip.outUs = item.value("outUs", clip.inUs);
+        if (!clip.mediaId.empty()) {
+          timeline.clips.push_back(clip);
+        }
+      }
+    }
+    return timeline;
+  }
+
+  [[nodiscard]] static const ExportMediaAsset* findMedia(const std::vector<ExportMediaAsset>& media, const std::string& mediaId) {
+    const auto item = std::find_if(media.begin(), media.end(), [&](const ExportMediaAsset& asset) {
+      return asset.id == mediaId;
+    });
+    return item == media.end() ? nullptr : &(*item);
+  }
+
+  [[nodiscard]] static bool hasRenderableTimeline(const ExportJob& job) {
+    return countRenderableVideoClips(job) > 0;
+  }
+
+  [[nodiscard]] static std::size_t countRenderableVideoClips(const ExportJob& job) {
+    return static_cast<std::size_t>(std::count_if(job.timeline.clips.begin(), job.timeline.clips.end(), [&](const ExportTimelineClip& clip) {
+      const auto* media = findMedia(job.timeline.media, clip.mediaId);
+      return media && media->kind == "video" && clip.trackKind == "video" && clip.trackVisible && clip.outUs > clip.inUs;
+    }));
+  }
+
+  [[nodiscard]] static std::vector<ExportTimelineSegment> buildTimelineSegments(const ExportJob& job) {
+    std::vector<const ExportTimelineClip*> clips;
+    for (const auto& clip : job.timeline.clips) {
+      const auto* media = findMedia(job.timeline.media, clip.mediaId);
+      if (media && media->kind == "video" && clip.trackKind == "video" && clip.trackVisible && clip.outUs > clip.inUs) {
+        clips.push_back(&clip);
+      }
+    }
+
+    std::sort(clips.begin(), clips.end(), [](const ExportTimelineClip* left, const ExportTimelineClip* right) {
+      if (left->startUs != right->startUs) {
+        return left->startUs < right->startUs;
+      }
+      return left->trackIndex < right->trackIndex;
+    });
+
+    std::vector<ExportTimelineSegment> segments;
+    std::int64_t cursorUs = 0;
+    for (const auto* clip : clips) {
+      const auto clipDurationUs = clip->outUs - clip->inUs;
+      const auto clipEndUs = clip->startUs + clipDurationUs;
+      if (clipEndUs <= cursorUs || cursorUs >= job.durationUs) {
+        continue;
+      }
+      if (clip->startUs > cursorUs) {
+        segments.push_back({nullptr, cursorUs, 0, std::min(clip->startUs, job.durationUs) - cursorUs, true});
+        cursorUs = std::min(clip->startUs, job.durationUs);
+      }
+      const auto segmentStartUs = std::max(cursorUs, clip->startUs);
+      const auto segmentEndUs = std::min(clipEndUs, job.durationUs);
+      if (segmentEndUs > segmentStartUs) {
+        segments.push_back({clip, segmentStartUs, clip->inUs + (segmentStartUs - clip->startUs), segmentEndUs - segmentStartUs, false});
+        cursorUs = segmentEndUs;
+      }
+    }
+
+    if (cursorUs < job.durationUs) {
+      segments.push_back({nullptr, cursorUs, 0, job.durationUs - cursorUs, true});
+    }
+    if (segments.empty()) {
+      segments.push_back({nullptr, 0, 0, job.durationUs, true});
+    }
+    return segments;
   }
 
   [[nodiscard]] static double qualityMultiplier(const std::string& quality) {
@@ -461,7 +735,7 @@ class ExportEngine {
   }
 
   [[nodiscard]] static std::string quoteIfNeeded(const std::string& value) {
-    if (value.find_first_of(" <>") == std::string::npos) {
+    if (value.find_first_of(" \t<>|&()^") == std::string::npos) {
       return value;
     }
 
@@ -485,6 +759,9 @@ class ExportEngine {
   std::filesystem::path activeProgressPath_;
   int lastLoggedProgressPercent_ = -1;
   std::optional<ExportJob> activeJob_;
+#ifdef _WIN32
+  HANDLE activeProcess_ = nullptr;
+#endif
 };
 
 }  // namespace ai_editor
