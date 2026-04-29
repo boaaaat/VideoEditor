@@ -82,7 +82,7 @@ struct ExportRequest {
   int width = 1920;
   int height = 1080;
   int fps = 30;
-  std::int64_t durationUs = 60'000'000;
+  std::int64_t durationUs = 10'000'000;
   std::string codec = "h264_nvenc";
   std::string container = "mp4";
   std::string quality = "medium";
@@ -107,7 +107,7 @@ struct ExportJob {
   int width = 1920;
   int height = 1080;
   int fps = 30;
-  std::int64_t durationUs = 60'000'000;
+  std::int64_t durationUs = 10'000'000;
   std::string codec = "h264_nvenc";
   std::string container = "mp4";
   std::string quality = "medium";

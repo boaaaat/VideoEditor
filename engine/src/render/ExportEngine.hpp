@@ -160,7 +160,7 @@ class ExportEngine {
     request.width = params.value("width", 1920);
     request.height = params.value("height", 1080);
     request.fps = params.value("fps", 30);
-    request.durationUs = params.value("durationUs", 60'000'000LL);
+    request.durationUs = params.value("durationUs", 10'000'000LL);
     request.codec = params.value("codec", std::string{"h264_nvenc"});
     request.container = params.value("container", std::string{"mp4"});
     request.quality = params.value("quality", std::string{"medium"});
@@ -172,6 +172,10 @@ class ExportEngine {
     request.normalizeAudio = params.value("normalizeAudio", false);
     request.cleanupAudio = params.value("cleanupAudio", false);
     request.timeline = timelineFromJson(params);
+    const auto videoDurationUs = visibleVideoDurationUs(request.timeline);
+    if (videoDurationUs > 0 && (request.durationUs <= 0 || request.durationUs > videoDurationUs)) {
+      request.durationUs = videoDurationUs;
+    }
     if (request.bitrateMbps <= 0) {
       request.bitrateMbps = calculateBitrateMbps(request);
     }
@@ -819,6 +823,18 @@ class ExportEngine {
       return asset.id == mediaId;
     });
     return item == media.end() ? nullptr : &(*item);
+  }
+
+  [[nodiscard]] static std::int64_t visibleVideoDurationUs(const ExportRequestTimeline& timeline) {
+    std::int64_t durationUs = 0;
+    for (const auto& clip : timeline.clips) {
+      const auto* media = findMedia(timeline.media, clip.mediaId);
+      if (!media || media->kind != "video" || clip.trackKind != "video" || !clip.trackVisible || clip.outUs <= clip.inUs) {
+        continue;
+      }
+      durationUs = std::max(durationUs, clip.startUs + (clip.outUs - clip.inUs));
+    }
+    return durationUs;
   }
 
   [[nodiscard]] static bool hasRenderableTimeline(const ExportJob& job) {

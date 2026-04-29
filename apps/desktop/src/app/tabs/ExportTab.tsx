@@ -54,6 +54,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
 
   const bitrateMbps = useMemo(() => calculateAutoBitrate(projectSettings, quality, codec), [codec, projectSettings, quality]);
   const hasAudio = mediaAssets.some((asset) => asset.kind === "audio" || asset.metadata?.hasAudio);
+  const exportDurationUs = useMemo(() => getVisibleVideoDurationUs(timeline, mediaAssets), [mediaAssets, timeline]);
   const validationErrors = validateExportSettings({
     outputPath,
     codec,
@@ -63,7 +64,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
     hasAudio,
     width: projectSettings.width,
     height: projectSettings.height,
-    durationUs: timelineDurationUs,
+    durationUs: exportDurationUs,
     gpu: gpuStatus
   });
   const av1Supported = Boolean(gpuStatus?.av1NvencAvailable);
@@ -194,7 +195,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
     });
     setStatusMessage("Export start requested", {
       source: "export",
-      details: { outputPath, width: projectSettings.width, height: projectSettings.height, fps: projectSettings.fps, durationUs: timelineDurationUs }
+      details: { outputPath, width: projectSettings.width, height: projectSettings.height, fps: projectSettings.fps, durationUs: exportDurationUs, editDurationUs: timelineDurationUs }
     });
 
     const status = await engineRpc<ExportStatus>("export.start", {
@@ -203,7 +204,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
       width: projectSettings.width,
       height: projectSettings.height,
       fps: projectSettings.fps,
-      durationUs: timelineDurationUs,
+      durationUs: exportDurationUs,
       codec,
       container,
       quality,
@@ -389,6 +390,10 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
             Auto bitrate
             <input value={`${bitrateMbps} Mbps`} readOnly />
           </label>
+          <label>
+            Export duration
+            <input value={`${formatDuration(exportDurationUs)} of ${formatDuration(timelineDurationUs)} timeline`} readOnly />
+          </label>
           <label className="form-grid-wide">
             Output path
             <span className="output-picker-row">
@@ -452,4 +457,29 @@ function normalizeEvenSize(value: number) {
 
   const rounded = Math.max(2, Math.round(value));
   return rounded % 2 === 0 ? rounded : rounded + 1;
+}
+
+function getVisibleVideoDurationUs(timeline: Timeline, mediaAssets: MediaAsset[]) {
+  const mediaById = new Map(mediaAssets.map((asset) => [asset.id, asset]));
+  return timeline.tracks
+    .filter((track) => track.kind === "video" && track.visible)
+    .flatMap((track) => track.clips)
+    .reduce((durationUs, clip) => {
+      const asset = mediaById.get(clip.mediaId);
+      if (asset?.kind !== "video" || clip.outUs <= clip.inUs) {
+        return durationUs;
+      }
+      return Math.max(durationUs, clip.startUs + (clip.outUs - clip.inUs));
+    }, 0);
+}
+
+function formatDuration(durationUs: number) {
+  if (!Number.isFinite(durationUs) || durationUs <= 0) {
+    return "0:00";
+  }
+
+  const totalSeconds = Math.ceil(durationUs / 1_000_000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }

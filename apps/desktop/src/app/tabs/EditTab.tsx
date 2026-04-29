@@ -101,6 +101,8 @@ const timelineHeaderWidth = 128;
 const minTimelineZoom = 32;
 const maxTimelineZoom = 180;
 const timelineZoomStep = 8;
+const minTimelineDurationUs = 10_000_000;
+const timelineTailRoomUs = 10_000_000;
 const maxRenderedMediaCards = 400;
 const snapIntervalUs = 500_000;
 const snapThresholdPx = 18;
@@ -263,7 +265,7 @@ export function EditTab({
   function applyEngineTimeline(data: unknown) {
     const nextTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
     if (nextTimeline?.tracks) {
-      setTimeline(nextTimeline);
+      setTimeline(withTimelineEditDuration(nextTimeline));
       return true;
     }
     return false;
@@ -350,7 +352,7 @@ export function EditTab({
         outUs: firstOutUs + secondDurationUs
       };
 
-      setTimeline((current) => ({
+      setTimeline((current) => withTimelineEditDuration({
         ...current,
         tracks: current.tracks.map((track) =>
           track.id === clip.trackId
@@ -428,7 +430,7 @@ export function EditTab({
     const lastResult = results.at(-1);
     if (!applyEngineTimeline(lastResult?.data)) {
       const deletedIds = new Set(clips.map((clip) => clip.id));
-      setTimeline((current) => ({
+      setTimeline((current) => withTimelineEditDuration({
         ...current,
         tracks: current.tracks.map((track) => ({
           ...track,
@@ -460,7 +462,7 @@ export function EditTab({
     const results = await Promise.all(orderedClips.map((clip) => runCommand({ type: "ripple_delete_clip", clipId: clip.id, trackMode: "selected_track" }, "Ripple delete failed")));
     const lastResult = results.at(-1);
     if (!applyEngineTimeline(lastResult?.data)) {
-      setTimeline((current) => rippleDeleteClips(current, orderedClips));
+      setTimeline((current) => withTimelineEditDuration(rippleDeleteClips(current, orderedClips)));
     }
     clearClipSelection();
     const failed = results.find((result) => !result.ok);
@@ -606,12 +608,8 @@ export function EditTab({
     if (!applyEngineTimeline(lastResult?.data)) {
       const movedById = new Map(movedClips.map((item) => [item.id, item]));
       setTimeline((current) => {
-        return {
+        return withTimelineEditDuration({
           ...current,
-          durationUs: Math.max(
-            current.durationUs,
-            ...movedClips.map((item) => item.startUs + (item.outUs - item.inUs) + 5_000_000)
-          ),
           tracks: current.tracks.map((track) => ({
             ...track,
             clips: [
@@ -619,7 +617,7 @@ export function EditTab({
               ...movedClips.filter((item) => item.trackId === track.id)
             ].sort((left, right) => left.startUs - right.startUs)
           }))
-        };
+        });
       });
     }
     setSelectedClipIds(selectedMoveClips.map((item) => item.id));
@@ -665,9 +663,8 @@ export function EditTab({
       timeUs: edge === "start" ? nextClip.startUs : nextClip.outUs
     }, "Trim failed");
     if (!applyEngineTimeline(result.data)) {
-      setTimeline((current) => ({
+      setTimeline((current) => withTimelineEditDuration({
         ...current,
-        durationUs: Math.max(current.durationUs, nextClip.startUs + (nextClip.outUs - nextClip.inUs) + 5_000_000),
         tracks: current.tracks.map((track) => ({
           ...track,
           clips: track.clips.map((item) => (item.id === clipId ? nextClip : item))
@@ -719,9 +716,8 @@ export function EditTab({
       }
     };
 
-    setTimeline((current) => ({
+    setTimeline((current) => withTimelineEditDuration({
       ...current,
-      durationUs: Math.max(current.durationUs, nextStartUs + fallbackDurationUs + 5_000_000),
       tracks: current.tracks.map((track) =>
         track.id === targetTrack.id
           ? {
@@ -1079,9 +1075,8 @@ export function EditTab({
       return;
     }
 
-    setTimeline((current) => ({
+    setTimeline((current) => withTimelineEditDuration({
       ...current,
-      durationUs: Math.max(current.durationUs, ...clips.map((clip) => clip.startUs + (clip.outUs - clip.inUs) + 5_000_000)),
       tracks: current.tracks.map((track) => ({
         ...track,
         clips: [...track.clips, ...clips.filter((clip) => clip.trackId === track.id)].sort((left, right) => left.startUs - right.startUs)
@@ -2876,6 +2871,28 @@ function compareClipsByTimeline(left: TimelineClip, right: TimelineClip) {
   return left.trackId.localeCompare(right.trackId) || left.startUs - right.startUs || left.id.localeCompare(right.id);
 }
 
+function getTimelineContentEndUs(timeline: Timeline) {
+  return timeline.tracks.reduce(
+    (duration, track) =>
+      Math.max(
+        duration,
+        ...track.clips.map((clip) => clip.startUs + Math.max(0, clip.outUs - clip.inUs))
+      ),
+    0
+  );
+}
+
+function getTimelineEditDurationUs(timeline: Timeline) {
+  return Math.max(minTimelineDurationUs, getTimelineContentEndUs(timeline) + timelineTailRoomUs);
+}
+
+function withTimelineEditDuration(timeline: Timeline): Timeline {
+  return {
+    ...timeline,
+    durationUs: getTimelineEditDurationUs(timeline)
+  };
+}
+
 function rippleDeleteClips(timeline: Timeline, deletedClips: TimelineClip[]) {
   const deletedByTrack = new Map<string, TimelineClip[]>();
   for (const clip of deletedClips) {
@@ -3053,7 +3070,7 @@ function dbToLinear(gainDb: number) {
 }
 
 function getTimelineDurationSeconds(durationUs: number) {
-  return Math.max(60, Math.ceil(durationUs / 1_000_000));
+  return Math.max(Math.ceil(minTimelineDurationUs / 1_000_000), Math.ceil(durationUs / 1_000_000));
 }
 
 function getFallbackMediaDurationUs(asset: MediaAsset) {

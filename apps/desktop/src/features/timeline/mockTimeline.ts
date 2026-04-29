@@ -4,7 +4,7 @@ export const starterTimeline: Timeline = {
   id: "timeline_main",
   name: "Main Timeline",
   fps: 30,
-  durationUs: 60_000_000,
+  durationUs: 10_000_000,
   tracks: [
     {
       id: "v2",

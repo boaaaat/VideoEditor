@@ -763,13 +763,15 @@ class EditorSession {
   }
 
   void recalculateTimelineDuration() {
+    constexpr std::int64_t minTimelineDurationUs = 10'000'000;
+    constexpr std::int64_t timelineTailRoomUs = 10'000'000;
     std::int64_t duration = 0;
     for (const auto& track : timeline_.tracks) {
       for (const auto& clip : track.clips) {
         duration = std::max(duration, clip.startUs + (clip.outUs - clip.inUs));
       }
     }
-    timeline_.durationUs = std::max<std::int64_t>(60'000'000, duration + 5'000'000);
+    timeline_.durationUs = std::max<std::int64_t>(minTimelineDurationUs, duration + timelineTailRoomUs);
   }
 
   [[nodiscard]] IndexedMedia* findMedia(const std::string& id) {
