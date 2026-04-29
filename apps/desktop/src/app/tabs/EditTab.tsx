@@ -1183,12 +1183,14 @@ function TimelineSurface({
   }
 
   function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
-    if (!event.shiftKey) {
+    event.preventDefault();
+    if (event.shiftKey || event.ctrlKey) {
+      onZoom(event.deltaY > 0 ? -1 : 1);
       return;
     }
 
-    event.preventDefault();
-    onZoom(event.deltaY > 0 ? -1 : 1);
+    const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+    event.currentTarget.scrollLeft += horizontalDelta;
   }
 
   function beginClipInteraction(event: ReactPointerEvent<HTMLElement>, clip: TimelineClip, mode: ClipInteraction["mode"]) {
