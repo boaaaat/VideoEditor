@@ -1397,10 +1397,15 @@ export function EditTab({
     <div className="edit-workspace">
       <Panel title="Media Bin" className="media-bin">
         <div className="media-bin-tools">
-          <label className="media-search">
-            <Search size={15} />
-            <input value={mediaSearch} onChange={(event) => setMediaSearch(event.target.value)} placeholder="Search media" />
-          </label>
+          <div className="media-bin-primary-row">
+            <label className="media-search">
+              <Search size={15} />
+              <input value={mediaSearch} onChange={(event) => setMediaSearch(event.target.value)} placeholder="Search media" />
+            </label>
+            <Button icon={<Import size={16} />} variant="primary" onClick={onImportMedia}>
+              Import
+            </Button>
+          </div>
           <div className="media-filter-row">
             <select value={mediaTypeFilter} aria-label="Filter media type" onChange={(event) => setMediaTypeFilter(event.target.value as MediaTypeFilter)}>
               <option value="all">All types</option>
@@ -1518,9 +1523,6 @@ export function EditTab({
           ) : (
             <div className="media-empty">
               <Import size={24} />
-              <Button icon={<Import size={16} />} variant="primary" onClick={onImportMedia}>
-                Import Media
-              </Button>
             </div>
           )}
         </div>
