@@ -332,7 +332,7 @@ class ExportEngine {
       } else {
         const auto* media = findMedia(job.timeline.media, segment.clip->mediaId);
         args.insert(args.end(), {"-i", media ? media->path : std::string{}});
-        filters.push_back(videoSegmentFilter(inputIndex, segmentIndex, *segment.clip, job, segment.sourceInUs, segment.durationUs));
+        filters.push_back(videoSegmentFilter(inputIndex, segmentIndex, *segment.clip, job, segment.sourceInUs, segment.sourceDurationUs, segment.durationUs));
         inputIndex += 1;
       }
 
@@ -405,11 +405,12 @@ class ExportEngine {
         continue;
       }
 
-      const auto durationUs = clip->outUs - clip->inUs;
+      const auto sourceDurationUs = clipSourceDurationUs(*clip);
+      const auto durationUs = clipDisplayDurationUs(*clip);
       const auto delayMs = std::max<std::int64_t>(0, clip->startUs / 1000);
       const auto label = "aud" + std::to_string(index);
       args.insert(args.end(), {"-i", media->path});
-      filters.push_back("[" + std::to_string(inputIndex) + ":a]" + audioFilterChain(*clip, durationUs, delayMs, label));
+      filters.push_back("[" + std::to_string(inputIndex) + ":a]" + audioFilterChain(*clip, sourceDurationUs, durationUs, delayMs, label));
       audioInputs.push_back("[" + label + "]");
       inputIndex += 1;
     }
@@ -435,10 +436,12 @@ class ExportEngine {
       const ExportTimelineClip& clip,
       const ExportJob& job,
       std::int64_t sourceInUs,
+      std::int64_t sourceDurationUs,
       std::int64_t durationUs) {
+    const auto speed = normalizedSpeedFactor(clip);
     std::vector<std::string> filters = {
-        "[" + std::to_string(inputIndex) + ":v]trim=start=" + formatSeconds(sourceInUs) + ":duration=" + formatSeconds(durationUs),
-        "setpts=PTS-STARTPTS",
+        "[" + std::to_string(inputIndex) + ":v]trim=start=" + formatSeconds(sourceInUs) + ":duration=" + formatSeconds(sourceDurationUs),
+        "setpts=(PTS-STARTPTS)/" + formatDouble(speed),
         "fps=" + std::to_string(job.fps),
         "scale=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":force_original_aspect_ratio=decrease",
         "pad=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":(ow-iw)/2:(oh-ih)/2",
@@ -523,22 +526,28 @@ class ExportEngine {
     }
   }
 
-  [[nodiscard]] static std::string audioFilterChain(const ExportTimelineClip& clip, std::int64_t durationUs, std::int64_t delayMs, const std::string& outputLabel) {
+  [[nodiscard]] static std::string audioFilterChain(
+      const ExportTimelineClip& clip,
+      std::int64_t sourceDurationUs,
+      std::int64_t outputDurationUs,
+      std::int64_t delayMs,
+      const std::string& outputLabel) {
     std::vector<std::string> filters = {
-        "atrim=start=" + formatSeconds(clip.inUs) + ":duration=" + formatSeconds(durationUs),
+        "atrim=start=" + formatSeconds(clip.inUs) + ":duration=" + formatSeconds(sourceDurationUs),
         "asetpts=PTS-STARTPTS",
         "aresample=48000",
     };
+    appendAtempoFilters(normalizedSpeedFactor(clip), filters);
 
     if (std::abs(clip.audioGainDb) > 0.001) {
       filters.push_back("volume=" + formatDb(clip.audioGainDb));
     }
     if (clip.audioFadeInUs > 0) {
-      filters.push_back("afade=t=in:st=0:d=" + formatSeconds(std::min(clip.audioFadeInUs, durationUs)));
+      filters.push_back("afade=t=in:st=0:d=" + formatSeconds(std::min(clip.audioFadeInUs, outputDurationUs)));
     }
     if (clip.audioFadeOutUs > 0) {
-      const auto fadeDurationUs = std::min(clip.audioFadeOutUs, durationUs);
-      filters.push_back("afade=t=out:st=" + formatSeconds(std::max<std::int64_t>(0, durationUs - fadeDurationUs)) + ":d=" + formatSeconds(fadeDurationUs));
+      const auto fadeDurationUs = std::min(clip.audioFadeOutUs, outputDurationUs);
+      filters.push_back("afade=t=out:st=" + formatSeconds(std::max<std::int64_t>(0, outputDurationUs - fadeDurationUs)) + ":d=" + formatSeconds(fadeDurationUs));
     }
     if (clip.audioCleanup) {
       filters.push_back("highpass=f=80");
@@ -551,7 +560,7 @@ class ExportEngine {
       filters.push_back("adelay=" + std::to_string(delayMs) + "|" + std::to_string(delayMs));
     }
     filters.push_back("apad");
-    filters.push_back("atrim=duration=" + formatSeconds(durationUs + delayMs * 1000));
+    filters.push_back("atrim=duration=" + formatSeconds(outputDurationUs + delayMs * 1000));
     return join(filters, ",") + "[" + outputLabel + "]";
   }
 
@@ -570,6 +579,21 @@ class ExportEngine {
     filters.push_back("atrim=duration=" + formatSeconds(job.durationUs));
     filters.push_back("asetpts=PTS-STARTPTS");
     return join(filters, ",");
+  }
+
+  static void appendAtempoFilters(double speed, std::vector<std::string>& filters) {
+    auto remaining = std::clamp(speed, 0.25, 4.0);
+    while (remaining < 0.5) {
+      filters.push_back("atempo=0.5000");
+      remaining /= 0.5;
+    }
+    while (remaining > 2.0) {
+      filters.push_back("atempo=2.0000");
+      remaining /= 2.0;
+    }
+    if (std::abs(remaining - 1.0) > 0.001) {
+      filters.push_back("atempo=" + formatDouble(remaining));
+    }
   }
 
   static void prepareDestination(const ExportRequest& request) {
@@ -766,6 +790,7 @@ class ExportEngine {
         clip.startUs = item.value("startUs", 0LL);
         clip.inUs = item.value("inUs", 0LL);
         clip.outUs = item.value("outUs", clip.inUs);
+        clip.speedPercent = normalizeSpeedPercent(item.value("speedPercent", 100.0));
         if (item.contains("audio") && item.at("audio").is_object()) {
           const auto& audio = item.at("audio");
           clip.audioGainDb = audio.value("gainDb", 0.0);
@@ -832,9 +857,32 @@ class ExportEngine {
       if (!media || media->kind != "video" || clip.trackKind != "video" || !clip.trackVisible || clip.outUs <= clip.inUs) {
         continue;
       }
-      durationUs = std::max(durationUs, clip.startUs + (clip.outUs - clip.inUs));
+      durationUs = std::max(durationUs, clip.startUs + clipDisplayDurationUs(clip));
     }
     return durationUs;
+  }
+
+  [[nodiscard]] static double normalizeSpeedPercent(double value) {
+    if (!std::isfinite(value)) {
+      return 100.0;
+    }
+    return std::clamp(value, 25.0, 400.0);
+  }
+
+  [[nodiscard]] static double normalizedSpeedFactor(const ExportTimelineClip& clip) {
+    return normalizeSpeedPercent(clip.speedPercent) / 100.0;
+  }
+
+  [[nodiscard]] static std::int64_t clipSourceDurationUs(const ExportTimelineClip& clip) {
+    return std::max<std::int64_t>(0, clip.outUs - clip.inUs);
+  }
+
+  [[nodiscard]] static std::int64_t clipDisplayDurationUs(const ExportTimelineClip& clip) {
+    const auto sourceDurationUs = clipSourceDurationUs(clip);
+    if (sourceDurationUs <= 0) {
+      return 0;
+    }
+    return std::max<std::int64_t>(1, static_cast<std::int64_t>(std::llround(static_cast<double>(sourceDurationUs) / normalizedSpeedFactor(clip))));
   }
 
   [[nodiscard]] static bool hasRenderableTimeline(const ExportJob& job) {
@@ -877,28 +925,36 @@ class ExportEngine {
     std::vector<ExportTimelineSegment> segments;
     std::int64_t cursorUs = 0;
     for (const auto* clip : clips) {
-      const auto clipDurationUs = clip->outUs - clip->inUs;
-      const auto clipEndUs = clip->startUs + clipDurationUs;
+      const auto displayDurationUs = clipDisplayDurationUs(*clip);
+      const auto clipEndUs = clip->startUs + displayDurationUs;
       if (clipEndUs <= cursorUs || cursorUs >= job.durationUs) {
         continue;
       }
       if (clip->startUs > cursorUs) {
-        segments.push_back({nullptr, cursorUs, 0, std::min(clip->startUs, job.durationUs) - cursorUs, true});
+        segments.push_back({nullptr, cursorUs, 0, 0, std::min(clip->startUs, job.durationUs) - cursorUs, true});
         cursorUs = std::min(clip->startUs, job.durationUs);
       }
       const auto segmentStartUs = std::max(cursorUs, clip->startUs);
       const auto segmentEndUs = std::min(clipEndUs, job.durationUs);
       if (segmentEndUs > segmentStartUs) {
-        segments.push_back({clip, segmentStartUs, clip->inUs + (segmentStartUs - clip->startUs), segmentEndUs - segmentStartUs, false});
+        const auto outputDurationUs = segmentEndUs - segmentStartUs;
+        const auto speed = normalizedSpeedFactor(*clip);
+        const auto sourceOffsetUs = static_cast<std::int64_t>(std::llround(static_cast<double>(segmentStartUs - clip->startUs) * speed));
+        const auto sourceInUs = std::min<std::int64_t>(clip->outUs, clip->inUs + sourceOffsetUs);
+        const auto availableSourceUs = std::max<std::int64_t>(0, clip->outUs - sourceInUs);
+        const auto sourceDurationUs = std::min<std::int64_t>(
+            availableSourceUs,
+            std::max<std::int64_t>(1, static_cast<std::int64_t>(std::llround(static_cast<double>(outputDurationUs) * speed))));
+        segments.push_back({clip, segmentStartUs, sourceInUs, sourceDurationUs, outputDurationUs, false});
         cursorUs = segmentEndUs;
       }
     }
 
     if (cursorUs < job.durationUs) {
-      segments.push_back({nullptr, cursorUs, 0, job.durationUs - cursorUs, true});
+      segments.push_back({nullptr, cursorUs, 0, 0, job.durationUs - cursorUs, true});
     }
     if (segments.empty()) {
-      segments.push_back({nullptr, 0, 0, job.durationUs, true});
+      segments.push_back({nullptr, 0, 0, 0, job.durationUs, true});
     }
     return segments;
   }

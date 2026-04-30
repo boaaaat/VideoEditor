@@ -14,6 +14,7 @@ export type CommandType =
   | "ripple_delete_clip"
   | "apply_color_adjustment"
   | "apply_audio_adjustment"
+  | "apply_clip_speed"
   | "apply_transform"
   | "apply_effect_stack"
   | "apply_lut"
@@ -53,6 +54,7 @@ export interface AddClipCommand {
   startUs: number;
   inUs?: number;
   outUs?: number;
+  speedPercent?: number;
 }
 
 export interface MoveClipCommand {
@@ -97,6 +99,12 @@ export interface ApplyAudioAdjustmentCommand {
   type: "apply_audio_adjustment";
   clipId: string;
   adjustment: Partial<AudioAdjustment>;
+}
+
+export interface ApplyClipSpeedCommand {
+  type: "apply_clip_speed";
+  clipId: string;
+  speedPercent: number;
 }
 
 export interface ApplyTransformCommand {
@@ -151,6 +159,7 @@ export type EditorCommand =
   | RippleDeleteClipCommand
   | ApplyColorAdjustmentCommand
   | ApplyAudioAdjustmentCommand
+  | ApplyClipSpeedCommand
   | ApplyTransformCommand
   | ApplyEffectStackCommand
   | ApplyLutCommand

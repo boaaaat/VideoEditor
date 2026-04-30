@@ -97,7 +97,7 @@ export async function loadProjectSnapshot(project: ActiveProject): Promise<Proje
     snapshot = await invoke<ProjectSnapshot | null>("load_project_snapshot", { projectPath: project.path });
   }
 
-  return snapshot ? normalizeSnapshotMediaPaths(snapshot, project.path) : null;
+  return snapshot ? normalizeSnapshotTimeline(normalizeSnapshotMediaPaths(snapshot, project.path)) : null;
 }
 
 export async function validateMediaPaths(paths: string[], projectPath?: string): Promise<string[]> {
@@ -227,6 +227,27 @@ function normalizeSnapshotMediaPaths(snapshot: ProjectSnapshot, projectPath?: st
       };
     })
   };
+}
+
+function normalizeSnapshotTimeline(snapshot: ProjectSnapshot): ProjectSnapshot {
+  return {
+    ...snapshot,
+    timeline: {
+      ...snapshot.timeline,
+      tracks: snapshot.timeline.tracks.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) => ({
+          ...clip,
+          speedPercent: normalizeSpeedPercent((clip as { speedPercent?: unknown }).speedPercent)
+        }))
+      }))
+    }
+  };
+}
+
+function normalizeSpeedPercent(value: unknown) {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? Math.min(400, Math.max(25, Math.round(numeric))) : 100;
 }
 
 function resolveProjectMediaPath(path: string, projectPath: string) {

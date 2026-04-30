@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <nlohmann/json.hpp>
@@ -241,6 +242,8 @@ class EditorSession {
       applyClipLook(command);
     } else if (type == "apply_audio_adjustment") {
       applyClipAudio(command);
+    } else if (type == "apply_clip_speed") {
+      applyClipSpeed(command);
     } else if (type == "apply_transform") {
       applyClipTransform(command);
     } else if (type == "apply_effect_stack") {
@@ -401,6 +404,7 @@ class EditorSession {
     clip.startUs = value.value("startUs", 0LL);
     clip.inUs = value.value("inUs", 0LL);
     clip.outUs = value.value("outUs", clip.inUs + 1'000'000LL);
+    clip.speedPercent = normalizeSpeedPercent(value.value("speedPercent", 100.0));
 
     const auto color = value.contains("color") ? value.at("color") : defaultColorJson();
     clip.color.brightness = color.value("brightness", 0.0);
@@ -499,12 +503,14 @@ class EditorSession {
         color_json TEXT NOT NULL,
         audio_json TEXT NOT NULL DEFAULT '{}',
         transform_json TEXT NOT NULL DEFAULT '{}',
-        effects_json TEXT NOT NULL DEFAULT '[]'
+        effects_json TEXT NOT NULL DEFAULT '[]',
+        speed_percent REAL NOT NULL DEFAULT 100
       );
     )sql");
     ensureColumn("timeline_clips", "audio_json", "TEXT NOT NULL DEFAULT '{}'");
     ensureColumn("timeline_clips", "transform_json", "TEXT NOT NULL DEFAULT '{}'");
     ensureColumn("timeline_clips", "effects_json", "TEXT NOT NULL DEFAULT '[]'");
+    ensureColumn("timeline_clips", "speed_percent", "REAL NOT NULL DEFAULT 100");
     exec(R"sql(
       CREATE TABLE IF NOT EXISTS ai_proposals (
         id TEXT PRIMARY KEY,
@@ -566,7 +572,7 @@ class EditorSession {
 
   void loadClips() {
     sqlite3_stmt* statement = nullptr;
-    prepare("SELECT id,media_id,track_id,start_us,in_us,out_us,color_json,audio_json,transform_json,effects_json FROM timeline_clips ORDER BY start_us ASC;", &statement);
+    prepare("SELECT id,media_id,track_id,start_us,in_us,out_us,color_json,audio_json,transform_json,effects_json,speed_percent FROM timeline_clips ORDER BY start_us ASC;", &statement);
     while (sqlite3_step(statement) == SQLITE_ROW) {
       Clip clip;
       clip.id = columnText(statement, 0);
@@ -592,6 +598,7 @@ class EditorSession {
       clip.audioCleanup = audio.value("cleanup", false);
       clip.transform = transformFromJson(parseJson(columnText(statement, 8), defaultTransformJson()));
       clip.effects = effectsFromJson(parseJson(columnText(statement, 9), defaultEffectsJson()));
+      clip.speedPercent = normalizeSpeedPercent(sqlite3_column_double(statement, 10));
       auto* track = findTrack(clip.trackId);
       if (track) {
         track->clips.push_back(clip);
@@ -650,7 +657,7 @@ class EditorSession {
 
       for (const auto& clip : track.clips) {
         sqlite3_stmt* clipStatement = nullptr;
-        prepare("INSERT INTO timeline_clips(id,media_id,track_id,start_us,in_us,out_us,color_json,audio_json,transform_json,effects_json) VALUES(?,?,?,?,?,?,?,?,?,?);", &clipStatement);
+        prepare("INSERT INTO timeline_clips(id,media_id,track_id,start_us,in_us,out_us,color_json,audio_json,transform_json,effects_json,speed_percent) VALUES(?,?,?,?,?,?,?,?,?,?,?);", &clipStatement);
         bindText(clipStatement, 1, clip.id);
         bindText(clipStatement, 2, clip.mediaId);
         bindText(clipStatement, 3, clip.trackId);
@@ -661,6 +668,7 @@ class EditorSession {
         bindText(clipStatement, 8, audioJson(clip).dump());
         bindText(clipStatement, 9, transformJson(clip.transform).dump());
         bindText(clipStatement, 10, effectsJson(clip.effects).dump());
+        sqlite3_bind_double(clipStatement, 11, normalizeSpeedPercent(clip.speedPercent));
         stepDone(clipStatement);
       }
     }
@@ -718,6 +726,7 @@ class EditorSession {
     clip.startUs = command.value("startUs", 0LL);
     clip.inUs = command.value("inUs", 0LL);
     clip.outUs = command.value("outUs", std::max(clip.inUs + 1'000'000, media->metadata.value("durationUs", 8'000'000LL)));
+    clip.speedPercent = normalizeSpeedPercent(command.value("speedPercent", 100.0));
     track->clips.erase(std::remove_if(track->clips.begin(), track->clips.end(), [&](const Clip& existing) {
                          return existing.id == clip.id;
                        }),
@@ -825,6 +834,14 @@ class EditorSession {
     }
   }
 
+  void applyClipSpeed(const nlohmann::json& command) {
+    auto* clip = findClip(command.value("clipId", std::string{}));
+    if (!clip) {
+      throw std::runtime_error("clip not found");
+    }
+    clip->speedPercent = normalizeSpeedPercent(command.value("speedPercent", clip->speedPercent));
+  }
+
   void applyClipTransform(const nlohmann::json& command) {
     auto* clip = findClip(command.value("clipId", std::string{}));
     if (!clip) {
@@ -863,6 +880,7 @@ class EditorSession {
             {"startUs", clip.startUs},
             {"inUs", clip.inUs},
             {"outUs", clip.outUs},
+            {"speedPercent", normalizeSpeedPercent(clip.speedPercent)},
             {"color", colorJson(clip)},
             {"audio", audioJson(clip)},
             {"transform", transformJson(clip.transform)},
@@ -906,7 +924,7 @@ class EditorSession {
     std::int64_t duration = 0;
     for (const auto& track : timeline_.tracks) {
       for (const auto& clip : track.clips) {
-        duration = std::max(duration, clip.startUs + (clip.outUs - clip.inUs));
+        duration = std::max(duration, clip.startUs + displayedClipDurationUs(clip));
       }
     }
     timeline_.durationUs = std::max<std::int64_t>(minTimelineDurationUs, duration + timelineTailRoomUs);
@@ -998,6 +1016,19 @@ class EditorSession {
     std::sort(track.clips.begin(), track.clips.end(), [](const Clip& left, const Clip& right) {
       return left.startUs < right.startUs;
     });
+  }
+
+  static double normalizeSpeedPercent(double value) {
+    if (!std::isfinite(value)) {
+      return 100.0;
+    }
+    return std::clamp(value, 25.0, 400.0);
+  }
+
+  static std::int64_t displayedClipDurationUs(const Clip& clip) {
+    const auto sourceDuration = std::max<std::int64_t>(0, clip.outUs - clip.inUs);
+    const auto speed = normalizeSpeedPercent(clip.speedPercent) / 100.0;
+    return static_cast<std::int64_t>(std::llround(static_cast<double>(sourceDuration) / speed));
   }
 
   static nlohmann::json colorJson(const Clip& clip) {

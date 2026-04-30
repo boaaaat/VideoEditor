@@ -1,4 +1,4 @@
-import { RotateCcw } from "lucide-react";
+import { Pause, Play, RotateCcw } from "lucide-react";
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { defaultColorAdjustment, type ColorAdjustment, type ClipLut, type Timeline, type TimelineClip } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
@@ -19,10 +19,14 @@ const lutPresetLabels: Record<LutPresetId, string> = {
 interface ColorTabProps {
   timeline: Timeline;
   setTimeline: Dispatch<SetStateAction<Timeline>>;
+  playheadUs: number;
+  setPlayheadUs: Dispatch<SetStateAction<number>>;
+  playing: boolean;
+  setPlaying: Dispatch<SetStateAction<boolean>>;
   setStatusMessage: LogStatus;
 }
 
-export function ColorTab({ timeline, setTimeline, setStatusMessage }: ColorTabProps) {
+export function ColorTab({ timeline, setTimeline, playheadUs, setPlayheadUs, playing, setPlaying, setStatusMessage }: ColorTabProps) {
   const videoClips = collectVideoClips(timeline);
   const [selectedClipId, setSelectedClipId] = useState("");
   const selectedClip = videoClips.find((clip) => clip.id === selectedClipId) ?? videoClips[0];
@@ -80,14 +84,30 @@ export function ColorTab({ timeline, setTimeline, setStatusMessage }: ColorTabPr
   }
 
   return (
-    <div className="tool-grid">
+    <div className="color-effects-workspace">
+      <Panel title="Playback" className="color-effects-playback">
+        <div className="transport">
+          <Button icon={playing ? <Pause size={16} /> : <Play size={16} />} onClick={() => setPlaying((value) => !value)}>
+            {playing ? "Pause" : "Play"}
+          </Button>
+          <span className="timeline-timecode">{formatSeconds(playheadUs)}</span>
+          {selectedClip ? <Button onClick={() => setPlayheadUs(selectedClip.startUs)}>Jump to Clip</Button> : null}
+        </div>
+      </Panel>
+      <div className="color-effects-controls-dock">
       <Panel title="Clip">
         <div className="control-stack">
           <label>
             Video clip
             <select
               value={selectedClip?.id ?? ""}
-              onChange={(event) => setSelectedClipId(event.target.value)}
+              onChange={(event) => {
+                setSelectedClipId(event.target.value);
+                const clip = videoClips.find((item) => item.id === event.target.value);
+                if (clip) {
+                  setPlayheadUs(clip.startUs);
+                }
+              }}
               disabled={videoClips.length === 0}
             >
               {videoClips.length === 0 ? <option value="">No video clips</option> : null}
@@ -132,6 +152,7 @@ export function ColorTab({ timeline, setTimeline, setStatusMessage }: ColorTabPr
           <Button icon={<RotateCcw size={16} />} onClick={resetColor}>Reset Color</Button>
         </div>
       </Panel>
+      </div>
     </div>
   );
 }

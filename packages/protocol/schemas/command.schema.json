@@ -18,6 +18,7 @@
         "ripple_delete_clip",
         "apply_color_adjustment",
         "apply_audio_adjustment",
+        "apply_clip_speed",
         "apply_transform",
         "apply_effect_stack",
         "apply_lut",
@@ -52,6 +53,16 @@
         "properties": {
           "paths": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
           "copyToProject": { "type": "boolean" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "apply_clip_speed" } } },
+      "then": {
+        "required": ["clipId", "speedPercent"],
+        "properties": {
+          "clipId": { "type": "string", "minLength": 1 },
+          "speedPercent": { "type": "number", "minimum": 25, "maximum": 400 }
         }
       }
     },

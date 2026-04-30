@@ -41,6 +41,7 @@ struct Clip {
   bool audioCleanup = false;
   ClipTransform transform;
   std::vector<ClipEffect> effects;
+  double speedPercent = 100.0;
 };
 
 }  // namespace ai_editor

@@ -61,12 +61,14 @@ struct ExportTimelineClip {
   double rotation = 0.0;
   double opacity = 1.0;
   std::vector<ExportClipEffect> effects;
+  double speedPercent = 100.0;
 };
 
 struct ExportTimelineSegment {
   const ExportTimelineClip* clip = nullptr;
   std::int64_t startUs = 0;
   std::int64_t sourceInUs = 0;
+  std::int64_t sourceDurationUs = 0;
   std::int64_t durationUs = 0;
   bool gap = false;
 };

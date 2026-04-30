@@ -26,6 +26,7 @@ export interface TimelineClip {
   startUs: number;
   inUs: number;
   outUs: number;
+  speedPercent: number;
   color: ColorAdjustment;
   audio?: AudioAdjustment;
   transform?: ClipTransform;

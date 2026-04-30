@@ -38,6 +38,7 @@ import {
   Scissors,
   Search,
   Shield,
+  SlidersHorizontal,
   StepBack,
   StepForward,
   Trash2,
@@ -66,7 +67,9 @@ import {
 import { Button } from "../../components/Button";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 import { IconButton } from "../../components/IconButton";
+import { Modal } from "../../components/Modal";
 import { Panel } from "../../components/Panel";
+import { Slider } from "../../components/Slider";
 import { Toggle } from "../../components/Toggle";
 import { executeCommand } from "../../features/commands/commandClient";
 import { isTypingTarget, matchesShortcut, shortcutFor, type ShortcutMap } from "../../features/commands/shortcuts";
@@ -126,6 +129,14 @@ interface EditTabProps {
   timeline: Timeline;
   setTimeline: Dispatch<SetStateAction<Timeline>>;
   projectSettings: ProjectSettings;
+  playheadUs: number;
+  setPlayheadUs: Dispatch<SetStateAction<number>>;
+  playing: boolean;
+  setPlaying: Dispatch<SetStateAction<boolean>>;
+  previewVolumePercent: number;
+  setPreviewVolumePercent: Dispatch<SetStateAction<number>>;
+  previewSpeedPercent: number;
+  setPreviewSpeedPercent: Dispatch<SetStateAction<number>>;
   onImportMedia: () => Promise<void>;
   onImportMediaResult: (result: ImportMediaResult | null) => void;
   onRemoveMediaAsset: (assetId: string, data?: unknown) => void;
@@ -190,6 +201,12 @@ type EditContextMenuState =
       clipId: string;
       x: number;
       y: number;
+    }
+  | {
+      kind: "track";
+      trackId: string;
+      x: number;
+      y: number;
     };
 
 type MediaTypeFilter = "all" | "video" | "audio" | "missing";
@@ -205,6 +222,14 @@ export function EditTab({
   timeline,
   setTimeline,
   projectSettings,
+  playheadUs,
+  setPlayheadUs,
+  playing,
+  setPlaying,
+  previewVolumePercent,
+  setPreviewVolumePercent,
+  previewSpeedPercent,
+  setPreviewSpeedPercent,
   onImportMedia,
   onImportMediaResult,
   onRemoveMediaAsset,
@@ -222,12 +247,10 @@ export function EditTab({
   const [mediaDragOver, setMediaDragOver] = useState(false);
   const [snapping, setSnapping] = useState(true);
   const [soloTrackIds, setSoloTrackIds] = useState<string[]>([]);
-  const [playing, setPlaying] = useState(false);
   const [loopPlayback, setLoopPlayback] = useState(false);
   const [previewQuality, setPreviewQuality] = useState<PreviewQuality>("Proxy");
   const [previewScale, setPreviewScale] = useState<PreviewScaleMode>("fit");
   const [timelineZoom, setTimelineZoom] = useState(72);
-  const [playheadUs, setPlayheadUs] = useState(0);
   const [timelineClipboard, setTimelineClipboard] = useState<ClipboardClip[]>([]);
   const [draggingMediaId, setDraggingMediaId] = useState<string | null>(null);
   const [mediaDropTrackId, setMediaDropTrackId] = useState<string | null>(null);
@@ -242,10 +265,14 @@ export function EditTab({
   const [mediaSort, setMediaSort] = useState<MediaSortKey>("imported-desc");
   const [renamingAssetId, setRenamingAssetId] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
+  const [speedDialogClipId, setSpeedDialogClipId] = useState("");
+  const [speedDraft, setSpeedDraft] = useState(100);
   const selectedClipId = selectedClipIds.at(-1) ?? "";
   const selectedClip = timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === selectedClipId);
   const contextMediaAsset = contextMenu?.kind === "media" ? mediaAssets.find((asset) => asset.id === contextMenu.assetId) : undefined;
   const contextClip = contextMenu?.kind === "clip" ? timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === contextMenu.clipId) : undefined;
+  const contextTrack = contextMenu?.kind === "track" ? timeline.tracks.find((track) => track.id === contextMenu.trackId) : undefined;
+  const speedDialogClip = speedDialogClipId ? timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === speedDialogClipId) : undefined;
   const activeVideoClip = findActiveClip(timeline, playheadUs, "video", soloTrackIds);
   const activeAudioClip = findActiveClip(timeline, playheadUs, "audio", soloTrackIds);
   const activeVideoAsset = activeVideoClip ? mediaAssets.find((asset) => asset.id === activeVideoClip.mediaId) : undefined;
@@ -352,8 +379,8 @@ export function EditTab({
 
     const result = await runCommand({ type: "split_clip", clipId: targetClip?.id, playheadUs }, "Split failed");
     const usedEngineTimeline = applyEngineTimeline(result.data);
-    if (!usedEngineTimeline && clip && playheadUs > clip.startUs && playheadUs < clip.startUs + (clip.outUs - clip.inUs)) {
-      const firstOutUs = clip.inUs + (playheadUs - clip.startUs);
+    if (!usedEngineTimeline && clip && playheadUs > clip.startUs && playheadUs < clip.startUs + getClipDisplayDurationUs(clip)) {
+      const firstOutUs = getClipMediaTimeUs(clip, playheadUs);
       const secondDurationUs = clip.outUs - firstOutUs;
       const secondClip = {
         ...clip,
@@ -651,20 +678,21 @@ export function EditTab({
     }
 
     const minDurationUs = 250_000;
+    const speed = getClipSpeedFactor(clip);
     let nextClip = clip;
     if (edge === "start") {
       const nextStartUs = Math.max(0, clip.startUs + deltaUs);
       const resolvedStartUs = snapping ? resolveTrackSnapStart(timeline, clip.trackId, nextStartUs, timelineZoom, clip.id, false).startUs : nextStartUs;
-      const nextInUs = Math.max(0, clip.inUs + (resolvedStartUs - clip.startUs));
+      const nextInUs = Math.max(0, clip.inUs + Math.round((resolvedStartUs - clip.startUs) * speed));
       if (clip.outUs - nextInUs < minDurationUs) {
         return;
       }
       nextClip = { ...clip, startUs: resolvedStartUs, inUs: nextInUs };
     } else {
-      const nextOutUs = Math.max(clip.inUs + minDurationUs, clip.outUs + deltaUs);
-      const clipEndUs = clip.startUs + (nextOutUs - clip.inUs);
+      const nextOutUs = Math.max(clip.inUs + minDurationUs, clip.outUs + Math.round(deltaUs * speed));
+      const clipEndUs = clip.startUs + Math.round((nextOutUs - clip.inUs) / speed);
       const resolvedEndUs = snapping ? resolveTrackSnapStart(timeline, clip.trackId, clipEndUs, timelineZoom, clip.id, false).startUs : clipEndUs;
-      nextClip = { ...clip, outUs: Math.max(clip.inUs + minDurationUs, clip.inUs + resolvedEndUs - clip.startUs) };
+      nextClip = { ...clip, outUs: Math.max(clip.inUs + minDurationUs, clip.inUs + Math.round((resolvedEndUs - clip.startUs) * speed)) };
     }
 
     const result = await runCommand({
@@ -718,6 +746,7 @@ export function EditTab({
       startUs: nextStartUs,
       inUs: 0,
       outUs: fallbackDurationUs,
+      speedPercent: 100,
       color: {
         brightness: 0,
         contrast: 0,
@@ -748,7 +777,8 @@ export function EditTab({
       trackId: targetTrack.id,
       startUs: nextStartUs,
       inUs: 0,
-      outUs: fallbackDurationUs
+      outUs: fallbackDurationUs,
+      speedPercent: 100
     }, "Add clip failed").then((result) => {
       if (!result.ok) {
         setStatusMessage(result.error ?? "Add clip failed", { level: "error" });
@@ -1051,7 +1081,7 @@ export function EditTab({
       return;
     }
 
-    const duplicateOffsetUs = Math.max(...clips.map((clip) => clip.startUs + (clip.outUs - clip.inUs))) - Math.min(...clips.map((clip) => clip.startUs)) + snapIntervalUs;
+    const duplicateOffsetUs = Math.max(...clips.map((clip) => clip.startUs + getClipDisplayDurationUs(clip))) - Math.min(...clips.map((clip) => clip.startUs)) + snapIntervalUs;
     insertTimelineClips(
       clips.map((clip, index) => ({
         ...clip,
@@ -1109,7 +1139,8 @@ export function EditTab({
           trackId: clip.trackId,
           startUs: clip.startUs,
           inUs: clip.inUs,
-          outUs: clip.outUs
+          outUs: clip.outUs,
+          speedPercent: normalizeClipSpeedPercent(clip.speedPercent)
         }, `${actionLabel} clip failed`)
       )
     ).then((results) => {
@@ -1118,6 +1149,102 @@ export function EditTab({
         applyEngineTimeline(lastResult.data);
       }
     });
+  }
+
+  function openTrackContextMenu(event: ReactMouseEvent, trackId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu({
+      kind: "track",
+      trackId,
+      x: event.clientX,
+      y: event.clientY
+    });
+  }
+
+  function startChangingClipSpeed(clip: TimelineClip) {
+    setSpeedDialogClipId(clip.id);
+    setSpeedDraft(normalizeClipSpeedPercent(clip.speedPercent));
+  }
+
+  async function applyClipSpeed() {
+    if (!speedDialogClip) {
+      return;
+    }
+
+    const nextSpeedPercent = normalizeClipSpeedPercent(speedDraft);
+    setTimeline((current) => withTimelineEditDuration({
+      ...current,
+      tracks: current.tracks.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) => (clip.id === speedDialogClip.id ? { ...clip, speedPercent: nextSpeedPercent } : clip))
+      }))
+    }));
+    setSpeedDialogClipId("");
+    const result = await runCommand({ type: "apply_clip_speed", clipId: speedDialogClip.id, speedPercent: nextSpeedPercent }, "Change speed failed");
+    applyEngineTimeline(result.data);
+    setStatusMessage(result.ok ? `Clip speed ${nextSpeedPercent}%` : result.error ?? "Change speed failed", { level: result.ok ? "success" : "error", source: "timeline" });
+  }
+
+  function renameTrack(trackId: string) {
+    const track = timeline.tracks.find((item) => item.id === trackId);
+    if (!track) {
+      return;
+    }
+    const nextName = window.prompt("Rename track", track.name)?.trim();
+    if (!nextName || nextName === track.name) {
+      return;
+    }
+    setTimeline((current) => ({
+      ...current,
+      tracks: current.tracks.map((item) => (item.id === trackId ? { ...item, name: nextName } : item))
+    }));
+    setStatusMessage(`Renamed ${track.name} to ${nextName}`, { source: "timeline" });
+  }
+
+  function addTrackNear(trackId: string, placement: "above" | "below") {
+    const anchor = timeline.tracks.find((track) => track.id === trackId);
+    if (!anchor) {
+      return;
+    }
+    const insertAt = timeline.tracks.findIndex((track) => track.id === trackId) + (placement === "below" ? 1 : 0);
+    setTimeline((current) => {
+      const trackCount = current.tracks.filter((track) => track.kind === anchor.kind).length + 1;
+      const nextTrack = {
+        id: `${anchor.kind[0]}${Date.now()}`,
+        name: `${anchor.kind === "video" ? "Video" : "Audio"} ${trackCount}`,
+        kind: anchor.kind,
+        index: insertAt,
+        locked: false,
+        muted: false,
+        visible: true,
+        clips: []
+      };
+      const tracks = [...current.tracks];
+      tracks.splice(insertAt, 0, nextTrack);
+      return {
+        ...current,
+        tracks: tracks.map((track, index) => ({ ...track, index }))
+      };
+    });
+    setStatusMessage(`Added ${anchor.kind} track ${placement} ${anchor.name}`, { source: "timeline" });
+  }
+
+  function deleteEmptyTrack(trackId: string) {
+    const track = timeline.tracks.find((item) => item.id === trackId);
+    if (!track) {
+      return;
+    }
+    if (track.clips.length > 0) {
+      setStatusMessage("Delete Track is only available for empty tracks", { level: "warning", source: "timeline" });
+      return;
+    }
+    setTimeline((current) => ({
+      ...current,
+      tracks: current.tracks.filter((item) => item.id !== trackId).map((item, index) => ({ ...item, index }))
+    }));
+    setSoloTrackIds((current) => current.filter((id) => id !== trackId));
+    setStatusMessage(`Deleted ${track.name}`, { level: "success", source: "timeline" });
   }
 
   async function detachClipAudio(clip: TimelineClip) {
@@ -1188,7 +1315,8 @@ export function EditTab({
       trackId: detachedClip.trackId,
       startUs: detachedClip.startUs,
       inUs: detachedClip.inUs,
-      outUs: detachedClip.outUs
+      outUs: detachedClip.outUs,
+      speedPercent: normalizeClipSpeedPercent(detachedClip.speedPercent)
     }, "Detach audio failed");
     const audioResult = await runCommand({
       type: "apply_audio_adjustment",
@@ -1287,6 +1415,12 @@ export function EditTab({
           onSelect: () => void detachClipAudio(contextClip)
         },
         {
+          id: "change-speed",
+          label: "Change Speed...",
+          icon: <SlidersHorizontal size={15} />,
+          onSelect: () => startChangingClipSpeed(contextClip)
+        },
+        {
           id: "paste-clips",
           label: "Paste at Playhead",
           icon: <ClipboardPaste size={15} />,
@@ -1317,6 +1451,63 @@ export function EditTab({
           label: "Nudge Right",
           icon: <StepForward size={15} />,
           onSelect: () => void nudgeSelectedClip(1, contextClip)
+        }
+      ];
+    }
+
+    if (contextMenu?.kind === "track" && contextTrack) {
+      const trackEmpty = contextTrack.clips.length === 0;
+      return [
+        {
+          id: "rename-track",
+          label: "Rename Track",
+          icon: <Pencil size={15} />,
+          onSelect: () => renameTrack(contextTrack.id)
+        },
+        {
+          id: "lock-track",
+          label: contextTrack.locked ? "Unlock" : "Lock",
+          icon: contextTrack.locked ? <Unlock size={15} /> : <Lock size={15} />,
+          onSelect: () => toggleTrack(contextTrack.id, "locked")
+        },
+        {
+          id: "solo-track",
+          label: soloTrackIds.includes(contextTrack.id) ? "Unsolo" : "Solo",
+          icon: <Shield size={15} />,
+          onSelect: () => toggleTrack(contextTrack.id, "solo")
+        },
+        contextTrack.kind === "audio"
+          ? {
+              id: "mute-track",
+              label: contextTrack.muted ? "Unmute" : "Mute",
+              icon: contextTrack.muted ? <VolumeX size={15} /> : <Volume2 size={15} />,
+              onSelect: () => toggleTrack(contextTrack.id, "muted")
+            }
+          : {
+              id: "hide-track",
+              label: contextTrack.visible ? "Hide" : "Show",
+              icon: contextTrack.visible ? <EyeOff size={15} /> : <Eye size={15} />,
+              onSelect: () => toggleTrack(contextTrack.id, "visible")
+            },
+        {
+          id: "add-track-above",
+          label: "Add Track Above",
+          icon: <Plus size={15} />,
+          onSelect: () => addTrackNear(contextTrack.id, "above")
+        },
+        {
+          id: "add-track-below",
+          label: "Add Track Below",
+          icon: <Plus size={15} />,
+          onSelect: () => addTrackNear(contextTrack.id, "below")
+        },
+        {
+          id: "delete-track",
+          label: "Delete Track",
+          icon: <Trash2 size={15} />,
+          disabled: !trackEmpty,
+          danger: true,
+          onSelect: () => deleteEmptyTrack(contextTrack.id)
         }
       ];
     }
@@ -1374,7 +1565,7 @@ export function EditTab({
       const elapsedMs = now - lastPlaybackTimeRef.current;
       lastPlaybackTimeRef.current = now;
       setPlayheadUs((current) => {
-        const next = current + Math.round(elapsedMs * 1000);
+        const next = current + Math.round(elapsedMs * 1000 * clamp(previewSpeedPercent / 100, 0.25, 2));
         const end = Math.max(timeline.durationUs, 1_000_000);
         if (next >= end) {
           if (loopPlayback) {
@@ -1395,7 +1586,7 @@ export function EditTab({
         playbackFrameRef.current = null;
       }
     };
-  }, [loopPlayback, playing, timeline.durationUs]);
+  }, [loopPlayback, playing, previewSpeedPercent, timeline.durationUs]);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -1663,7 +1854,27 @@ export function EditTab({
               previewScale={previewScale}
               playheadUs={playheadUs}
               playing={playing}
+              previewVolumePercent={previewVolumePercent}
+              previewSpeedPercent={previewSpeedPercent}
             />
+            <div className="preview-control-strip">
+              <Slider
+                label="Volume %"
+                value={previewVolumePercent}
+                min={0}
+                max={200}
+                step={5}
+                onChange={(event) => setPreviewVolumePercent(Number(event.target.value))}
+              />
+              <Slider
+                label="Speed %"
+                value={previewSpeedPercent}
+                min={25}
+                max={200}
+                step={5}
+                onChange={(event) => setPreviewSpeedPercent(Number(event.target.value))}
+              />
+            </div>
             <div className="transport">
               <IconButton label={playing ? "Pause" : "Play"} icon={playing ? <Pause size={18} /> : <Play size={18} />} onClick={() => setPlaying((value) => !value)} />
               <IconButton label="Step back one frame" icon={<StepBack size={17} />} onClick={() => stepPlayhead(-1)} />
@@ -1739,6 +1950,7 @@ export function EditTab({
               onMoveClip={moveClip}
               onTrimClip={trimClip}
               onOpenClipContextMenu={openClipContextMenu}
+              onOpenTrackContextMenu={openTrackContextMenu}
               onToggleTrack={toggleTrack}
               draggingMediaId={draggingMediaId}
               mediaDropTrackId={mediaDropTrackId}
@@ -1763,6 +1975,19 @@ export function EditTab({
       ) : null}
 
       {contextMenu ? <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenuItems()} onClose={() => setContextMenu(null)} /> : null}
+      <Modal title="Change Clip Speed" open={Boolean(speedDialogClip)} onClose={() => setSpeedDialogClipId("")}>
+        <div className="control-stack">
+          <label>
+            Speed %
+            <input type="number" min={25} max={400} step={5} value={speedDraft} onChange={(event) => setSpeedDraft(Number(event.target.value))} />
+          </label>
+          <div className="export-actions">
+            <Button icon={<SlidersHorizontal size={16} />} onClick={() => void applyClipSpeed()}>
+              Apply
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -1784,6 +2009,7 @@ const TimelineSurface = memo(function TimelineSurface({
   onMoveClip,
   onTrimClip,
   onOpenClipContextMenu,
+  onOpenTrackContextMenu,
   onToggleTrack,
   draggingMediaId,
   mediaDropTrackId,
@@ -1807,6 +2033,7 @@ const TimelineSurface = memo(function TimelineSurface({
   onMoveClip: (clipId: string, targetTrackId: string, startUs: number) => Promise<void>;
   onTrimClip: (clipId: string, edge: "start" | "end", deltaUs: number) => Promise<void>;
   onOpenClipContextMenu: (event: ReactMouseEvent, clip: TimelineClip) => void;
+  onOpenTrackContextMenu: (event: ReactMouseEvent, trackId: string) => void;
   onToggleTrack: (trackId: string, field: "locked" | "muted" | "visible" | "solo") => void;
   draggingMediaId: string | null;
   mediaDropTrackId: string | null;
@@ -2037,7 +2264,9 @@ const TimelineSurface = memo(function TimelineSurface({
     }
 
     if (clipInteraction.mode === "trim-start") {
-      const nextInUs = Math.max(0, clipInteraction.originalInUs + deltaUs);
+      const originalClip = timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === clipInteraction.clipId);
+      const speed = originalClip ? getClipSpeedFactor(originalClip) : 1;
+      const nextInUs = Math.max(0, clipInteraction.originalInUs + Math.round(deltaUs * speed));
       const nextStartUs = Math.max(0, clipInteraction.originalStartUs + deltaUs);
       if (clipInteraction.originalOutUs - nextInUs <= 250_000) {
         return;
@@ -2052,7 +2281,9 @@ const TimelineSurface = memo(function TimelineSurface({
       return;
     }
 
-    const nextOutUs = Math.max(clipInteraction.originalInUs + 250_000, clipInteraction.originalOutUs + deltaUs);
+    const originalClip = timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === clipInteraction.clipId);
+    const speed = originalClip ? getClipSpeedFactor(originalClip) : 1;
+    const nextOutUs = Math.max(clipInteraction.originalInUs + 250_000, clipInteraction.originalOutUs + Math.round(deltaUs * speed));
     setPreviewClip({
       clipId: clipInteraction.clipId,
       startUs: clipInteraction.originalStartUs,
@@ -2138,7 +2369,7 @@ const TimelineSurface = memo(function TimelineSurface({
             key={track.id}
             style={{ gridTemplateColumns: `${timelineHeaderWidth}px ${timelineWidth}px` }}
           >
-            <div className="track-header">
+            <div className="track-header" onContextMenu={(event) => onOpenTrackContextMenu(event, track.id)}>
               <span>{track.name}</span>
               <div>
                 <IconButton
@@ -2237,11 +2468,11 @@ const TimelineSurface = memo(function TimelineSurface({
                 }
                 const displayClip = previewClip?.clipId === clip.id ? { ...clip, ...previewClip } : clip;
                 const start = getClipVisualLeft(displayClip.startUs, zoomPxPerSecond);
-                const end = start + getClipVisualWidth(displayClip.outUs - displayClip.inUs, zoomPxPerSecond);
+                const end = start + getClipVisualWidth(getClipDisplayDurationUs(displayClip), zoomPxPerSecond);
                 return end >= visibleLaneStartPx && start <= visibleLaneEndPx;
               }).map((clip) => {
                 const displayClip = previewClip?.clipId === clip.id ? { ...clip, ...previewClip } : clip;
-                const durationUs = displayClip.outUs - displayClip.inUs;
+                const durationUs = getClipDisplayDurationUs(displayClip);
                 const start = getClipVisualLeft(displayClip.startUs, zoomPxPerSecond);
                 const width = getClipVisualWidth(durationUs, zoomPxPerSecond);
                 const mediaAsset = mediaById.get(clip.mediaId);
@@ -2289,7 +2520,7 @@ const TimelineSurface = memo(function TimelineSurface({
                         setPreviewClip(null);
                       }}
                     />
-                    {track.kind === "audio" && mediaAsset ? <TimelineClipWaveform asset={mediaAsset} /> : null}
+                    {track.kind === "audio" && mediaAsset ? <TimelineClipWaveform asset={mediaAsset} clip={displayClip} /> : null}
                     <span className="timeline-clip-label">{mediaName}</span>
                     {track.kind === "audio" ? <Volume2 size={13} /> : null}
                     <span
@@ -2324,7 +2555,9 @@ function PreviewSurface({
   previewQuality,
   previewScale,
   playheadUs,
-  playing
+  playing,
+  previewVolumePercent,
+  previewSpeedPercent
 }: {
   previewUrl?: string;
   videoAsset?: MediaAsset;
@@ -2336,6 +2569,8 @@ function PreviewSurface({
   previewScale: PreviewScaleMode;
   playheadUs: number;
   playing: boolean;
+  previewVolumePercent: number;
+  previewSpeedPercent: number;
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -2476,9 +2711,11 @@ function PreviewSurface({
       playheadUs: previewCommandPlayheadUs,
       inUs: videoClip?.inUs ?? audioClip?.inUs ?? 0,
       outUs: videoClip?.outUs ?? audioClip?.outUs ?? 0,
+      playbackRate: effectivePlaybackRate(videoClip ?? audioClip, previewSpeedPercent),
+      volume: clamp(previewVolumePercent / 100, 0, 2),
       playing: nativeMediaActive && playing
     }).then(setStats).catch(() => undefined);
-  }, [audioAsset, audioClip, previewCommandPlayheadUs, playing, previewQuality, previewScale, projectSettings.colorMode, projectSettings.fps, separateAudioPreviewActive, videoAsset, videoClip]);
+  }, [audioAsset, audioClip, previewCommandPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, previewQuality, previewScale, projectSettings.colorMode, projectSettings.fps, separateAudioPreviewActive, videoAsset, videoClip]);
 
   useEffect(() => {
     void (playing && !separateAudioPreviewActive ? playNativePreview() : pauseNativePreview()).then(setStats).catch(() => undefined);
@@ -2498,14 +2735,14 @@ function PreviewSurface({
   }, [playing, settledPlayheadUs]);
 
   useEffect(() => {
-    syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing);
-    applyMediaElementAudio(videoRef, videoAudioGraphRef, videoClip, projectSettings, mediaElementSyncPlayheadUs, playing);
-  }, [videoClip, mediaElementSyncPlayheadUs, playing, videoSrc, projectSettings, stats?.childHwnd, separateAudioPreviewActive]);
+    syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent);
+    applyMediaElementAudio(videoRef, videoAudioGraphRef, videoClip, projectSettings, mediaElementSyncPlayheadUs, playing, previewVolumePercent);
+  }, [videoClip, mediaElementSyncPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, videoSrc, projectSettings, stats?.childHwnd, separateAudioPreviewActive]);
 
   useEffect(() => {
-    syncMediaElement(audioRef, audioClip, mediaElementSyncPlayheadUs, playing);
-    applyMediaElementAudio(audioRef, audioAudioGraphRef, audioClip, projectSettings, mediaElementSyncPlayheadUs, playing);
-  }, [audioClip, mediaElementSyncPlayheadUs, playing, audioSrc, projectSettings, separateAudioPreviewActive]);
+    syncMediaElement(audioRef, audioClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent);
+    applyMediaElementAudio(audioRef, audioAudioGraphRef, audioClip, projectSettings, mediaElementSyncPlayheadUs, playing, previewVolumePercent);
+  }, [audioClip, mediaElementSyncPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, audioSrc, projectSettings, separateAudioPreviewActive]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -2533,7 +2770,7 @@ function PreviewSurface({
     <div ref={frameRef} className={frameClassName}>
       {nativePreviewActive ? <div className="native-preview-surface" style={previewScaleStyle} /> : null}
       {!nativePreviewActive && videoAsset && videoClip && videoSrc ? (
-        <video ref={videoRef} src={videoSrc} muted={false} playsInline style={visualPreviewStyle} onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing)} />
+        <video ref={videoRef} src={videoSrc} muted={false} playsInline style={visualPreviewStyle} onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent)} />
       ) : null}
       {nativePreviewActive && videoAsset && videoClip && videoSrc ? (
         <video
@@ -2545,13 +2782,13 @@ function PreviewSurface({
           aria-hidden="true"
           tabIndex={-1}
           style={hiddenAudioCarrierStyle}
-          onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing)}
+          onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent)}
         />
       ) : null}
       {!nativePreviewActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" style={visualPreviewStyle} /> : null}
       {!nativePreviewActive && audioAsset && audioClip && audioSrc ? (
         <>
-          <audio ref={audioRef} src={audioSrc} onLoadedMetadata={() => syncMediaElement(audioRef, audioClip, mediaElementSyncPlayheadUs, playing)} />
+          <audio ref={audioRef} src={audioSrc} onLoadedMetadata={() => syncMediaElement(audioRef, audioClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent)} />
           {!videoAsset ? <Music size={34} /> : null}
         </>
       ) : null}
@@ -2718,21 +2955,23 @@ function MediaThumbnail({ asset }: { asset: MediaAsset }) {
   );
 }
 
-function TimelineClipWaveform({ asset }: { asset: MediaAsset }) {
+function TimelineClipWaveform({ asset, clip }: { asset: MediaAsset; clip: TimelineClip }) {
   const [waveformSrc, setWaveformSrc] = useState("");
 
   useEffect(() => {
     let cancelled = false;
     setWaveformSrc("");
-    const cachedWaveform = mediaWaveformCache.get(asset.path);
+    const durationUs = Math.max(1, clip.outUs - clip.inUs);
+    const cacheKey = `${asset.path}:${clip.inUs}:${durationUs}`;
+    const cachedWaveform = mediaWaveformCache.get(cacheKey);
     if (cachedWaveform) {
       setWaveformSrc(cachedWaveform);
       return;
     }
 
-    void getMediaWaveformDataUrl(asset).then((url) => {
+    void getMediaWaveformDataUrl(asset, clip.inUs, durationUs).then((url) => {
       if (!cancelled && url) {
-        mediaWaveformCache.set(asset.path, url);
+        mediaWaveformCache.set(cacheKey, url);
         setWaveformSrc(url);
       }
     });
@@ -2740,7 +2979,7 @@ function TimelineClipWaveform({ asset }: { asset: MediaAsset }) {
     return () => {
       cancelled = true;
     };
-  }, [asset]);
+  }, [asset, clip.inUs, clip.outUs]);
 
   if (waveformSrc) {
     return <img className="timeline-clip-waveform" src={waveformSrc} alt="" draggable={false} />;
@@ -3120,7 +3359,7 @@ function getTimelineContentEndUs(timeline: Timeline) {
     (duration, track) =>
       Math.max(
         duration,
-        ...track.clips.map((clip) => clip.startUs + Math.max(0, clip.outUs - clip.inUs))
+        ...track.clips.map((clip) => clip.startUs + getClipDisplayDurationUs(clip))
       ),
     0
   );
@@ -3159,7 +3398,7 @@ function rippleDeleteClips(timeline: Timeline, deletedClips: TimelineClip[]) {
           .map((clip) => {
             const offsetUs = trackDeletedClips
               .filter((deletedClip) => deletedClip.startUs < clip.startUs)
-              .reduce((offset, deletedClip) => offset + (deletedClip.outUs - deletedClip.inUs), 0);
+              .reduce((offset, deletedClip) => offset + getClipDisplayDurationUs(deletedClip), 0);
             return offsetUs > 0 ? { ...clip, startUs: Math.max(0, clip.startUs - offsetUs) } : clip;
           })
       };
@@ -3171,15 +3410,35 @@ function findActiveClip(timeline: typeof starterTimeline, playheadUs: number, ki
   return timeline.tracks
     .filter((track) => track.kind === kind && !track.locked && (kind === "audio" ? !track.muted : track.visible) && (soloTrackIds.length === 0 || soloTrackIds.includes(track.id)))
     .flatMap((track) => track.clips)
-    .find((clip) => playheadUs >= clip.startUs && playheadUs < clip.startUs + (clip.outUs - clip.inUs));
+    .find((clip) => playheadUs >= clip.startUs && playheadUs < clip.startUs + getClipDisplayDurationUs(clip));
 }
 
 function getClipMediaTimeUs(clip: TimelineClip, playheadUs: number) {
-  return clamp(playheadUs - clip.startUs + clip.inUs, clip.inUs, Math.max(clip.inUs, clip.outUs - 1));
+  const sourceOffsetUs = Math.round(Math.max(0, playheadUs - clip.startUs) * getClipSpeedFactor(clip));
+  return clamp(sourceOffsetUs + clip.inUs, clip.inUs, Math.max(clip.inUs, clip.outUs - 1));
 }
 
 function isPlayheadInsideClip(clip: TimelineClip, playheadUs: number) {
-  return playheadUs > clip.startUs && playheadUs < clip.startUs + (clip.outUs - clip.inUs);
+  return playheadUs > clip.startUs && playheadUs < clip.startUs + getClipDisplayDurationUs(clip);
+}
+
+function normalizeClipSpeedPercent(value: unknown) {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? clamp(Math.round(numeric), 25, 400) : 100;
+}
+
+function getClipSpeedFactor(clip: TimelineClip) {
+  return normalizeClipSpeedPercent(clip.speedPercent) / 100;
+}
+
+function getClipDisplayDurationUs(clip: TimelineClip) {
+  const sourceDurationUs = Math.max(0, clip.outUs - clip.inUs);
+  return sourceDurationUs > 0 ? Math.max(1, Math.round(sourceDurationUs / getClipSpeedFactor(clip))) : 0;
+}
+
+function effectivePlaybackRate(clip: TimelineClip | undefined, previewSpeedPercent: number) {
+  const clipSpeed = clip ? getClipSpeedFactor(clip) : 1;
+  return clamp(clipSpeed * normalizeClipSpeedPercent(previewSpeedPercent) / 100, 0.1, 8);
 }
 
 function quantizePreviewFrameTime(timeUs: number) {
@@ -3190,7 +3449,8 @@ function syncMediaElement<T extends HTMLVideoElement | HTMLAudioElement>(
   ref: RefObject<T>,
   clip: TimelineClip | undefined,
   playheadUs: number,
-  playing: boolean
+  playing: boolean,
+  previewSpeedPercent = 100
 ) {
   const element = ref.current;
   if (!element || !clip) {
@@ -3198,7 +3458,8 @@ function syncMediaElement<T extends HTMLVideoElement | HTMLAudioElement>(
     return;
   }
 
-  const clipOffsetSeconds = Math.max(0, (playheadUs - clip.startUs + clip.inUs) / 1_000_000);
+  const clipOffsetSeconds = Math.max(0, getClipMediaTimeUs(clip, playheadUs) / 1_000_000);
+  element.playbackRate = effectivePlaybackRate(clip, previewSpeedPercent);
   if (Number.isFinite(clipOffsetSeconds) && Math.abs(element.currentTime - clipOffsetSeconds) > 0.18) {
     try {
       element.currentTime = clipOffsetSeconds;
@@ -3222,7 +3483,8 @@ function applyMediaElementAudio<T extends HTMLVideoElement | HTMLAudioElement>(
   clip: TimelineClip | undefined,
   projectSettings: ProjectSettings,
   playheadUs: number,
-  playing: boolean
+  playing: boolean,
+  previewVolumePercent = 100
 ) {
   const element = ref.current;
   if (!element) {
@@ -3235,9 +3497,9 @@ function applyMediaElementAudio<T extends HTMLVideoElement | HTMLAudioElement>(
   }
 
   const audio = normalizeAudioAdjustment(clip.audio);
-  const clipTimeUs = clamp(playheadUs - clip.startUs, 0, clip.outUs - clip.inUs);
+  const clipTimeUs = clamp(Math.round((playheadUs - clip.startUs) * getClipSpeedFactor(clip)), 0, clip.outUs - clip.inUs);
   const fadeMultiplier = audioFadeMultiplier(audio, clipTimeUs, clip.outUs - clip.inUs);
-  const linearGain = dbToLinear((projectSettings.masterGainDb ?? 0) + audio.gainDb) * fadeMultiplier;
+  const linearGain = dbToLinear((projectSettings.masterGainDb ?? 0) + audio.gainDb) * fadeMultiplier * clamp(previewVolumePercent / 100, 0, 2);
   setMediaElementGain(element, graphRef, audio.muted ? 0 : linearGain, playing);
 }
 
@@ -3327,7 +3589,7 @@ function getFallbackMediaDurationUs(asset: MediaAsset) {
 function getTrackEndUs(track: (typeof starterTimeline.tracks)[number], excludedClipId = "") {
   return track.clips
     .filter((clip) => clip.id !== excludedClipId)
-    .reduce((endUs, clip) => Math.max(endUs, clip.startUs + (clip.outUs - clip.inUs)), 0);
+    .reduce((endUs, clip) => Math.max(endUs, clip.startUs + getClipDisplayDurationUs(clip)), 0);
 }
 
 function getClipVisualLeft(startUs: number, zoomPxPerSecond: number) {
@@ -3394,7 +3656,7 @@ function resolveTrackSnapStart(
   const snapThresholdUs = Math.round((snapThresholdPx / zoomPxPerSecond) * 1_000_000);
   const candidates = targetTrack.clips
     .filter((clip) => clip.id !== excludedClipId)
-    .flatMap((clip) => [clip.startUs, clip.startUs + (clip.outUs - clip.inUs)]);
+    .flatMap((clip) => [clip.startUs, clip.startUs + getClipDisplayDurationUs(clip)]);
 
   if (candidates.length === 0) {
     const gridStartUs = snapTime(startUs);

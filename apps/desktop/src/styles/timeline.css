@@ -285,8 +285,8 @@
   z-index: 0;
   width: calc(100% - 8px);
   height: calc(100% - 10px);
-  object-fit: cover;
-  opacity: 0.38;
+  object-fit: fill;
+  opacity: 0.42;
   pointer-events: none;
 }
 

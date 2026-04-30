@@ -152,6 +152,28 @@ int runTests() {
   assert(timelineCommand.find("overlay=x=(W-w)/2+24.0000") != std::string::npos);
   assert(timelineCommand.find("gblur=sigma=1.0000") != std::string::npos);
 
+  ai_editor::ExportJob speedExportJob;
+  speedExportJob.outputPath = request.outputPath;
+  speedExportJob.width = 1920;
+  speedExportJob.height = 1080;
+  speedExportJob.fps = 30;
+  speedExportJob.durationUs = 4'000'000;
+  speedExportJob.codec = "h264_nvenc";
+  speedExportJob.container = "mp4";
+  speedExportJob.quality = "medium";
+  speedExportJob.audioEnabled = true;
+  speedExportJob.bitrateMbps = 12;
+  speedExportJob.timeline.media.push_back({"video_speed", "C:\\media\\video-speed.mp4", "video", true});
+  speedExportJob.timeline.media.push_back({"audio_speed", "C:\\media\\audio-speed.wav", "audio", true});
+  speedExportJob.timeline.clips.push_back({"video_speed", "v1", "video", 0, true, false, 0, 0, 4'000'000});
+  speedExportJob.timeline.clips.back().speedPercent = 200.0;
+  speedExportJob.timeline.clips.push_back({"audio_speed", "a1", "audio", 1, true, false, 0, 0, 2'000'000});
+  speedExportJob.timeline.clips.back().speedPercent = 50.0;
+  const auto speedCommand = ai_editor::ExportEngine::buildFfmpegCommand(speedExportJob);
+  assert(speedCommand.find("setpts=(PTS-STARTPTS)/2.0000") != std::string::npos);
+  assert(speedCommand.find("atempo=2.0000") != std::string::npos);
+  assert(speedCommand.find("atempo=0.5000") != std::string::npos);
+
   ai_editor::GpuStatus gpu;
   gpu.nvencAvailable = true;
   gpu.h264NvencAvailable = true;
@@ -241,10 +263,26 @@ int runTests() {
        }},
   });
   assert(reAddClipResult.at("ok") == true);
+  const auto reAddedClipId = reAddClipResult.at("data").at("timeline").at("tracks").at(1).at("clips").at(0).at("id").get<std::string>();
+
+  const auto speedResult = app.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 12},
+      {"method", "command.execute"},
+      {"params",
+       {
+           {"type", "apply_clip_speed"},
+           {"clipId", reAddedClipId},
+           {"speedPercent", 50},
+       }},
+  });
+  assert(speedResult.at("ok") == true);
+  assert(speedResult.at("data").at("timeline").at("tracks").at(1).at("clips").at(0).at("speedPercent") == 50.0);
 
   ai_editor::EngineApp reloadedApp;
   const auto reloadedTimeline = reloadedApp.handleRequest({{"jsonrpc", "2.0"}, {"id", 8}, {"method", "timeline.state"}});
   assert(reloadedTimeline.at("tracks").at(1).at("clips").size() == 1);
+  assert(reloadedTimeline.at("tracks").at(1).at("clips").at(0).at("speedPercent") == 50.0);
 
   const auto proposal = reloadedApp.handleRequest({
       {"jsonrpc", "2.0"},

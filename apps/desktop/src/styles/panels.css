@@ -568,6 +568,7 @@
 }
 
 .waveform-preview {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -577,6 +578,47 @@
   border: 1px solid var(--line);
   background: #171716;
   overflow: hidden;
+}
+
+.waveform-preview.seekable {
+  cursor: pointer;
+}
+
+.audio-waveform-playhead {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  width: 2px !important;
+  background: var(--accent) !important;
+  border-radius: 0 !important;
+  transform: translateX(-1px);
+}
+
+.audio-playback-controls,
+.preview-control-strip {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.audio-playback-controls {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.color-effects-workspace {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  height: 100%;
+}
+
+.color-effects-controls-dock {
+  align-self: end;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
 }
 
 .waveform-preview-large {

@@ -81,6 +81,10 @@ export function AppShell() {
   const [recentProjects, setRecentProjects] = useState<ActiveProject[]>([]);
   const [mediaAssets, setMediaAssets] = useState<MediaAsset[]>([]);
   const [timeline, setTimeline] = useState<Timeline>(starterTimeline);
+  const [playheadUs, setPlayheadUs] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [previewVolumePercent, setPreviewVolumePercent] = useState(100);
+  const [previewSpeedPercent, setPreviewSpeedPercent] = useState(100);
   const [aiProposals, setAiProposals] = useState<AiEditProposal[]>([]);
   const [projectSettings, setProjectSettings] = useState<ProjectSettings>(defaultProjectSettings);
   const [settingsProposal, setSettingsProposal] = useState<ProjectSettingsProposal | null>(null);
@@ -1070,6 +1074,14 @@ export function AppShell() {
               setTimeline(nextTimeline);
             }}
             projectSettings={projectSettings}
+            playheadUs={playheadUs}
+            setPlayheadUs={setPlayheadUs}
+            playing={playing}
+            setPlaying={setPlaying}
+            previewVolumePercent={previewVolumePercent}
+            setPreviewVolumePercent={setPreviewVolumePercent}
+            previewSpeedPercent={previewSpeedPercent}
+            setPreviewSpeedPercent={setPreviewSpeedPercent}
             onImportMedia={handleImportMedia}
             onImportMediaResult={applyImportedMedia}
             onRemoveMediaAsset={removeMediaAsset}
@@ -1088,6 +1100,12 @@ export function AppShell() {
             setTimeline={setTimeline}
             mediaAssets={mediaAssets}
             projectSettings={projectSettings}
+            playheadUs={playheadUs}
+            setPlayheadUs={setPlayheadUs}
+            playing={playing}
+            setPlaying={setPlaying}
+            previewVolumePercent={previewVolumePercent}
+            previewSpeedPercent={previewSpeedPercent}
             onProjectSettingsChange={(settings) => {
               setProjectSettings(settings);
               logStatus("Project audio settings changed", { source: "project", details: { settings } });
@@ -1096,9 +1114,9 @@ export function AppShell() {
           />
         );
       case "color":
-        return <ColorTab timeline={timeline} setTimeline={setTimeline} setStatusMessage={makeStatusLogger("timeline")} />;
+        return <ColorTab timeline={timeline} setTimeline={setTimeline} playheadUs={playheadUs} setPlayheadUs={setPlayheadUs} playing={playing} setPlaying={setPlaying} setStatusMessage={makeStatusLogger("timeline")} />;
       case "effects":
-        return <EffectsTab timeline={timeline} setTimeline={setTimeline} setStatusMessage={makeStatusLogger("timeline")} />;
+        return <EffectsTab timeline={timeline} setTimeline={setTimeline} playheadUs={playheadUs} setPlayheadUs={setPlayheadUs} playing={playing} setPlaying={setPlaying} setStatusMessage={makeStatusLogger("timeline")} />;
       case "shortcuts":
         return <ShortcutsTab shortcuts={shortcuts} onShortcutsChange={updateShortcuts} onResetShortcuts={resetShortcuts} />;
       case "plugins":
@@ -1132,7 +1150,7 @@ export function AppShell() {
       default:
         return null;
     }
-  }, [activeTab, aiProposals, engineStatus, mediaAssets, missingMediaPaths, project.path, projectSettings, recentProjects, shortcuts, timeline]);
+  }, [activeTab, aiProposals, engineStatus, mediaAssets, missingMediaPaths, playing, playheadUs, previewSpeedPercent, previewVolumePercent, project.path, projectSettings, recentProjects, shortcuts, timeline]);
 
   return (
     <main className="app-shell" aria-busy={savingProject || autosaveState === "saving"}>
