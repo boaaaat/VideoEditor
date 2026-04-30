@@ -1114,9 +1114,37 @@ export function AppShell() {
           />
         );
       case "color":
-        return <ColorTab timeline={timeline} setTimeline={setTimeline} playheadUs={playheadUs} setPlayheadUs={setPlayheadUs} playing={playing} setPlaying={setPlaying} setStatusMessage={makeStatusLogger("timeline")} />;
+        return (
+          <ColorTab
+            timeline={timeline}
+            setTimeline={setTimeline}
+            mediaAssets={mediaAssets}
+            projectSettings={projectSettings}
+            playheadUs={playheadUs}
+            setPlayheadUs={setPlayheadUs}
+            playing={playing}
+            setPlaying={setPlaying}
+            previewVolumePercent={previewVolumePercent}
+            previewSpeedPercent={previewSpeedPercent}
+            setStatusMessage={makeStatusLogger("timeline")}
+          />
+        );
       case "effects":
-        return <EffectsTab timeline={timeline} setTimeline={setTimeline} playheadUs={playheadUs} setPlayheadUs={setPlayheadUs} playing={playing} setPlaying={setPlaying} setStatusMessage={makeStatusLogger("timeline")} />;
+        return (
+          <EffectsTab
+            timeline={timeline}
+            setTimeline={setTimeline}
+            mediaAssets={mediaAssets}
+            projectSettings={projectSettings}
+            playheadUs={playheadUs}
+            setPlayheadUs={setPlayheadUs}
+            playing={playing}
+            setPlaying={setPlaying}
+            previewVolumePercent={previewVolumePercent}
+            previewSpeedPercent={previewSpeedPercent}
+            setStatusMessage={makeStatusLogger("timeline")}
+          />
+        );
       case "shortcuts":
         return <ShortcutsTab shortcuts={shortcuts} onShortcutsChange={updateShortcuts} onResetShortcuts={resetShortcuts} />;
       case "plugins":

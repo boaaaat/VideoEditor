@@ -3,6 +3,8 @@
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
+  -webkit-user-select: none;
+  user-select: none;
   contain: layout paint;
   border: 1px solid #151514;
   background: #181817;
@@ -52,6 +54,8 @@
 .timeline-surface {
   position: relative;
   min-height: 100%;
+  -webkit-user-select: none;
+  user-select: none;
   contain: layout paint;
   background:
     repeating-linear-gradient(90deg, transparent 0 71px, rgba(255, 255, 255, 0.04) 71px 72px),

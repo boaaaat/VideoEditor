@@ -569,6 +569,8 @@
 
 .waveform-preview {
   position: relative;
+  -webkit-user-select: none;
+  user-select: none;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -609,9 +611,19 @@
 
 .color-effects-workspace {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(360px, 1fr) auto;
   gap: 12px;
   height: 100%;
+}
+
+.color-effects-playback {
+  display: grid;
+  grid-template-rows: 40px minmax(0, 1fr);
+  min-height: 360px;
+}
+
+.color-effects-playback .panel-body {
+  height: auto;
 }
 
 .color-effects-controls-dock {
@@ -621,6 +633,91 @@
   gap: 12px;
 }
 
+.editor-playback-surface {
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) minmax(300px, 420px);
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+}
+
+.editor-playback-preview {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #111;
+}
+
+.editor-playback-preview video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.editor-playback-empty {
+  color: var(--muted);
+}
+
+.editor-playback-controls {
+  display: grid;
+  grid-template-rows: auto auto minmax(96px, 1fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.editor-playback-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.editor-playback-meta span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-mini-timeline {
+  position: relative;
+  min-height: 96px;
+  border: 1px solid var(--line);
+  background:
+    repeating-linear-gradient(90deg, transparent 0 49px, rgba(255, 255, 255, 0.06) 49px 50px),
+    #171716;
+  cursor: pointer;
+}
+
+.editor-mini-clip {
+  position: absolute;
+  top: 34px;
+  height: 28px;
+  min-width: 8px;
+  border: 1px solid rgba(59, 143, 221, 0.85);
+  border-radius: 5px;
+  background: linear-gradient(180deg, #3b8fdd, #2a6092);
+}
+
+.editor-mini-clip.selected {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 1px;
+}
+
+.editor-mini-playhead {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--accent);
+  transform: translateX(-1px);
+  pointer-events: none;
+}
+
 .waveform-preview-large {
   min-height: 240px;
 }
@@ -628,6 +725,7 @@
 .waveform-preview img {
   width: 100%;
   height: 100%;
+  -webkit-user-drag: none;
   object-fit: fill;
   image-rendering: auto;
 }

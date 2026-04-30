@@ -1,23 +1,41 @@
-import { Pause, Play, RotateCcw, SlidersHorizontal } from "lucide-react";
+import { RotateCcw, SlidersHorizontal } from "lucide-react";
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
-import { defaultClipEffects, defaultClipTransform, type ClipEffect, type ClipTransform, type Timeline, type TimelineClip } from "@ai-video-editor/protocol";
+import { defaultClipEffects, defaultClipTransform, type ClipEffect, type ClipTransform, type ProjectSettings, type Timeline, type TimelineClip } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Slider } from "../../components/Slider";
 import { Toggle } from "../../components/Toggle";
 import type { LogStatus } from "../../features/logging/appLog";
+import type { MediaAsset } from "../../features/media/mediaTypes";
+import { ColorEffectsPlayback } from "./ColorEffectsPlayback";
 
 interface EffectsTabProps {
   timeline: Timeline;
   setTimeline: Dispatch<SetStateAction<Timeline>>;
+  mediaAssets: MediaAsset[];
+  projectSettings: ProjectSettings;
   playheadUs: number;
   setPlayheadUs: Dispatch<SetStateAction<number>>;
   playing: boolean;
   setPlaying: Dispatch<SetStateAction<boolean>>;
+  previewVolumePercent: number;
+  previewSpeedPercent: number;
   setStatusMessage: LogStatus;
 }
 
-export function EffectsTab({ timeline, setTimeline, playheadUs, setPlayheadUs, playing, setPlaying, setStatusMessage }: EffectsTabProps) {
+export function EffectsTab({
+  timeline,
+  setTimeline,
+  mediaAssets,
+  projectSettings,
+  playheadUs,
+  setPlayheadUs,
+  playing,
+  setPlaying,
+  previewVolumePercent,
+  previewSpeedPercent,
+  setStatusMessage
+}: EffectsTabProps) {
   const videoClips = collectVideoClips(timeline);
   const [selectedClipId, setSelectedClipId] = useState("");
   const selectedClip = videoClips.find((clip) => clip.id === selectedClipId) ?? videoClips[0];
@@ -84,13 +102,19 @@ export function EffectsTab({ timeline, setTimeline, playheadUs, setPlayheadUs, p
   return (
     <div className="color-effects-workspace">
       <Panel title="Playback" className="color-effects-playback">
-        <div className="transport">
-          <Button icon={playing ? <Pause size={16} /> : <Play size={16} />} onClick={() => setPlaying((value) => !value)}>
-            {playing ? "Pause" : "Play"}
-          </Button>
-          <span className="timeline-timecode">{formatSeconds(playheadUs)}</span>
-          {selectedClip ? <Button onClick={() => setPlayheadUs(selectedClip.startUs)}>Jump to Clip</Button> : null}
-        </div>
+        <ColorEffectsPlayback
+          timeline={timeline}
+          mediaAssets={mediaAssets}
+          projectSettings={projectSettings}
+          selectedClipId={selectedClip?.id ?? ""}
+          onSelectedClipIdChange={setSelectedClipId}
+          playheadUs={playheadUs}
+          setPlayheadUs={setPlayheadUs}
+          playing={playing}
+          setPlaying={setPlaying}
+          previewVolumePercent={previewVolumePercent}
+          previewSpeedPercent={previewSpeedPercent}
+        />
       </Panel>
       <div className="color-effects-controls-dock">
       <Panel title="Clip">
