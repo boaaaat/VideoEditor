@@ -34,6 +34,7 @@ fn main() {
             commands::preview_resize,
             commands::preview_url,
             commands::append_app_log,
+            commands::delete_project_folder,
             commands::load_project_snapshot,
             commands::reveal_media_path,
             commands::save_project_snapshot,

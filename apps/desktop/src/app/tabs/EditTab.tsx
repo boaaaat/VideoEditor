@@ -2438,12 +2438,12 @@ function PreviewSurface({
   useEffect(() => {
     syncMediaElement(videoRef, videoClip, playheadUs, playing);
     applyMediaElementAudio(videoRef, videoAudioGraphRef, videoClip, projectSettings, playheadUs, playing);
-  }, [videoClip, playheadUs, playing, videoSrc, projectSettings]);
+  }, [videoClip, playheadUs, playing, videoSrc, projectSettings, stats?.childHwnd, separateAudioPreviewActive]);
 
   useEffect(() => {
     syncMediaElement(audioRef, audioClip, playheadUs, playing);
     applyMediaElementAudio(audioRef, audioAudioGraphRef, audioClip, projectSettings, playheadUs, playing);
-  }, [audioClip, playheadUs, playing, audioSrc, projectSettings]);
+  }, [audioClip, playheadUs, playing, audioSrc, projectSettings, separateAudioPreviewActive]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -2473,6 +2473,19 @@ function PreviewSurface({
       {!nativePreviewActive && videoAsset && videoClip && videoSrc ? (
         <video ref={videoRef} src={videoSrc} muted={false} playsInline style={visualPreviewStyle} onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, playheadUs, playing)} />
       ) : null}
+      {nativePreviewActive && videoAsset && videoClip && videoSrc ? (
+        <video
+          ref={videoRef}
+          src={videoSrc}
+          muted={false}
+          playsInline
+          preload="auto"
+          aria-hidden="true"
+          tabIndex={-1}
+          style={hiddenAudioCarrierStyle}
+          onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, playheadUs, playing)}
+        />
+      ) : null}
       {!nativePreviewActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" style={visualPreviewStyle} /> : null}
       {!nativePreviewActive && audioAsset && audioClip && audioSrc ? (
         <>
@@ -2501,6 +2514,14 @@ function PreviewSurface({
     </div>
   );
 }
+
+const hiddenAudioCarrierStyle: CSSProperties = {
+  position: "absolute",
+  width: 1,
+  height: 1,
+  opacity: 0,
+  pointerEvents: "none"
+};
 
 const mediaThumbnailCache = new Map<string, string>();
 const mediaWaveformCache = new Map<string, string>();

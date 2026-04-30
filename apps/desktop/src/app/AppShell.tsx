@@ -701,6 +701,29 @@ export function AppShell() {
     return (message: string, options?: LogStatusOptions) => logStatus(message, { source, ...options });
   }
 
+  function handleProjectDeleted(deletedProject: ActiveProject) {
+    if (!isSameProject(projectRef.current, deletedProject)) {
+      return;
+    }
+
+    const blankProject: ActiveProject = { name: "No Project" };
+    projectRef.current = blankProject;
+    setProject(blankProject);
+    setMediaAssets([]);
+    setTimeline(starterTimeline);
+    setAiProposals([]);
+    setProjectSettings(defaultProjectSettings);
+    setSettingsProposal(null);
+    setMissingMediaPaths([]);
+    setLastSavedAt(null);
+    setAutosaveState("idle");
+    setProjectDirty(false);
+    lastSavedStateRef.current = serializeProjectState(defaultProjectSettings, [], starterTimeline, []);
+    resetCommandHistory(blankProject, defaultProjectSettings, [], starterTimeline, []);
+    setActiveTab("home");
+    void syncEngineProjectState([], starterTimeline, [], "project deleted");
+  }
+
   async function saveProject(reason: "manual" | "autosave") {
     const activeProject = projectRef.current;
     if (!activeProject.path) {
@@ -1027,7 +1050,16 @@ export function AppShell() {
   const activeContent = useMemo(() => {
     switch (activeTab) {
       case "home":
-        return <HomeTab engineStatus={engineStatus} recentProjects={recentProjects} onProjectOpen={applyProject} setStatusMessage={makeStatusLogger("project")} />;
+        return (
+          <HomeTab
+            engineStatus={engineStatus}
+            recentProjects={recentProjects}
+            onProjectOpen={applyProject}
+            onRecentProjectsChange={setRecentProjects}
+            onProjectDeleted={handleProjectDeleted}
+            setStatusMessage={makeStatusLogger("project")}
+          />
+        );
       case "edit":
         return (
           <EditTab
@@ -1340,6 +1372,12 @@ function serializeProjectState(projectSettings: ProjectSettings, mediaAssets: Me
     timeline,
     aiProposals
   });
+}
+
+function isSameProject(left: ActiveProject, right: ActiveProject) {
+  const leftKey = (left.manifestPath ?? left.path ?? "").toLowerCase();
+  const rightKey = (right.manifestPath ?? right.path ?? "").toLowerCase();
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
 }
 
 function projectStatusLabel(hasProject: boolean, dirty: boolean, saving: boolean, autosaveState: string, lastSavedAt: string | null) {

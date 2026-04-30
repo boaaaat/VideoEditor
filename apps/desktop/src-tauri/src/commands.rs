@@ -205,6 +205,22 @@ pub fn reveal_media_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn delete_project_folder(project_path: String) -> Result<(), String> {
+    let path = PathBuf::from(project_path);
+    if !path.exists() {
+        return Ok(());
+    }
+    if !path.is_dir() {
+        return Err("project path is not a folder".to_string());
+    }
+    if !path.join("project.aivproj").is_file() {
+        return Err("refusing to delete a folder without project.aivproj".to_string());
+    }
+
+    fs::remove_dir_all(&path).map_err(|error| format!("failed to delete project folder: {error}"))
+}
+
+#[tauri::command]
 pub fn append_app_log(project_path: String, entry: Value) -> Result<(), String> {
     let timestamp = entry
         .get("timestamp")

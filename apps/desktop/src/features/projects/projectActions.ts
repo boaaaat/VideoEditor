@@ -109,6 +109,33 @@ export async function validateMediaPaths(paths: string[], projectPath?: string):
   return invoke<string[]>("validate_media_paths", { paths, projectPath });
 }
 
+export async function revealProjectInExplorer(project: ActiveProject) {
+  if (!project.path) {
+    throw new Error("Project path is missing.");
+  }
+  if (!("__TAURI_INTERNALS__" in window)) {
+    throw new Error("Reveal in Explorer is available in the desktop app.");
+  }
+
+  const { invoke } = await import("@tauri-apps/api/core");
+  await invoke("reveal_media_path", { path: project.path });
+}
+
+export async function deleteProjectFolder(project: ActiveProject) {
+  if (!project.path) {
+    throw new Error("Project path is missing.");
+  }
+
+  if ("__TAURI_INTERNALS__" in window) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("delete_project_folder", { projectPath: project.path });
+  } else {
+    localStorage.removeItem(browserSnapshotKey(project));
+  }
+
+  return removeRecentProject(project);
+}
+
 export function loadRecentProjects(): ActiveProject[] {
   try {
     const projects = JSON.parse(localStorage.getItem("ai-video-editor.recentProjects") ?? "[]") as ActiveProject[];
@@ -128,9 +155,17 @@ export function saveRecentProject(project: ActiveProject) {
   }
 
   const existing = loadRecentProjects();
-  const key = project.manifestPath ?? project.path ?? project.name;
-  const next = [project, ...existing.filter((item) => (item.manifestPath ?? item.path ?? item.name) !== key)].slice(0, 8);
+  const key = projectStorageKey(project);
+  const next = [project, ...existing.filter((item) => projectStorageKey(item) !== key)].slice(0, 8);
   localStorage.setItem("ai-video-editor.recentProjects", JSON.stringify(next));
+  return next;
+}
+
+export function removeRecentProject(project: ActiveProject) {
+  const key = projectStorageKey(project);
+  const next = loadRecentProjects().filter((item) => projectStorageKey(item) !== key);
+  localStorage.setItem("ai-video-editor.recentProjects", JSON.stringify(next));
+  localStorage.removeItem(browserSnapshotKey(project));
   return next;
 }
 
@@ -148,7 +183,11 @@ function loadBrowserProjectSnapshot(project: ActiveProject): ProjectSnapshot | n
 }
 
 function browserSnapshotKey(project: ActiveProject) {
-  return `ai-video-editor.projectSnapshot.${project.manifestPath ?? project.path ?? project.name}`;
+  return `ai-video-editor.projectSnapshot.${projectStorageKey(project)}`;
+}
+
+function projectStorageKey(project: ActiveProject) {
+  return project.manifestPath ?? project.path ?? project.name;
 }
 
 export function removePathlessProjectStorage() {
