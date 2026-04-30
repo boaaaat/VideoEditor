@@ -3,6 +3,7 @@
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
+  contain: layout paint;
   border: 1px solid #151514;
   background: #181817;
   scrollbar-color: #56574f #151514;
@@ -51,6 +52,7 @@
 .timeline-surface {
   position: relative;
   min-height: 100%;
+  contain: layout paint;
   background:
     repeating-linear-gradient(90deg, transparent 0 71px, rgba(255, 255, 255, 0.04) 71px 72px),
     #181817;
@@ -100,6 +102,7 @@
   background: var(--accent-2);
   cursor: ew-resize;
   touch-action: none;
+  will-change: transform;
 }
 
 .playhead::before {
@@ -168,6 +171,7 @@
 .track-lane {
   position: relative;
   min-height: 72px;
+  contain: layout paint;
 }
 
 .track-lane.media-drop-target {
@@ -207,6 +211,8 @@
   color: #f7f7f2;
   cursor: pointer;
   touch-action: none;
+  transform: translateZ(0);
+  will-change: transform;
 }
 
 .media-drop-preview-clip {

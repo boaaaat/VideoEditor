@@ -190,7 +190,7 @@ pub fn media_proxy_status(path: String, project_path: String, needed: bool) -> R
 
 #[tauri::command]
 pub fn reveal_media_path(path: String) -> Result<(), String> {
-    let media_path = PathBuf::from(path);
+    let media_path = PathBuf::from(normalize_media_path(&path));
     let target = if media_path.is_file() {
         media_path
     } else {
@@ -365,13 +365,13 @@ fn parent_hwnd(window: &tauri::Window) -> Result<String, String> {
 fn reveal_path(path: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let selector = if path.is_file() {
-            format!("/select,{}", path.display())
+        let mut command = Command::new("explorer.exe");
+        if path.is_file() {
+            command.arg("/select,").arg(path);
         } else {
-            path.display().to_string()
-        };
-        Command::new("explorer.exe")
-            .arg(selector)
+            command.arg(path);
+        }
+        command
             .spawn()
             .map(|_| ())
             .map_err(|error| format!("failed to reveal media path: {error}"))

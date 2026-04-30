@@ -1,4 +1,6 @@
 import {
+  memo,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -262,6 +264,10 @@ export function EditTab({
     [mediaAssets, mediaSearch, mediaTypeFilter, mediaDurationFilter, mediaResolutionFilter, mediaFpsFilter, mediaSort, missingMediaSet]
   );
   const renderedMediaAssets = useMemo(() => visibleMediaAssets.slice(0, maxRenderedMediaCards), [visibleMediaAssets]);
+  const onTimelinePlayheadChange = useCallback((nextPlayheadUs: number) => {
+    setPlaying(false);
+    setPlayheadUs(nextPlayheadUs);
+  }, []);
 
   function applyEngineTimeline(data: unknown) {
     const nextTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
@@ -1724,7 +1730,7 @@ export function EditTab({
               onSelectClip={selectClip}
               onClearSelection={clearClipSelection}
               playheadUs={playheadUs}
-              onPlayheadChange={setPlayheadUs}
+              onPlayheadChange={onTimelinePlayheadChange}
               zoomPxPerSecond={timelineZoom}
               snapping={snapping}
               onZoom={zoomTimeline}
@@ -1761,7 +1767,7 @@ export function EditTab({
   );
 }
 
-function TimelineSurface({
+const TimelineSurface = memo(function TimelineSurface({
   timeline,
   mediaAssets,
   selectedClipIds,
@@ -1810,6 +1816,8 @@ function TimelineSurface({
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const lastWheelModeRef = useRef("");
+  const pendingPlayheadRef = useRef<number | null>(null);
+  const playheadFrameRef = useRef<number | null>(null);
   const [draggingPlayhead, setDraggingPlayhead] = useState(false);
   const [clipInteraction, setClipInteraction] = useState<ClipInteraction | null>(null);
   const [previewClip, setPreviewClip] = useState<PreviewClipState | null>(null);
@@ -1821,6 +1829,14 @@ function TimelineSurface({
   const mediaById = useMemo(() => new Map(mediaAssets.map((asset) => [asset.id, asset])), [mediaAssets]);
   const visibleLaneStartPx = Math.max(0, visibleTimelineRange.left - timelineHeaderWidth);
   const visibleLaneEndPx = Math.max(0, visibleTimelineRange.right - timelineHeaderWidth);
+
+  useEffect(() => {
+    return () => {
+      if (playheadFrameRef.current !== null) {
+        cancelAnimationFrame(playheadFrameRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -1869,8 +1885,29 @@ function TimelineSurface({
     return Math.round(seconds * 1_000_000);
   }
 
-  function updatePlayheadFromPointer(clientX: number) {
-    onPlayheadChange(clientXToPlayheadUs(clientX));
+  function updatePlayheadFromPointer(clientX: number, flush = false) {
+    pendingPlayheadRef.current = clientXToPlayheadUs(clientX);
+    if (flush) {
+      if (playheadFrameRef.current !== null) {
+        cancelAnimationFrame(playheadFrameRef.current);
+        playheadFrameRef.current = null;
+      }
+      onPlayheadChange(pendingPlayheadRef.current);
+      pendingPlayheadRef.current = null;
+      return;
+    }
+
+    if (playheadFrameRef.current !== null) {
+      return;
+    }
+
+    playheadFrameRef.current = requestAnimationFrame(() => {
+      playheadFrameRef.current = null;
+      if (pendingPlayheadRef.current !== null) {
+        onPlayheadChange(pendingPlayheadRef.current);
+        pendingPlayheadRef.current = null;
+      }
+    });
   }
 
   function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1884,7 +1921,7 @@ function TimelineSurface({
     }
     event.currentTarget.setPointerCapture(event.pointerId);
     setDraggingPlayhead(true);
-    updatePlayheadFromPointer(event.clientX);
+    updatePlayheadFromPointer(event.clientX, true);
   }
 
   function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1904,7 +1941,7 @@ function TimelineSurface({
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     setDraggingPlayhead(false);
-    updatePlayheadFromPointer(event.clientX);
+    updatePlayheadFromPointer(event.clientX, true);
   }
 
   function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
@@ -2079,7 +2116,10 @@ function TimelineSurface({
           aria-valuemin={0}
           aria-valuemax={durationSeconds}
           aria-valuenow={Math.round(playheadUs / 1_000_000)}
-          style={{ left: `${playheadLeft}px` }}
+          style={{
+            left: `${timelineHeaderWidth}px`,
+            transform: `translate3d(${((playheadUs / 1_000_000) * zoomPxPerSecond).toFixed(2)}px, 0, 0)`
+          }}
         >
           <span className="playhead-handle" />
         </div>
@@ -2272,7 +2312,7 @@ function TimelineSurface({
       </div>
     </div>
   );
-}
+});
 
 function PreviewSurface({
   previewUrl,
@@ -2302,11 +2342,23 @@ function PreviewSurface({
   const audioRef = useRef<HTMLAudioElement>(null);
   const videoAudioGraphRef = useRef<MediaAudioGraph | null>(null);
   const audioAudioGraphRef = useRef<MediaAudioGraph | null>(null);
+  const playbackStartPlayheadRef = useRef(playheadUs);
+  const nativeSeekSequenceRef = useRef(0);
+  const frameRequestSequenceRef = useRef(0);
   const [videoSrc, setVideoSrc] = useState("");
   const [audioSrc, setAudioSrc] = useState("");
   const [frameSrc, setFrameSrc] = useState("");
   const [stats, setStats] = useState<PreviewState | null>(null);
   const separateAudioPreviewActive = Boolean(audioAsset && audioClip);
+  const settledPlayheadUs = useDebouncedValue(playheadUs, playing ? 120 : 45);
+  const previewCommandPlayheadUs = playing ? playbackStartPlayheadRef.current : settledPlayheadUs;
+  const mediaElementSyncPlayheadUs = playing ? settledPlayheadUs : playheadUs;
+
+  useEffect(() => {
+    if (!playing) {
+      playbackStartPlayheadRef.current = playheadUs;
+    }
+  }, [playing, playheadUs]);
 
   useEffect(() => {
     const element = frameRef.current;
@@ -2390,9 +2442,10 @@ function PreviewSurface({
     };
   }, [audioAsset]);
 
-  const previewFrameTimeUs = videoAsset && videoClip ? quantizePreviewFrameTime(getClipMediaTimeUs(videoClip, playheadUs)) : 0;
+  const previewFrameTimeUs = videoAsset && videoClip ? quantizePreviewFrameTime(getClipMediaTimeUs(videoClip, settledPlayheadUs)) : 0;
 
   useEffect(() => {
+    const sequence = ++frameRequestSequenceRef.current;
     let cancelled = false;
     if (!videoAsset || !videoClip || playing) {
       setFrameSrc("");
@@ -2400,7 +2453,7 @@ function PreviewSurface({
     }
 
     void getMediaPreviewFrameDataUrl(videoAsset, previewFrameTimeUs).then((url) => {
-      if (!cancelled && url) {
+      if (!cancelled && sequence === frameRequestSequenceRef.current && url) {
         setFrameSrc(url);
       }
     });
@@ -2420,30 +2473,39 @@ function PreviewSurface({
       scale: previewScale,
       colorMode: projectSettings.colorMode,
       fps: projectSettings.fps,
-      playheadUs,
+      playheadUs: previewCommandPlayheadUs,
       inUs: videoClip?.inUs ?? audioClip?.inUs ?? 0,
       outUs: videoClip?.outUs ?? audioClip?.outUs ?? 0,
       playing: nativeMediaActive && playing
     }).then(setStats).catch(() => undefined);
-  }, [audioAsset, audioClip, playheadUs, playing, previewQuality, previewScale, projectSettings.colorMode, projectSettings.fps, separateAudioPreviewActive, videoAsset, videoClip]);
+  }, [audioAsset, audioClip, previewCommandPlayheadUs, playing, previewQuality, previewScale, projectSettings.colorMode, projectSettings.fps, separateAudioPreviewActive, videoAsset, videoClip]);
 
   useEffect(() => {
     void (playing && !separateAudioPreviewActive ? playNativePreview() : pauseNativePreview()).then(setStats).catch(() => undefined);
   }, [playing, separateAudioPreviewActive]);
 
   useEffect(() => {
-    void seekNativePreview(playheadUs).then(setStats).catch(() => undefined);
-  }, [playheadUs]);
+    if (playing) {
+      return;
+    }
+
+    const sequence = ++nativeSeekSequenceRef.current;
+    void seekNativePreview(settledPlayheadUs).then((nextStats) => {
+      if (sequence === nativeSeekSequenceRef.current) {
+        setStats(nextStats);
+      }
+    }).catch(() => undefined);
+  }, [playing, settledPlayheadUs]);
 
   useEffect(() => {
-    syncMediaElement(videoRef, videoClip, playheadUs, playing);
-    applyMediaElementAudio(videoRef, videoAudioGraphRef, videoClip, projectSettings, playheadUs, playing);
-  }, [videoClip, playheadUs, playing, videoSrc, projectSettings, stats?.childHwnd, separateAudioPreviewActive]);
+    syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing);
+    applyMediaElementAudio(videoRef, videoAudioGraphRef, videoClip, projectSettings, mediaElementSyncPlayheadUs, playing);
+  }, [videoClip, mediaElementSyncPlayheadUs, playing, videoSrc, projectSettings, stats?.childHwnd, separateAudioPreviewActive]);
 
   useEffect(() => {
-    syncMediaElement(audioRef, audioClip, playheadUs, playing);
-    applyMediaElementAudio(audioRef, audioAudioGraphRef, audioClip, projectSettings, playheadUs, playing);
-  }, [audioClip, playheadUs, playing, audioSrc, projectSettings, separateAudioPreviewActive]);
+    syncMediaElement(audioRef, audioClip, mediaElementSyncPlayheadUs, playing);
+    applyMediaElementAudio(audioRef, audioAudioGraphRef, audioClip, projectSettings, mediaElementSyncPlayheadUs, playing);
+  }, [audioClip, mediaElementSyncPlayheadUs, playing, audioSrc, projectSettings, separateAudioPreviewActive]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -2471,7 +2533,7 @@ function PreviewSurface({
     <div ref={frameRef} className={frameClassName}>
       {nativePreviewActive ? <div className="native-preview-surface" style={previewScaleStyle} /> : null}
       {!nativePreviewActive && videoAsset && videoClip && videoSrc ? (
-        <video ref={videoRef} src={videoSrc} muted={false} playsInline style={visualPreviewStyle} onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, playheadUs, playing)} />
+        <video ref={videoRef} src={videoSrc} muted={false} playsInline style={visualPreviewStyle} onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing)} />
       ) : null}
       {nativePreviewActive && videoAsset && videoClip && videoSrc ? (
         <video
@@ -2483,13 +2545,13 @@ function PreviewSurface({
           aria-hidden="true"
           tabIndex={-1}
           style={hiddenAudioCarrierStyle}
-          onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, playheadUs, playing)}
+          onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing)}
         />
       ) : null}
       {!nativePreviewActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" style={visualPreviewStyle} /> : null}
       {!nativePreviewActive && audioAsset && audioClip && audioSrc ? (
         <>
-          <audio ref={audioRef} src={audioSrc} onLoadedMetadata={() => syncMediaElement(audioRef, audioClip, playheadUs, playing)} />
+          <audio ref={audioRef} src={audioSrc} onLoadedMetadata={() => syncMediaElement(audioRef, audioClip, mediaElementSyncPlayheadUs, playing)} />
           {!videoAsset ? <Music size={34} /> : null}
         </>
       ) : null}
@@ -2522,6 +2584,17 @@ const hiddenAudioCarrierStyle: CSSProperties = {
   opacity: 0,
   pointerEvents: "none"
 };
+
+function useDebouncedValue(value: number, delayMs: number) {
+  const [debouncedValue, setDebouncedValue] = useState(value);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedValue(value), delayMs);
+    return () => window.clearTimeout(timeout);
+  }, [delayMs, value]);
+
+  return debouncedValue;
+}
 
 const mediaThumbnailCache = new Map<string, string>();
 const mediaWaveformCache = new Map<string, string>();
