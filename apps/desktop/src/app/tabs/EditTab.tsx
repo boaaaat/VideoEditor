@@ -1857,24 +1857,6 @@ export function EditTab({
               previewVolumePercent={previewVolumePercent}
               previewSpeedPercent={previewSpeedPercent}
             />
-            <div className="preview-control-strip">
-              <Slider
-                label="Volume %"
-                value={previewVolumePercent}
-                min={0}
-                max={200}
-                step={5}
-                onChange={(event) => setPreviewVolumePercent(Number(event.target.value))}
-              />
-              <Slider
-                label="Speed %"
-                value={previewSpeedPercent}
-                min={25}
-                max={200}
-                step={5}
-                onChange={(event) => setPreviewSpeedPercent(Number(event.target.value))}
-              />
-            </div>
             <div className="transport">
               <IconButton label={playing ? "Pause" : "Play"} icon={playing ? <Pause size={18} /> : <Play size={18} />} onClick={() => setPlaying((value) => !value)} />
               <IconButton label="Step back one frame" icon={<StepBack size={17} />} onClick={() => stepPlayhead(-1)} />
@@ -1891,7 +1873,27 @@ export function EditTab({
               <Button icon={<Trash2 size={16} />} variant="danger" onClick={() => void rippleDelete()}>
                 Ripple Delete
               </Button>
-              <Toggle label="Snapping" checked={snapping} onChange={(event) => setSnapping(event.target.checked)} />
+              <div className="transport-right-controls">
+                <Toggle label="Snapping" checked={snapping} onChange={(event) => setSnapping(event.target.checked)} />
+                <div className="preview-control-strip">
+                  <Slider
+                    label="Volume %"
+                    value={previewVolumePercent}
+                    min={0}
+                    max={200}
+                    step={5}
+                    onChange={(event) => setPreviewVolumePercent(Number(event.target.value))}
+                  />
+                  <Slider
+                    label="Speed %"
+                    value={previewSpeedPercent}
+                    min={25}
+                    max={200}
+                    step={5}
+                    onChange={(event) => setPreviewSpeedPercent(Number(event.target.value))}
+                  />
+                </div>
+              </div>
             </div>
           </div>
         </Panel>

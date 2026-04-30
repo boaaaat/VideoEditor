@@ -180,7 +180,7 @@
 
 .preview-and-timeline {
   display: grid;
-  grid-template-rows: minmax(240px, 42%) minmax(0, 1fr);
+  grid-template-rows: minmax(300px, 52%) minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   gap: 1px;

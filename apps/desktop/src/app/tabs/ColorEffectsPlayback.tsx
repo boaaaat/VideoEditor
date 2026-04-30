@@ -229,9 +229,11 @@ function getClipVisualStyle(clip: TimelineClip) {
   const transform = { ...defaultClipTransform, ...clip.transform };
   const style: CSSProperties = {
     filter: buildCssFilter(clip),
-    transform: `translate(${transform.positionX}px, ${transform.positionY}px) scale(${transform.scale}) rotate(${transform.rotation}deg)`,
-    opacity: clamp(transform.opacity, 0, 1)
+    opacity: transform.enabled ? clamp(transform.opacity, 0, 1) : 1
   };
+  if (transform.enabled) {
+    style.transform = `translate(${transform.positionX}px, ${transform.positionY}px) scale(${transform.scale}) rotate(${transform.rotation}deg)`;
+  }
   return style;
 }
 

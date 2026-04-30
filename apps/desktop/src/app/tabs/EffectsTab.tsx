@@ -147,7 +147,7 @@ export function EffectsTab({
           <Slider label="Scale" value={Math.round(transform.scale * 100)} min={10} max={400} step={1} onChange={(event) => updateSelectedClipTransform({ scale: Number(event.target.value) / 100 }, "Clip scale changed")} />
           <Slider label="Position X" value={Math.round(transform.positionX)} min={-2000} max={2000} step={1} onChange={(event) => updateSelectedClipTransform({ positionX: Number(event.target.value) }, "Clip X position changed")} />
           <Slider label="Position Y" value={Math.round(transform.positionY)} min={-2000} max={2000} step={1} onChange={(event) => updateSelectedClipTransform({ positionY: Number(event.target.value) }, "Clip Y position changed")} />
-          <Slider label="Rotation" value={Math.round(transform.rotation)} min={-180} max={180} step={1} onChange={(event) => updateSelectedClipTransform({ rotation: Number(event.target.value) }, "Clip rotation changed")} />
+          <Slider label="Rotation" value={Number(transform.rotation.toFixed(1))} min={-180} max={180} step={0.1} onChange={(event) => updateSelectedClipTransform({ rotation: Number(event.target.value) }, "Clip rotation changed")} />
           <Slider label="Opacity" value={Math.round(transform.opacity * 100)} min={0} max={100} step={1} onChange={(event) => updateSelectedClipTransform({ opacity: Number(event.target.value) / 100 }, "Clip opacity changed")} />
         </div>
       </Panel>
