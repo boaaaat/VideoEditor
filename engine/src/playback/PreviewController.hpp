@@ -388,6 +388,7 @@ class PreviewController {
   std::int64_t renderedFrames_ = 0;
   std::int64_t lastDecodedPlayheadUs_ = -1;
   std::int64_t playbackStartUs_ = 0;
+  std::chrono::steady_clock::time_point statsStartedAt_ = std::chrono::steady_clock::now();
   std::chrono::steady_clock::time_point playbackStartedAt_ = std::chrono::steady_clock::now();
 
 #ifdef _WIN32

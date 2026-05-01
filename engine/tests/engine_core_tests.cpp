@@ -396,44 +396,52 @@ int runTests() {
 
   const auto projectRoot = std::filesystem::absolute("engine-project-db-test");
   std::filesystem::remove_all(projectRoot);
-  const auto createdProject = reloadedApp.handleRequest({
-      {"jsonrpc", "2.0"},
-      {"id", 16},
-      {"method", "project.create"},
-      {"params", {{"name", "Project DB Test"}, {"path", projectRoot.string()}}},
-  });
-  assert(createdProject.at("projectSettings").at("width") == 1920);
+  std::size_t createdProjectTrackCount = 0;
 
-  auto projectSettings = createdProject.at("projectSettings");
-  projectSettings["width"] = 1280;
-  projectSettings["height"] = 720;
-  const auto savedProject = reloadedApp.handleRequest({
-      {"jsonrpc", "2.0"},
-      {"id", 17},
-      {"method", "project.save_state"},
-      {"params",
-       {
-           {"version", 1},
-           {"savedAt", "2026-01-01T00:00:00.000Z"},
-           {"project", createdProject.at("project")},
-           {"projectSettings", projectSettings},
-           {"mediaAssets", nlohmann::json::array()},
-           {"timeline", createdProject.at("timeline")},
-           {"aiProposals", nlohmann::json::array()},
-       }},
-  });
-  assert(savedProject.at("projectSettings").at("width") == 1280);
+  {
+    ai_editor::EngineApp projectApp;
+    const auto createdProject = projectApp.handleRequest({
+        {"jsonrpc", "2.0"},
+        {"id", 16},
+        {"method", "project.create"},
+        {"params", {{"name", "Project DB Test"}, {"path", projectRoot.string()}}},
+    });
+    assert(createdProject.at("projectSettings").at("width") == 1920);
+    createdProjectTrackCount = createdProject.at("timeline").at("tracks").size();
 
-  ai_editor::EngineApp projectReloadedApp;
-  const auto reopenedProject = projectReloadedApp.handleRequest({
-      {"jsonrpc", "2.0"},
-      {"id", 18},
-      {"method", "project.open"},
-      {"params", {{"name", "Project DB Test"}, {"path", projectRoot.string()}}},
-  });
-  assert(reopenedProject.at("projectSettings").at("width") == 1280);
-  assert(reopenedProject.at("projectSettings").at("height") == 720);
-  assert(reopenedProject.at("timeline").at("tracks").size() == createdProject.at("timeline").at("tracks").size());
+    auto projectSettings = createdProject.at("projectSettings");
+    projectSettings["width"] = 1280;
+    projectSettings["height"] = 720;
+    const auto savedProject = projectApp.handleRequest({
+        {"jsonrpc", "2.0"},
+        {"id", 17},
+        {"method", "project.save_state"},
+        {"params",
+         {
+             {"version", 1},
+             {"savedAt", "2026-01-01T00:00:00.000Z"},
+             {"project", createdProject.at("project")},
+             {"projectSettings", projectSettings},
+             {"mediaAssets", nlohmann::json::array()},
+             {"timeline", createdProject.at("timeline")},
+             {"aiProposals", nlohmann::json::array()},
+         }},
+    });
+    assert(savedProject.at("projectSettings").at("width") == 1280);
+  }
+
+  {
+    ai_editor::EngineApp projectReloadedApp;
+    const auto reopenedProject = projectReloadedApp.handleRequest({
+        {"jsonrpc", "2.0"},
+        {"id", 18},
+        {"method", "project.open"},
+        {"params", {{"name", "Project DB Test"}, {"path", projectRoot.string()}}},
+    });
+    assert(reopenedProject.at("projectSettings").at("width") == 1280);
+    assert(reopenedProject.at("projectSettings").at("height") == 720);
+    assert(reopenedProject.at("timeline").at("tracks").size() == createdProjectTrackCount);
+  }
   std::filesystem::remove_all(projectRoot);
 
   std::cout << "engine core tests passed\n";
