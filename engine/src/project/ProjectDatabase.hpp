@@ -82,6 +82,13 @@ class ProjectDatabase {
           settings_json TEXT NOT NULL DEFAULT '{}'
         );
       )sql");
+      exec(db, R"sql(
+        CREATE TABLE IF NOT EXISTS app_state (
+          key TEXT PRIMARY KEY,
+          value_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      )sql");
     } catch (...) {
       sqlite3_close(db);
       throw;

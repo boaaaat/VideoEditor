@@ -80,8 +80,7 @@ export async function saveProjectSnapshot(project: ActiveProject, snapshot: Proj
     return;
   }
 
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("save_project_snapshot", { projectPath: project.path, snapshot });
+  await engineRpc<ProjectSnapshot>("project.save_state", snapshot);
 }
 
 export async function loadProjectSnapshot(project: ActiveProject): Promise<ProjectSnapshot | null> {
@@ -93,11 +92,32 @@ export async function loadProjectSnapshot(project: ActiveProject): Promise<Proje
   if (!("__TAURI_INTERNALS__" in window)) {
     snapshot = loadBrowserProjectSnapshot(project);
   } else {
-    const { invoke } = await import("@tauri-apps/api/core");
-    snapshot = await invoke<ProjectSnapshot | null>("load_project_snapshot", { projectPath: project.path });
+    snapshot = await engineRpc<ProjectSnapshot>("project.open", project);
+    const normalizedSnapshot = normalizeSnapshotTimeline(normalizeSnapshotMediaPaths(snapshot, project.path));
+    if (isEmptyProjectSnapshot(normalizedSnapshot)) {
+      const legacySnapshot = await loadLegacyCacheSnapshot(project);
+      if (legacySnapshot && !isEmptyProjectSnapshot(legacySnapshot)) {
+        await saveProjectSnapshot(project, legacySnapshot);
+        return normalizeSnapshotTimeline(normalizeSnapshotMediaPaths(legacySnapshot, project.path));
+      }
+    }
+    return normalizedSnapshot;
   }
 
   return snapshot ? normalizeSnapshotTimeline(normalizeSnapshotMediaPaths(snapshot, project.path)) : null;
+}
+
+async function loadLegacyCacheSnapshot(project: ActiveProject): Promise<ProjectSnapshot | null> {
+  if (!project.path || !("__TAURI_INTERNALS__" in window)) {
+    return null;
+  }
+
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return await invoke<ProjectSnapshot | null>("load_project_snapshot", { projectPath: project.path });
+  } catch {
+    return null;
+  }
 }
 
 export async function validateMediaPaths(paths: string[], projectPath?: string): Promise<string[]> {
@@ -243,6 +263,11 @@ function normalizeSnapshotTimeline(snapshot: ProjectSnapshot): ProjectSnapshot {
       }))
     }
   };
+}
+
+function isEmptyProjectSnapshot(snapshot: ProjectSnapshot) {
+  const clipCount = snapshot.timeline?.tracks?.reduce((count, track) => count + track.clips.length, 0) ?? 0;
+  return (snapshot.mediaAssets?.length ?? 0) === 0 && clipCount === 0 && (snapshot.aiProposals?.length ?? 0) === 0;
 }
 
 function normalizeSpeedPercent(value: unknown) {

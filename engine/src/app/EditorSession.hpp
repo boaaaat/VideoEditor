@@ -1,5 +1,6 @@
 #pragma once
 
+#include "commands/CommandHistory.hpp"
 #include "media/FfprobeService.hpp"
 #include "timeline/TimelineService.hpp"
 
@@ -66,22 +67,10 @@ struct AiEditProposal {
 
 class EditorSession {
  public:
-  EditorSession() : databasePath_(resolveDatabasePath()) {
-    std::filesystem::create_directories(databasePath_.parent_path());
-    if (sqlite3_open(databasePath_.string().c_str(), &db_) != SQLITE_OK) {
-      const std::string message = db_ ? sqlite3_errmsg(db_) : "unknown sqlite error";
-      sqlite3_close(db_);
-      db_ = nullptr;
-      throw std::runtime_error("failed to open editor session database: " + message);
-    }
-    initialize();
-    load();
-  }
+  EditorSession() { openDatabase(resolveDatabasePath()); }
 
   ~EditorSession() {
-    if (db_) {
-      sqlite3_close(db_);
-    }
+    closeDatabase();
   }
 
   EditorSession(const EditorSession&) = delete;
@@ -93,6 +82,44 @@ class EditorSession {
         {"mediaCount", media_.size()},
         {"proposalCount", proposals_.size()},
     };
+  }
+
+  void openDatabase(const std::filesystem::path& databasePath) {
+    closeDatabase();
+    databasePath_ = databasePath;
+    media_.clear();
+    timeline_ = Timeline{};
+    proposals_.clear();
+    history_.clear();
+    projectSettings_ = defaultProjectSettingsJson();
+    activeProject_ = nlohmann::json::object();
+    savedAt_ = nowStamp();
+
+    std::filesystem::create_directories(databasePath_.parent_path());
+    if (sqlite3_open(databasePath_.string().c_str(), &db_) != SQLITE_OK) {
+      const std::string message = db_ ? sqlite3_errmsg(db_) : "unknown sqlite error";
+      sqlite3_close(db_);
+      db_ = nullptr;
+      throw std::runtime_error("failed to open editor session database: " + message);
+    }
+    initialize();
+    load();
+  }
+
+  void setActiveProject(nlohmann::json project) {
+    if (!activeProject_.is_object()) {
+      activeProject_ = nlohmann::json::object();
+    }
+    for (auto& [key, value] : project.items()) {
+      if (value.is_string() && value.get<std::string>().empty() && activeProject_.contains(key)) {
+        continue;
+      }
+      activeProject_[key] = value;
+    }
+  }
+
+  void saveProjectMetadata() {
+    saveAppState();
   }
 
   [[nodiscard]] nlohmann::json timelineJson() const {
@@ -121,10 +148,34 @@ class EditorSession {
     return {{"proposals", rows}};
   }
 
-  void replaceState(const nlohmann::json& state) {
+  [[nodiscard]] nlohmann::json projectStateJson() const {
+    return {
+        {"version", 1},
+        {"savedAt", savedAt_},
+        {"project", activeProject_},
+        {"projectSettings", projectSettings_},
+        {"mediaAssets", mediaRowsJson()},
+        {"timeline", timelineJson()},
+        {"aiProposals", proposalRowsJson()},
+    };
+  }
+
+  void replaceState(const nlohmann::json& state, bool resetHistory = true) {
     media_.clear();
     timeline_ = Timeline{};
     proposals_.clear();
+    if (resetHistory) {
+      history_.clear();
+    }
+    savedAt_ = state.value("savedAt", nowStamp());
+
+    if (state.contains("project") && state.at("project").is_object()) {
+      activeProject_ = state.at("project");
+    }
+    if (state.contains("projectSettings") && state.at("projectSettings").is_object()) {
+      projectSettings_ = defaultProjectSettingsJson();
+      projectSettings_.update(state.at("projectSettings"));
+    }
 
     if (state.contains("mediaAssets") && state.at("mediaAssets").is_array()) {
       for (const auto& item : state.at("mediaAssets")) {
@@ -155,9 +206,11 @@ class EditorSession {
     saveMedia();
     saveTimeline();
     saveProposals();
+    saveAppState();
   }
 
   nlohmann::json importMedia(const nlohmann::json& command, const FfprobeService& ffprobeService) {
+    const auto beforeState = projectStateJson();
     if (!command.contains("paths") || !command.at("paths").is_array()) {
       throw std::runtime_error("import_media requires paths");
     }
@@ -188,10 +241,13 @@ class EditorSession {
     }
 
     saveMedia();
-    return commandResult("import_media", {{"media", imported}, {"mediaIndex", mediaIndexJson()}, {"timeline", timelineJson()}});
+    auto result = commandResult("import_media", {{"media", imported}, {"mediaIndex", mediaIndexJson()}, {"timeline", timelineJson()}});
+    recordCommand(command, beforeState, result);
+    return result;
   }
 
   nlohmann::json removeMedia(const nlohmann::json& command) {
+    const auto beforeState = projectStateJson();
     const auto mediaId = command.value("mediaId", std::string{});
     if (mediaId.empty()) {
       throw std::runtime_error("remove_media requires mediaId");
@@ -217,10 +273,13 @@ class EditorSession {
     recalculateTimelineDuration();
     saveMedia();
     saveTimeline();
-    return commandResult("remove_media", {{"mediaIndex", mediaIndexJson()}, {"timeline", timelineJson()}});
+    auto result = commandResult("remove_media", {{"mediaIndex", mediaIndexJson()}, {"timeline", timelineJson()}});
+    recordCommand(command, beforeState, result);
+    return result;
   }
 
   nlohmann::json executeCommand(const nlohmann::json& command) {
+    const auto beforeState = projectStateJson();
     const auto type = command.value("type", std::string{});
     if (type == "add_track") {
       addTrack(command);
@@ -254,7 +313,33 @@ class EditorSession {
 
     recalculateTimelineDuration();
     saveTimeline();
-    return commandResult(type, {{"timeline", timelineJson()}});
+    auto result = commandResult(type, {{"timeline", timelineJson()}});
+    recordCommand(command, beforeState, result);
+    return result;
+  }
+
+  nlohmann::json undoCommand() {
+    if (!history_.canUndo()) {
+      return commandHistoryResult(false, "Nothing to undo");
+    }
+
+    const auto entry = history_.undo();
+    replaceState(entry.beforeState, false);
+    return commandHistoryResult(true, "", entry.id, entry.type);
+  }
+
+  nlohmann::json redoCommand() {
+    if (!history_.canRedo()) {
+      return commandHistoryResult(false, "Nothing to redo");
+    }
+
+    const auto entry = history_.redo();
+    replaceState(entry.afterState, false);
+    return commandHistoryResult(true, "", entry.id, entry.type);
+  }
+
+  [[nodiscard]] nlohmann::json commandHistoryJson() const {
+    return history_.statusJson();
   }
 
   nlohmann::json generateProposal(const nlohmann::json& params) {
@@ -521,6 +606,13 @@ class EditorSession {
         created_at TEXT NOT NULL
       );
     )sql");
+    exec(R"sql(
+      CREATE TABLE IF NOT EXISTS app_state (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    )sql");
   }
 
   void load() {
@@ -528,11 +620,19 @@ class EditorSession {
     loadTracks();
     loadClips();
     loadProposals();
+    loadAppState();
     if (timeline_.tracks.empty()) {
       timeline_.tracks = defaultTracks();
       saveTimeline();
     }
     recalculateTimelineDuration();
+  }
+
+  void closeDatabase() {
+    if (db_) {
+      sqlite3_close(db_);
+      db_ = nullptr;
+    }
   }
 
   void loadMedia() {
@@ -623,6 +723,24 @@ class EditorSession {
     sqlite3_finalize(statement);
   }
 
+  void loadAppState() {
+    sqlite3_stmt* statement = nullptr;
+    prepare("SELECT key,value_json FROM app_state;", &statement);
+    while (sqlite3_step(statement) == SQLITE_ROW) {
+      const auto key = columnText(statement, 0);
+      const auto value = parseJson(columnText(statement, 1), nlohmann::json::object());
+      if (key == "project_settings" && value.is_object()) {
+        projectSettings_ = defaultProjectSettingsJson();
+        projectSettings_.update(value);
+      } else if (key == "project" && value.is_object()) {
+        activeProject_ = value;
+      } else if (key == "saved_at" && value.is_string()) {
+        savedAt_ = value.get<std::string>();
+      }
+    }
+    sqlite3_finalize(statement);
+  }
+
   void saveMedia() {
     exec("DELETE FROM media_index;");
     for (const auto& media : media_) {
@@ -687,6 +805,21 @@ class EditorSession {
       bindText(statement, 6, proposal.createdAt);
       stepDone(statement);
     }
+  }
+
+  void saveAppState() {
+    upsertAppState("project_settings", projectSettings_);
+    upsertAppState("project", activeProject_);
+    upsertAppState("saved_at", savedAt_);
+  }
+
+  void upsertAppState(const std::string& key, const nlohmann::json& value) {
+    sqlite3_stmt* statement = nullptr;
+    prepare("INSERT INTO app_state(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at;", &statement);
+    bindText(statement, 1, key);
+    bindText(statement, 2, value.dump());
+    bindText(statement, 3, nowStamp());
+    stepDone(statement);
   }
 
   void addTrack(const nlohmann::json& command) {
@@ -902,6 +1035,22 @@ class EditorSession {
     return rows;
   }
 
+  [[nodiscard]] nlohmann::json mediaRowsJson() const {
+    auto rows = nlohmann::json::array();
+    for (const auto& media : media_) {
+      rows.push_back(media.toJson());
+    }
+    return rows;
+  }
+
+  [[nodiscard]] nlohmann::json proposalRowsJson() const {
+    auto rows = nlohmann::json::array();
+    for (const auto& proposal : proposals_) {
+      rows.push_back(proposal.toJson());
+    }
+    return rows;
+  }
+
   [[nodiscard]] static std::vector<Track> defaultTracks() {
     return {
         {"v2", "Video 2", TrackKind::Video, 0, false, false, true, {}},
@@ -915,7 +1064,44 @@ class EditorSession {
         {"ok", true},
         {"commandId", type + "_" + stableHash(idSeed())},
         {"data", data},
+        {"undoCount", history_.undoCount()},
+        {"redoCount", history_.redoCount()},
     };
+  }
+
+  void recordCommand(const nlohmann::json& command, const nlohmann::json& beforeState, nlohmann::json& result) {
+    const auto afterState = projectStateJson();
+    if (beforeState.dump() == afterState.dump()) {
+      result["undoCount"] = history_.undoCount();
+      result["redoCount"] = history_.redoCount();
+      return;
+    }
+
+    const auto type = command.value("type", std::string{"command"});
+    const auto commandId = type + "_" + stableHash(idSeed() + beforeState.dump() + afterState.dump());
+    history_.push({commandId, type, command, beforeState, afterState});
+    result["commandId"] = commandId;
+    result["undoCount"] = history_.undoCount();
+    result["redoCount"] = history_.redoCount();
+  }
+
+  [[nodiscard]] nlohmann::json commandHistoryResult(bool ok, const std::string& error = "", const std::string& commandId = "", const std::string& commandType = "") const {
+    auto result = nlohmann::json{
+        {"ok", ok},
+        {"data", projectStateJson()},
+        {"undoCount", history_.undoCount()},
+        {"redoCount", history_.redoCount()},
+    };
+    if (!commandId.empty()) {
+      result["commandId"] = commandId;
+    }
+    if (!commandType.empty()) {
+      result["commandType"] = commandType;
+    }
+    if (!error.empty()) {
+      result["error"] = error;
+    }
+    return result;
   }
 
   void recalculateTimelineDuration() {
@@ -1125,6 +1311,23 @@ class EditorSession {
     return nlohmann::json::array();
   }
 
+  static nlohmann::json defaultProjectSettingsJson() {
+    return {
+        {"resolution", "1080p"},
+        {"width", 1920},
+        {"height", 1080},
+        {"fps", 30},
+        {"colorMode", "SDR"},
+        {"bitrateMbps", 16},
+        {"defaultCodec", "h264_nvenc"},
+        {"defaultContainer", "mp4"},
+        {"audioEnabled", true},
+        {"masterGainDb", 0},
+        {"normalizeAudio", false},
+        {"cleanupAudio", false},
+    };
+  }
+
   static nlohmann::json probeOrFallback(const std::string& path, const std::string& kind, const FfprobeService& ffprobeService) {
     try {
       return ffprobeService.probe(path).toJson();
@@ -1301,6 +1504,10 @@ class EditorSession {
   Timeline timeline_;
   std::vector<IndexedMedia> media_;
   std::vector<AiEditProposal> proposals_;
+  CommandHistory history_;
+  nlohmann::json projectSettings_ = nlohmann::json::object();
+  nlohmann::json activeProject_ = nlohmann::json::object();
+  std::string savedAt_;
 };
 
 }  // namespace ai_editor

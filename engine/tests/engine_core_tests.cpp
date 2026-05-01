@@ -333,6 +333,79 @@ int runTests() {
   assert(resetResult.at("timeline").at("tracks").at(1).at("clips").empty());
   assert(resetResult.at("proposals").at("proposals").empty());
 
+  const auto addTrackResult = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 13},
+      {"method", "command.execute"},
+      {"params", {{"type", "add_track"}, {"kind", "video"}, {"trackId", "v3"}, {"name", "Video 3"}}},
+  });
+  assert(addTrackResult.at("undoCount") == 1);
+  assert(addTrackResult.at("redoCount") == 0);
+
+  const auto undoResult = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 14},
+      {"method", "command.undo"},
+      {"params", nlohmann::json::object()},
+  });
+  assert(undoResult.at("ok") == true);
+  assert(undoResult.at("undoCount") == 0);
+  assert(undoResult.at("redoCount") == 1);
+  assert(undoResult.at("data").at("timeline").at("tracks").size() == resetResult.at("timeline").at("tracks").size());
+
+  const auto redoResult = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 15},
+      {"method", "command.redo"},
+      {"params", nlohmann::json::object()},
+  });
+  assert(redoResult.at("ok") == true);
+  assert(redoResult.at("undoCount") == 1);
+  assert(redoResult.at("redoCount") == 0);
+  assert(redoResult.at("data").at("timeline").at("tracks").size() == resetResult.at("timeline").at("tracks").size() + 1);
+
+  const auto projectRoot = std::filesystem::absolute("engine-project-db-test");
+  std::filesystem::remove_all(projectRoot);
+  const auto createdProject = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 16},
+      {"method", "project.create"},
+      {"params", {{"name", "Project DB Test"}, {"path", projectRoot.string()}}},
+  });
+  assert(createdProject.at("projectSettings").at("width") == 1920);
+
+  auto projectSettings = createdProject.at("projectSettings");
+  projectSettings["width"] = 1280;
+  projectSettings["height"] = 720;
+  const auto savedProject = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 17},
+      {"method", "project.save_state"},
+      {"params",
+       {
+           {"version", 1},
+           {"savedAt", "2026-01-01T00:00:00.000Z"},
+           {"project", createdProject.at("project")},
+           {"projectSettings", projectSettings},
+           {"mediaAssets", nlohmann::json::array()},
+           {"timeline", createdProject.at("timeline")},
+           {"aiProposals", nlohmann::json::array()},
+       }},
+  });
+  assert(savedProject.at("projectSettings").at("width") == 1280);
+
+  ai_editor::EngineApp projectReloadedApp;
+  const auto reopenedProject = projectReloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 18},
+      {"method", "project.open"},
+      {"params", {{"name", "Project DB Test"}, {"path", projectRoot.string()}}},
+  });
+  assert(reopenedProject.at("projectSettings").at("width") == 1280);
+  assert(reopenedProject.at("projectSettings").at("height") == 720);
+  assert(reopenedProject.at("timeline").at("tracks").size() == createdProject.at("timeline").at("tracks").size());
+  std::filesystem::remove_all(projectRoot);
+
   std::cout << "engine core tests passed\n";
   return 0;
 }

@@ -174,6 +174,9 @@ export interface CommandEnvelope<T extends EditorCommand = EditorCommand> {
 export interface CommandResult {
   ok: boolean;
   commandId?: string;
+  commandType?: CommandType;
   error?: string;
   data?: unknown;
+  undoCount?: number;
+  redoCount?: number;
 }

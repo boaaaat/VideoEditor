@@ -1,5 +1,6 @@
 #include "app/EngineApp.hpp"
 
+#include <filesystem>
 #include <stdexcept>
 
 namespace ai_editor {
@@ -24,8 +25,32 @@ nlohmann::json EngineApp::handleRequest(const nlohmann::json& request) {
     return executeCommand(params);
   }
 
+  if (method == "command.undo") {
+    return undoCommand();
+  }
+
+  if (method == "command.redo") {
+    return redoCommand();
+  }
+
+  if (method == "command.history") {
+    return session_.commandHistoryJson();
+  }
+
   if (method == "project.create") {
     return createProject(params);
+  }
+
+  if (method == "project.open") {
+    return openProject(params);
+  }
+
+  if (method == "project.save_state") {
+    return saveProjectState(params);
+  }
+
+  if (method == "project.state") {
+    return session_.projectStateJson();
   }
 
   if (method == "project.reset") {
@@ -121,9 +146,14 @@ nlohmann::json EngineApp::status() const {
 
 nlohmann::json EngineApp::executeCommand(const nlohmann::json& params) {
   if (params.value("type", std::string{}) == "export_timeline") {
-    auto result = commandRegistry_.execute(params);
-    result["data"] = exportEngine_.start(params);
-    return result;
+    const auto history = session_.commandHistoryJson();
+    return {
+        {"ok", true},
+        {"commandId", "export_timeline"},
+        {"data", exportEngine_.start(params)},
+        {"undoCount", history.at("undoCount")},
+        {"redoCount", history.at("redoCount")},
+    };
   }
 
   if (params.value("type", std::string{}) == "import_media") {
@@ -137,6 +167,14 @@ nlohmann::json EngineApp::executeCommand(const nlohmann::json& params) {
   return session_.executeCommand(params);
 }
 
+nlohmann::json EngineApp::undoCommand() {
+  return session_.undoCommand();
+}
+
+nlohmann::json EngineApp::redoCommand() {
+  return session_.redoCommand();
+}
+
 nlohmann::json EngineApp::createProject(const nlohmann::json& params) {
   const auto name = params.value("name", std::string{"Untitled Project"});
   const auto path = params.value("path", std::string{});
@@ -146,15 +184,62 @@ nlohmann::json EngineApp::createProject(const nlohmann::json& params) {
   }
 
   const auto project = projectManager_.createProject(path, name);
-  return project.toJson();
+  nlohmann::json activeProject = {
+      {"name", name},
+      {"path", project.root.string()},
+      {"manifestPath", (project.root / "project.aivproj").string()},
+  };
+  session_.openDatabase(project.root / project.manifest.database);
+  session_.setActiveProject(activeProject);
+  session_.saveProjectMetadata();
+  auto state = session_.projectStateJson();
+  state["summary"] = project.toJson();
+  return state;
+}
+
+nlohmann::json EngineApp::openProject(const nlohmann::json& params) {
+  auto path = params.value("path", std::string{});
+  const auto manifestPath = params.value("manifestPath", std::string{});
+  if (path.empty() && !manifestPath.empty()) {
+    path = std::filesystem::path(manifestPath).parent_path().string();
+  }
+  if (path.empty()) {
+    throw std::runtime_error("project.open requires path or manifestPath");
+  }
+
+  const auto root = std::filesystem::path(path);
+  const auto resolvedManifestPath = manifestPath.empty() ? root / "project.aivproj" : std::filesystem::path(manifestPath);
+  auto manifest = ProjectManifest{};
+  if (std::filesystem::exists(resolvedManifestPath)) {
+    manifest = ProjectManifest::readFrom(resolvedManifestPath);
+  }
+  const auto database = root / (manifest.database.empty() ? "project.db" : manifest.database);
+  const auto projectName = params.value("name", manifest.name.empty() ? root.filename().string() : manifest.name);
+  session_.openDatabase(database);
+  session_.setActiveProject({
+      {"name", projectName.empty() ? root.filename().string() : projectName},
+      {"path", root.string()},
+      {"manifestPath", resolvedManifestPath.string()},
+      {"lastOpenedAt", params.value("lastOpenedAt", std::string{})},
+      {"lastSavedAt", params.value("lastSavedAt", std::string{})},
+  });
+  session_.saveProjectMetadata();
+  return session_.projectStateJson();
+}
+
+nlohmann::json EngineApp::saveProjectState(const nlohmann::json& params) {
+  session_.replaceState(params, false);
+  return session_.projectStateJson();
 }
 
 nlohmann::json EngineApp::resetProjectState(const nlohmann::json& params) {
-  session_.replaceState(params);
+  session_.replaceState(params, true);
   return {
       {"mediaIndex", session_.mediaIndexJson()},
       {"timeline", session_.timelineJson()},
       {"proposals", session_.proposalsJson()},
+      {"projectSettings", session_.projectStateJson().at("projectSettings")},
+      {"state", session_.projectStateJson()},
   };
 }
 

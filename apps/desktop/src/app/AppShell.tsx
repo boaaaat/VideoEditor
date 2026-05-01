@@ -16,7 +16,7 @@ import { Tabs, type TabItem } from "../components/Tabs";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { LogsDrawer, logsToText } from "../components/LogsDrawer";
-import { engineRpc, getEngineStatus, type CommandExecutionEventDetail } from "../features/commands/commandClient";
+import { engineRpc, getEngineStatus, redoCommand, undoCommand, type CommandExecutionEventDetail } from "../features/commands/commandClient";
 import { isTypingTarget, loadShortcutMap, matchesShortcut, resetShortcutMap, saveShortcutMap, shortcutFor, type ShortcutMap } from "../features/commands/shortcuts";
 import { appendProjectLog, createAppLogEntry, type AppLogEntry, type AppLogSource, type LogStatusOptions } from "../features/logging/appLog";
 import { importMediaFiles, type ImportMediaResult } from "../features/media/importMedia";
@@ -48,8 +48,6 @@ export type WorkspaceTab = "home" | "edit" | "audio" | "color" | "effects" | "sh
 
 const maxAppLogEntries = 1000;
 const autosaveDelayMs = 4500;
-const maxCommandHistoryEntries = 80;
-
 const workspaceTabs: TabItem<WorkspaceTab>[] = [
   { id: "home", label: "Home", icon: <Home size={16} /> },
   { id: "edit", label: "Edit", icon: <Clapperboard size={16} /> },
@@ -100,17 +98,14 @@ export function AppShell() {
   const [lastSavedAt, setLastSavedAt] = useState<string | null>(null);
   const [autosaveState, setAutosaveState] = useState<"idle" | "pending" | "saving" | "saved" | "error">("idle");
   const [missingMediaPaths, setMissingMediaPaths] = useState<string[]>([]);
-  const [undoStack, setUndoStack] = useState<ProjectSnapshot[]>([]);
-  const [redoStack, setRedoStack] = useState<ProjectSnapshot[]>([]);
+  const [undoCount, setUndoCount] = useState(0);
+  const [redoCount, setRedoCount] = useState(0);
   const [statusMessage, setLatestStatusMessage] = useState("Ready");
   const [appLogs, setAppLogs] = useState<AppLogEntry[]>(() => [createAppLogEntry("Ready", { source: "app" })]);
   const projectRef = useRef(project);
   const logPersistenceWarningShownRef = useRef(false);
   const lastSavedStateRef = useRef(serializeProjectState(defaultProjectSettings, [], starterTimeline, []));
-  const historyStateRef = useRef(serializeProjectState(defaultProjectSettings, [], starterTimeline, []));
-  const lastHistorySnapshotRef = useRef<ProjectSnapshot | null>(null);
   const loadingProjectRef = useRef(false);
-  const applyingHistoryRef = useRef(false);
   const lastMissingMediaKeyRef = useRef("");
   const hasActiveProject = Boolean(project.path);
 
@@ -125,29 +120,6 @@ export function AppShell() {
 
     const stateHash = serializeProjectState(projectSettings, mediaAssets, timeline, aiProposals);
     setProjectDirty(Boolean(lastSavedStateRef.current) && stateHash !== lastSavedStateRef.current);
-  }, [aiProposals, mediaAssets, projectSettings, timeline]);
-
-  useEffect(() => {
-    if (loadingProjectRef.current || applyingHistoryRef.current) {
-      return;
-    }
-
-    const stateHash = serializeProjectState(projectSettings, mediaAssets, timeline, aiProposals);
-    const previousSnapshot = lastHistorySnapshotRef.current;
-    if (!previousSnapshot) {
-      historyStateRef.current = stateHash;
-      lastHistorySnapshotRef.current = createHistorySnapshot();
-      return;
-    }
-
-    if (stateHash === historyStateRef.current) {
-      return;
-    }
-
-    setUndoStack((current) => [...current, previousSnapshot].slice(-maxCommandHistoryEntries));
-    setRedoStack([]);
-    historyStateRef.current = stateHash;
-    lastHistorySnapshotRef.current = createHistorySnapshot();
   }, [aiProposals, mediaAssets, projectSettings, timeline]);
 
   useEffect(() => {
@@ -243,6 +215,12 @@ export function AppShell() {
   useEffect(() => {
     function onCommandExecution(event: Event) {
       const detail = (event as CustomEvent<CommandExecutionEventDetail>).detail;
+      if (typeof detail?.undoCount === "number") {
+        setUndoCount(detail.undoCount);
+      }
+      if (typeof detail?.redoCount === "number") {
+        setRedoCount(detail.redoCount);
+      }
       if (!detail?.commandType) {
         return;
       }
@@ -354,9 +332,10 @@ export function AppShell() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [aiProposals, autosaveState, mediaAssets, projectSettings, redoStack, shortcuts, timeline, undoStack]);
+  }, [shortcuts, undoCount, redoCount]);
 
   async function syncEngineProjectState(
+    nextSettings: ProjectSettings,
     nextMediaAssets: MediaAsset[],
     nextTimeline: Timeline,
     nextProposals: AiEditProposal[],
@@ -364,10 +343,14 @@ export function AppShell() {
   ) {
     try {
       await engineRpc("project.reset", {
+        project: projectRef.current,
+        projectSettings: nextSettings,
         mediaAssets: nextMediaAssets,
         timeline: nextTimeline,
         aiProposals: nextProposals
       });
+      setUndoCount(0);
+      setRedoCount(0);
       recordLog("Engine project state reset", {
         source: "engine",
         details: {
@@ -408,6 +391,7 @@ export function AppShell() {
       if (snapshot) {
         restoreProjectSnapshot(snapshot, openedProject);
         await syncEngineProjectState(
+          snapshot.projectSettings ?? defaultProjectSettings,
           snapshot.mediaAssets ?? [],
           snapshot.timeline ?? starterTimeline,
           snapshot.aiProposals ?? [],
@@ -445,7 +429,7 @@ export function AppShell() {
         void saveProjectSnapshot(blankProject, blankSnapshot).catch((error) => {
           logStatus(error instanceof Error ? error.message : "Initial project snapshot save failed", { level: "error", source: "project" });
         });
-        await syncEngineProjectState([], starterTimeline, [], "blank project open");
+        await syncEngineProjectState(defaultProjectSettings, [], starterTimeline, [], "blank project open");
         logStatus(`Project open: ${openedProject.name}`, {
           source: "project",
           details: { path: openedProject.path, manifestPath: openedProject.manifestPath, restored: false }
@@ -460,7 +444,7 @@ export function AppShell() {
       lastSavedStateRef.current = serializeProjectState(defaultProjectSettings, [], starterTimeline, []);
       resetCommandHistory(openedProject, defaultProjectSettings, [], starterTimeline, []);
       setProjectDirty(false);
-      await syncEngineProjectState([], starterTimeline, [], "project restore failure");
+      await syncEngineProjectState(defaultProjectSettings, [], starterTimeline, [], "project restore failure");
       logStatus(error instanceof Error ? error.message : "Project restore failed", { level: "error", source: "project", details: { project: openedProject } });
     } finally {
       window.setTimeout(() => {
@@ -725,7 +709,7 @@ export function AppShell() {
     lastSavedStateRef.current = serializeProjectState(defaultProjectSettings, [], starterTimeline, []);
     resetCommandHistory(blankProject, defaultProjectSettings, [], starterTimeline, []);
     setActiveTab("home");
-    void syncEngineProjectState([], starterTimeline, [], "project deleted");
+    void syncEngineProjectState(defaultProjectSettings, [], starterTimeline, [], "project deleted");
   }
 
   async function saveProject(reason: "manual" | "autosave") {
@@ -864,99 +848,67 @@ export function AppShell() {
     setAutosaveState("idle");
   }
 
-  function createHistorySnapshot(): ProjectSnapshot {
-    return {
-      version: 1,
-      savedAt: new Date().toISOString(),
-      project: projectRef.current,
-      projectSettings,
-      mediaAssets,
-      timeline,
-      aiProposals
-    };
-  }
-
   function resetCommandHistory(
-    nextProject: ActiveProject,
-    nextSettings: ProjectSettings,
-    nextMediaAssets: MediaAsset[],
-    nextTimeline: Timeline,
-    nextProposals: AiEditProposal[]
+    _nextProject: ActiveProject,
+    _nextSettings: ProjectSettings,
+    _nextMediaAssets: MediaAsset[],
+    _nextTimeline: Timeline,
+    _nextProposals: AiEditProposal[]
   ) {
-    const stateHash = serializeProjectState(nextSettings, nextMediaAssets, nextTimeline, nextProposals);
-    historyStateRef.current = stateHash;
-    lastHistorySnapshotRef.current = {
-      version: 1,
-      savedAt: new Date().toISOString(),
-      project: nextProject,
-      projectSettings: nextSettings,
-      mediaAssets: nextMediaAssets,
-      timeline: nextTimeline,
-      aiProposals: nextProposals
-    };
-    setUndoStack([]);
-    setRedoStack([]);
+    setUndoCount(0);
+    setRedoCount(0);
   }
 
-  function restoreHistorySnapshot(snapshot: ProjectSnapshot) {
-    applyingHistoryRef.current = true;
-    const restoredSettings = { ...defaultProjectSettings, ...(snapshot.projectSettings ?? {}) };
+  function restoreCommandState(data: unknown) {
+    const snapshot = data as Partial<ProjectSnapshot> | undefined;
+    const restoredSettings = { ...defaultProjectSettings, ...(snapshot?.projectSettings ?? {}) };
     setProjectSettings(restoredSettings);
-    setMediaAssets(snapshot.mediaAssets ?? []);
-    setTimeline(snapshot.timeline ?? starterTimeline);
-    setAiProposals(snapshot.aiProposals ?? []);
-    const stateHash = serializeProjectState(
-      restoredSettings,
-      snapshot.mediaAssets ?? [],
-      snapshot.timeline ?? starterTimeline,
-      snapshot.aiProposals ?? []
-    );
-    historyStateRef.current = stateHash;
-    lastHistorySnapshotRef.current = {
-      ...snapshot,
-      project: projectRef.current,
-      savedAt: new Date().toISOString()
-    };
-    window.setTimeout(() => {
-      applyingHistoryRef.current = false;
-    }, 0);
+    setMediaAssets(snapshot?.mediaAssets ?? []);
+    setTimeline(snapshot?.timeline ?? starterTimeline);
+    setAiProposals(snapshot?.aiProposals ?? []);
   }
 
-  function undoProjectState() {
-    const previous = undoStack.at(-1);
-    if (!previous) {
+  async function undoProjectState() {
+    if (undoCount === 0) {
       logStatus("Nothing to undo", { level: "warning", source: "timeline" });
       return;
     }
 
-    const currentSnapshot = createHistorySnapshot();
-    setUndoStack((current) => current.slice(0, -1));
-    setRedoStack((current) => [...current, currentSnapshot].slice(-maxCommandHistoryEntries));
-    restoreHistorySnapshot(previous);
+    const result = await undoCommand();
+    if (!result.ok) {
+      logStatus(result.error ?? "Nothing to undo", { level: "warning", source: "timeline" });
+      return;
+    }
+    restoreCommandState(result.data);
     setProjectDirty(true);
-    logStatus("Undo restored previous edit state", {
+    setUndoCount(result.undoCount ?? Math.max(0, undoCount - 1));
+    setRedoCount(result.redoCount ?? redoCount + 1);
+    logStatus("Undo applied", {
       level: "success",
       source: "timeline",
-      details: { undoCount: Math.max(0, undoStack.length - 1), redoCount: redoStack.length + 1 }
+      details: { undoCount: result.undoCount, redoCount: result.redoCount, commandId: result.commandId }
     });
   }
 
-  function redoProjectState() {
-    const next = redoStack.at(-1);
-    if (!next) {
+  async function redoProjectState() {
+    if (redoCount === 0) {
       logStatus("Nothing to redo", { level: "warning", source: "timeline" });
       return;
     }
 
-    const currentSnapshot = createHistorySnapshot();
-    setRedoStack((current) => current.slice(0, -1));
-    setUndoStack((current) => [...current, currentSnapshot].slice(-maxCommandHistoryEntries));
-    restoreHistorySnapshot(next);
+    const result = await redoCommand();
+    if (!result.ok) {
+      logStatus(result.error ?? "Nothing to redo", { level: "warning", source: "timeline" });
+      return;
+    }
+    restoreCommandState(result.data);
     setProjectDirty(true);
-    logStatus("Redo restored next edit state", {
+    setUndoCount(result.undoCount ?? undoCount + 1);
+    setRedoCount(result.redoCount ?? Math.max(0, redoCount - 1));
+    logStatus("Redo applied", {
       level: "success",
       source: "timeline",
-      details: { undoCount: undoStack.length + 1, redoCount: Math.max(0, redoStack.length - 1) }
+      details: { undoCount: result.undoCount, redoCount: result.redoCount, commandId: result.commandId }
     });
   }
 
@@ -1036,7 +988,7 @@ export function AppShell() {
       { id: "effects", label: "Open Effects Workspace", keys: "", run: () => openWorkspaceTab("effects") },
       { id: "shortcuts", label: "Edit Keyboard Shortcuts", keys: "", run: () => openWorkspaceTab("shortcuts") }
     ],
-    [aiProposals, autosaveState, mediaAssets, projectSettings, redoStack, shortcuts, timeline, undoStack]
+    [aiProposals, autosaveState, mediaAssets, projectSettings, redoCount, shortcuts, timeline, undoCount]
   );
 
   const visibleCommandActions = useMemo(() => {
@@ -1178,7 +1130,7 @@ export function AppShell() {
       default:
         return null;
     }
-  }, [activeTab, aiProposals, engineStatus, mediaAssets, missingMediaPaths, playing, playheadUs, previewSpeedPercent, previewVolumePercent, project.path, projectSettings, recentProjects, shortcuts, timeline]);
+  }, [activeTab, aiProposals, engineStatus, mediaAssets, missingMediaPaths, playing, playheadUs, previewSpeedPercent, previewVolumePercent, project.path, projectSettings, recentProjects, redoCount, shortcuts, timeline, undoCount]);
 
   return (
     <main className="app-shell" aria-busy={savingProject || autosaveState === "saving"}>
@@ -1189,8 +1141,8 @@ export function AppShell() {
         onSave={() => void saveProject("manual")}
         onUndo={undoProjectState}
         onRedo={redoProjectState}
-        canUndo={undoStack.length > 0}
-        canRedo={redoStack.length > 0}
+        canUndo={undoCount > 0}
+        canRedo={redoCount > 0}
         onOpenCommandPalette={() => {
           openCommandPalette();
         }}
@@ -1210,7 +1162,7 @@ export function AppShell() {
           {projectStatusLabel(hasActiveProject, projectDirty, savingProject, autosaveState, lastSavedAt)}
         </span>
         <span className="status-pill">
-          Undo {undoStack.length} / Redo {redoStack.length}
+          Undo {undoCount} / Redo {redoCount}
         </span>
         {missingMediaPaths.length > 0 ? (
           <span className="status-pill status-pill-warning">

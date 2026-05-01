@@ -403,7 +403,7 @@
   align-content: center;
   gap: 8px;
   min-height: 160px;
-  overflow: auto;
+  overflow: hidden;
   contain: layout paint;
   border: 1px solid #10100f;
   background:

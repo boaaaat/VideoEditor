@@ -3,13 +3,22 @@ import type { AiEditProposal, CommandResult, EditorCommand, EngineStatus, Export
 type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
 export interface CommandExecutionEventDetail {
-  phase: "start" | "finish" | "error";
-  commandType: EditorCommand["type"];
-  command: EditorCommand;
+  phase: "start" | "finish" | "undo" | "redo" | "error";
+  commandType?: EditorCommand["type"];
+  command?: EditorCommand;
   commandId?: string;
   ok?: boolean;
   error?: string;
   durationMs?: number;
+  undoCount?: number;
+  redoCount?: number;
+}
+
+export interface CommandHistoryStatus {
+  undoCount: number;
+  redoCount: number;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 const browserEngineStatus: EngineStatus = {
@@ -66,6 +75,9 @@ const browserTimeline: Timeline = {
 };
 
 let browserProposals: AiEditProposal[] = [];
+let browserProjectState: unknown = null;
+let browserUndoCount = 0;
+let browserRedoCount = 0;
 
 async function getInvoke(): Promise<TauriInvoke | null> {
   if (!("__TAURI_INTERNALS__" in window)) {
@@ -85,7 +97,29 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
     }
 
     if (method === "command.execute") {
-      return { ok: true, commandId: `browser-${Date.now()}` } as T;
+      browserUndoCount += 1;
+      browserRedoCount = 0;
+      return { ok: true, commandId: `browser-${Date.now()}`, undoCount: browserUndoCount, redoCount: browserRedoCount } as T;
+    }
+
+    if (method === "command.undo") {
+      if (browserUndoCount > 0) {
+        browserUndoCount -= 1;
+        browserRedoCount += 1;
+      }
+      return { ok: browserRedoCount > 0, data: browserProjectState, undoCount: browserUndoCount, redoCount: browserRedoCount } as T;
+    }
+
+    if (method === "command.redo") {
+      if (browserRedoCount > 0) {
+        browserRedoCount -= 1;
+        browserUndoCount += 1;
+      }
+      return { ok: browserUndoCount > 0, data: browserProjectState, undoCount: browserUndoCount, redoCount: browserRedoCount } as T;
+    }
+
+    if (method === "command.history") {
+      return { undoCount: browserUndoCount, redoCount: browserRedoCount, canUndo: browserUndoCount > 0, canRedo: browserRedoCount > 0 } as T;
     }
 
     if (method === "media.index") {
@@ -97,7 +131,40 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
     }
 
     if (method === "project.reset") {
+      browserProjectState = params;
+      browserUndoCount = 0;
+      browserRedoCount = 0;
       return {} as T;
+    }
+
+    if (method === "project.open") {
+      return (browserProjectState ?? {
+        version: 1,
+        savedAt: new Date().toISOString(),
+        project: params ?? {},
+        projectSettings: {
+          resolution: "1080p",
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          colorMode: "SDR",
+          bitrateMbps: 16,
+          defaultCodec: "h264_nvenc",
+          defaultContainer: "mp4",
+          audioEnabled: true,
+          masterGainDb: 0,
+          normalizeAudio: false,
+          cleanupAudio: false
+        },
+        mediaAssets: [],
+        timeline: browserTimeline,
+        aiProposals: browserProposals
+      }) as T;
+    }
+
+    if (method === "project.save_state") {
+      browserProjectState = params;
+      return params as T;
     }
 
     if (method === "ai.proposals") {
@@ -216,6 +283,8 @@ export async function executeCommand(command: EditorCommand): Promise<CommandRes
       commandId: result.commandId,
       ok: result.ok,
       error: result.error,
+      undoCount: result.undoCount,
+      redoCount: result.redoCount,
       durationMs: Math.round(performance.now() - startedAt)
     });
     return result;
@@ -229,6 +298,38 @@ export async function executeCommand(command: EditorCommand): Promise<CommandRes
     });
     throw error;
   }
+}
+
+export async function undoCommand(): Promise<CommandResult> {
+  const result = await engineRpc<CommandResult>("command.undo");
+  emitCommandExecutionEvent({
+    phase: "undo",
+    commandType: result.commandType,
+    commandId: result.commandId,
+    ok: result.ok,
+    error: result.error,
+    undoCount: result.undoCount,
+    redoCount: result.redoCount
+  });
+  return result;
+}
+
+export async function redoCommand(): Promise<CommandResult> {
+  const result = await engineRpc<CommandResult>("command.redo");
+  emitCommandExecutionEvent({
+    phase: "redo",
+    commandType: result.commandType,
+    commandId: result.commandId,
+    ok: result.ok,
+    error: result.error,
+    undoCount: result.undoCount,
+    redoCount: result.redoCount
+  });
+  return result;
+}
+
+export function getCommandHistory(): Promise<CommandHistoryStatus> {
+  return engineRpc<CommandHistoryStatus>("command.history");
 }
 
 function emitCommandExecutionEvent(detail: CommandExecutionEventDetail) {

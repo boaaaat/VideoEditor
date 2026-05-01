@@ -4,6 +4,7 @@ import { defaultColorAdjustment, type ColorAdjustment, type ClipLut, type Projec
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Slider } from "../../components/Slider";
+import { executeCommand } from "../../features/commands/commandClient";
 import type { LogStatus } from "../../features/logging/appLog";
 import type { MediaAsset } from "../../features/media/mediaTypes";
 import { ColorEffectsPlayback } from "./ColorEffectsPlayback";
@@ -59,6 +60,13 @@ export function ColorTab({
     }
   }, [selectedClipId, videoClips]);
 
+  function applyEngineTimeline(data: unknown) {
+    const nextTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
+    if (nextTimeline?.tracks) {
+      setTimeline(nextTimeline);
+    }
+  }
+
   function updateSelectedClipColor(next: Partial<ColorAdjustment>, label: string) {
     if (!selectedClip) {
       setStatusMessage("Select a video clip first", { level: "warning" });
@@ -72,6 +80,15 @@ export function ColorTab({
         ...next
       }
     })));
+    void executeCommand({ type: "apply_color_adjustment", clipId: selectedClip.id, adjustment: next }).then((result) => {
+      if (result.ok) {
+        applyEngineTimeline(result.data);
+      } else {
+        setStatusMessage(result.error ?? "Color adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
+      }
+    }).catch((error) => {
+      setStatusMessage(error instanceof Error ? error.message : "Color adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
+    });
     setStatusMessage(label, { details: { clipId: selectedClip.id, adjustment: next } });
   }
 
@@ -85,6 +102,15 @@ export function ColorTab({
       ...clip,
       lut: next
     })));
+    void executeCommand({ type: "apply_lut", clipId: selectedClip.id, lutId: next?.lutId ?? null, strength: next?.strength ?? 1 }).then((result) => {
+      if (result.ok) {
+        applyEngineTimeline(result.data);
+      } else {
+        setStatusMessage(result.error ?? "LUT adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
+      }
+    }).catch((error) => {
+      setStatusMessage(error instanceof Error ? error.message : "LUT adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
+    });
     setStatusMessage(label, { details: { clipId: selectedClip.id, lut: next } });
   }
 
@@ -98,6 +124,23 @@ export function ColorTab({
       color: defaultColorAdjustment,
       lut: undefined
     })));
+    void executeCommand({ type: "apply_color_adjustment", clipId: selectedClip.id, adjustment: defaultColorAdjustment })
+      .then((result) => {
+        if (result.ok) {
+          return executeCommand({ type: "apply_lut", clipId: selectedClip.id, lutId: null, strength: 1 });
+        }
+        throw new Error(result.error ?? "Reset color failed");
+      })
+      .then((result) => {
+        if (result.ok) {
+          applyEngineTimeline(result.data);
+        } else {
+          setStatusMessage(result.error ?? "Reset color failed", { level: "error", details: { clipId: selectedClip.id } });
+        }
+      })
+      .catch((error) => {
+        setStatusMessage(error instanceof Error ? error.message : "Reset color failed", { level: "error", details: { clipId: selectedClip.id } });
+      });
     setStatusMessage("Reset clip color", { details: { clipId: selectedClip.id } });
   }
 

@@ -32,6 +32,22 @@ struct ProjectManifest {
 
     file << toJson().dump(2) << '\n';
   }
+
+  [[nodiscard]] static ProjectManifest readFrom(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    if (!file) {
+      throw std::runtime_error("failed to read project manifest: " + path.string());
+    }
+
+    nlohmann::json value;
+    file >> value;
+    ProjectManifest manifest;
+    manifest.version = value.value("version", manifest.version);
+    manifest.name = value.value("name", manifest.name);
+    manifest.database = value.value("database", manifest.database);
+    manifest.createdWith = value.value("createdWith", manifest.createdWith);
+    return manifest;
+  }
 };
 
 }  // namespace ai_editor

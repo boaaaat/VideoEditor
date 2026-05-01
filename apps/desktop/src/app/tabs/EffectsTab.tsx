@@ -5,6 +5,7 @@ import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Slider } from "../../components/Slider";
 import { Toggle } from "../../components/Toggle";
+import { executeCommand } from "../../features/commands/commandClient";
 import type { LogStatus } from "../../features/logging/appLog";
 import type { MediaAsset } from "../../features/media/mediaTypes";
 import { ColorEffectsPlayback } from "./ColorEffectsPlayback";
@@ -50,6 +51,13 @@ export function EffectsTab({
     }
   }, [selectedClipId, videoClips]);
 
+  function applyEngineTimeline(data: unknown) {
+    const nextTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
+    if (nextTimeline?.tracks) {
+      setTimeline(nextTimeline);
+    }
+  }
+
   function updateSelectedClipTransform(next: Partial<ClipTransform>, label: string) {
     if (!selectedClip) {
       setStatusMessage("Select a video clip first", { level: "warning" });
@@ -63,6 +71,15 @@ export function EffectsTab({
         ...next
       }
     })));
+    void executeCommand({ type: "apply_transform", clipId: selectedClip.id, transform: next }).then((result) => {
+      if (result.ok) {
+        applyEngineTimeline(result.data);
+      } else {
+        setStatusMessage(result.error ?? "Transform adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
+      }
+    }).catch((error) => {
+      setStatusMessage(error instanceof Error ? error.message : "Transform adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
+    });
     setStatusMessage(label, { details: { clipId: selectedClip.id, transform: next } });
   }
 
@@ -76,6 +93,15 @@ export function EffectsTab({
       ...clip,
       effects: nextEffects
     })));
+    void executeCommand({ type: "apply_effect_stack", clipId: selectedClip.id, effects: nextEffects }).then((result) => {
+      if (result.ok) {
+        applyEngineTimeline(result.data);
+      } else {
+        setStatusMessage(result.error ?? "Effect stack update failed", { level: "error", details: { clipId: selectedClip.id } });
+      }
+    }).catch((error) => {
+      setStatusMessage(error instanceof Error ? error.message : "Effect stack update failed", { level: "error", details: { clipId: selectedClip.id } });
+    });
     setStatusMessage(label, { details: { clipId: selectedClip.id, effects: nextEffects } });
   }
 
@@ -96,6 +122,23 @@ export function EffectsTab({
       transform: defaultClipTransform,
       effects: defaultClipEffects
     })));
+    void executeCommand({ type: "apply_transform", clipId: selectedClip.id, transform: defaultClipTransform })
+      .then((result) => {
+        if (result.ok) {
+          return executeCommand({ type: "apply_effect_stack", clipId: selectedClip.id, effects: defaultClipEffects });
+        }
+        throw new Error(result.error ?? "Reset effects failed");
+      })
+      .then((result) => {
+        if (result.ok) {
+          applyEngineTimeline(result.data);
+        } else {
+          setStatusMessage(result.error ?? "Reset effects failed", { level: "error", details: { clipId: selectedClip.id } });
+        }
+      })
+      .catch((error) => {
+        setStatusMessage(error instanceof Error ? error.message : "Reset effects failed", { level: "error", details: { clipId: selectedClip.id } });
+      });
     setStatusMessage("Reset clip transform and effects", { details: { clipId: selectedClip.id } });
   }
 

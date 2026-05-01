@@ -28,7 +28,7 @@ class CommandRegistry {
     }
 
     const auto id = nextCommandId(type);
-    history_.push(id, type);
+    history_.push({id, type, command, nlohmann::json::object(), nlohmann::json::object()});
 
     return {
         {"ok", true},
