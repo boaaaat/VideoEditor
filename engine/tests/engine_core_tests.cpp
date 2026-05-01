@@ -3,6 +3,7 @@
 #include "render/ExportEngine.hpp"
 #include "timeline/TimelineService.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <iostream>
@@ -30,6 +31,19 @@ int runTests() {
   assert(status.at("appName") == "AI Video Editor");
   assert(status.contains("ffmpeg"));
   assert(status.contains("gpu"));
+
+  const auto previewState = app.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 10},
+      {"method", "preview.set_state"},
+      {"params",
+       {
+           {"mediaPath", ""},
+           {"playheadUs", 0},
+       }},
+  });
+  assert(previewState.at("renderMode") == "fallback");
+  assert(previewState.contains("frameDataUrl"));
 
   const auto commandResult = app.handleRequest({
       {"jsonrpc", "2.0"},
@@ -363,6 +377,22 @@ int runTests() {
   assert(redoResult.at("undoCount") == 1);
   assert(redoResult.at("redoCount") == 0);
   assert(redoResult.at("data").at("timeline").at("tracks").size() == resetResult.at("timeline").at("tracks").size() + 1);
+
+  const auto updateTrackResult = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 151},
+      {"method", "command.execute"},
+      {"params", {{"type", "update_track"}, {"trackId", "v3"}, {"name", "Renamed Video"}, {"locked", true}, {"visible", false}}},
+  });
+  assert(updateTrackResult.at("ok") == true);
+  const auto updatedTracks = updateTrackResult.at("data").at("timeline").at("tracks");
+  const auto updatedTrack = std::find_if(updatedTracks.begin(), updatedTracks.end(), [](const nlohmann::json& track) {
+    return track.at("id") == "v3";
+  });
+  assert(updatedTrack != updatedTracks.end());
+  assert(updatedTrack->at("name") == "Renamed Video");
+  assert(updatedTrack->at("locked") == true);
+  assert(updatedTrack->at("visible") == false);
 
   const auto projectRoot = std::filesystem::absolute("engine-project-db-test");
   std::filesystem::remove_all(projectRoot);

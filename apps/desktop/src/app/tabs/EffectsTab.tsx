@@ -1,6 +1,6 @@
 import { RotateCcw, SlidersHorizontal } from "lucide-react";
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
-import { defaultClipEffects, defaultClipTransform, type ClipEffect, type ClipTransform, type ProjectSettings, type Timeline, type TimelineClip } from "@ai-video-editor/protocol";
+import { defaultClipEffects, defaultClipTransform, type ClipEffect, type ClipTransform, type ProjectSettings, type Timeline } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Slider } from "../../components/Slider";
@@ -64,23 +64,16 @@ export function EffectsTab({
       return;
     }
 
-    setTimeline((current) => updateClip(current, selectedClip.id, (clip) => ({
-      ...clip,
-      transform: {
-        ...normalizeTransform(clip.transform),
-        ...next
-      }
-    })));
     void executeCommand({ type: "apply_transform", clipId: selectedClip.id, transform: next }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
+        setStatusMessage(label, { details: { clipId: selectedClip.id, transform: next } });
       } else {
         setStatusMessage(result.error ?? "Transform adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
       }
     }).catch((error) => {
       setStatusMessage(error instanceof Error ? error.message : "Transform adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
     });
-    setStatusMessage(label, { details: { clipId: selectedClip.id, transform: next } });
   }
 
   function updateSelectedClipEffects(nextEffects: ClipEffect[], label: string) {
@@ -89,20 +82,16 @@ export function EffectsTab({
       return;
     }
 
-    setTimeline((current) => updateClip(current, selectedClip.id, (clip) => ({
-      ...clip,
-      effects: nextEffects
-    })));
     void executeCommand({ type: "apply_effect_stack", clipId: selectedClip.id, effects: nextEffects }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
+        setStatusMessage(label, { details: { clipId: selectedClip.id, effects: nextEffects } });
       } else {
         setStatusMessage(result.error ?? "Effect stack update failed", { level: "error", details: { clipId: selectedClip.id } });
       }
     }).catch((error) => {
       setStatusMessage(error instanceof Error ? error.message : "Effect stack update failed", { level: "error", details: { clipId: selectedClip.id } });
     });
-    setStatusMessage(label, { details: { clipId: selectedClip.id, effects: nextEffects } });
   }
 
   function updateEffect(effectId: string, next: Partial<ClipEffect>, label: string) {
@@ -117,11 +106,6 @@ export function EffectsTab({
       setStatusMessage("Select a video clip first", { level: "warning" });
       return;
     }
-    setTimeline((current) => updateClip(current, selectedClip.id, (clip) => ({
-      ...clip,
-      transform: defaultClipTransform,
-      effects: defaultClipEffects
-    })));
     void executeCommand({ type: "apply_transform", clipId: selectedClip.id, transform: defaultClipTransform })
       .then((result) => {
         if (result.ok) {
@@ -132,6 +116,7 @@ export function EffectsTab({
       .then((result) => {
         if (result.ok) {
           applyEngineTimeline(result.data);
+          setStatusMessage("Reset clip transform and effects", { details: { clipId: selectedClip.id } });
         } else {
           setStatusMessage(result.error ?? "Reset effects failed", { level: "error", details: { clipId: selectedClip.id } });
         }
@@ -139,7 +124,6 @@ export function EffectsTab({
       .catch((error) => {
         setStatusMessage(error instanceof Error ? error.message : "Reset effects failed", { level: "error", details: { clipId: selectedClip.id } });
       });
-    setStatusMessage("Reset clip transform and effects", { details: { clipId: selectedClip.id } });
   }
 
   return (
@@ -235,16 +219,6 @@ function normalizeEffects(value?: ClipEffect[]): ClipEffect[] {
     ...effect,
     ...existingById.get(effect.id)
   }));
-}
-
-function updateClip(timeline: Timeline, clipId: string, updater: (clip: TimelineClip) => TimelineClip): Timeline {
-  return {
-    ...timeline,
-    tracks: timeline.tracks.map((track) => ({
-      ...track,
-      clips: track.clips.map((clip) => (clip.id === clipId ? updater(clip) : clip))
-    }))
-  };
 }
 
 function formatSeconds(valueUs: number) {

@@ -163,17 +163,12 @@ pub fn media_waveform_data_url(
 }
 
 #[tauri::command]
-pub fn media_proxy_status(path: String, project_path: String, needed: bool) -> Result<Value, String> {
-    let media_path = PathBuf::from(path);
-    let proxy_file_name = media_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("media");
-    let proxy_path = PathBuf::from(project_path)
-        .join("cache")
-        .join("proxies")
-        .join(proxy_file_name)
-        .with_extension("proxy.mp4");
+pub fn media_proxy_status(
+    path: String,
+    project_path: String,
+    needed: bool,
+) -> Result<Value, String> {
+    let proxy_path = proxy_path_for(&path, &project_path);
     let status = if !needed {
         "not-needed"
     } else if proxy_path.is_file() {
@@ -186,6 +181,86 @@ pub fn media_proxy_status(path: String, project_path: String, needed: bool) -> R
         "status": status,
         "path": proxy_path
     }))
+}
+
+#[tauri::command]
+pub async fn media_generate_proxy(path: String, project_path: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let media_path = PathBuf::from(normalize_media_path(&path));
+        if !media_path.is_file() {
+            return Err("media file does not exist".to_string());
+        }
+
+        let ffmpeg = find_ffmpeg_executable()
+            .ok_or_else(|| "could not find ffmpeg in tools/ffmpeg/bin or PATH".to_string())?;
+        let proxy_path = proxy_path_for(&path, &project_path);
+        let proxy_dir = proxy_path
+            .parent()
+            .ok_or_else(|| "proxy path has no parent folder".to_string())?;
+        fs::create_dir_all(proxy_dir)
+            .map_err(|error| format!("failed to create proxy cache folder: {error}"))?;
+
+        let temp_path = proxy_path.with_extension("proxy.tmp.mp4");
+        if temp_path.exists() {
+            fs::remove_file(&temp_path)
+                .map_err(|error| format!("failed to clear stale proxy temp file: {error}"))?;
+        }
+
+        let output = Command::new(ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&media_path)
+            .args([
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-vf",
+                "scale=-2:min(720\\,ih),format=yuv420p",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "28",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-movflags",
+                "+faststart",
+            ])
+            .arg(&temp_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|error| format!("failed to run ffmpeg proxy command: {error}"))?;
+
+        if !output.status.success() {
+            let _ = fs::remove_file(&temp_path);
+            return Err(format!(
+                "proxy generation failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        if !temp_path.is_file() {
+            return Err("ffmpeg did not create a proxy file".to_string());
+        }
+
+        if proxy_path.exists() {
+            fs::remove_file(&proxy_path)
+                .map_err(|error| format!("failed to replace existing proxy: {error}"))?;
+        }
+        fs::rename(&temp_path, &proxy_path)
+            .map_err(|error| format!("failed to finalize proxy file: {error}"))?;
+
+        Ok(json!({
+            "status": "ready",
+            "path": proxy_path
+        }))
+    })
+    .await
+    .map_err(|error| format!("proxy generation task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -308,13 +383,28 @@ fn normalize_media_path(path: &str) -> String {
     decoded
 }
 
+fn proxy_path_for(path: &str, project_path: &str) -> PathBuf {
+    let media_path = PathBuf::from(normalize_media_path(path));
+    let proxy_file_name = media_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("media");
+    PathBuf::from(project_path)
+        .join("cache")
+        .join("proxies")
+        .join(proxy_file_name)
+        .with_extension("proxy.mp4")
+}
+
 fn percent_decode_path(path: &str) -> String {
     let bytes = path.as_bytes();
     let mut output = Vec::with_capacity(path.len());
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let (Some(high), Some(low)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2])) {
+            if let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
                 output.push(high * 16 + low);
                 index += 3;
                 continue;

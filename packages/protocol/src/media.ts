@@ -71,6 +71,12 @@ export interface PreviewState {
   mediaPath?: string;
   codec: string;
   decodeMode: "idle" | "cuda/nvdec" | "software" | string;
+  renderMode?: "fallback" | "engine-frame" | "native-d3d" | string;
+  frameNumber?: number;
+  renderedFrames?: number;
+  frameDataUrl?: string;
+  lastFramePlayheadUs?: number;
+  lastFrameDecodeMs?: number;
   droppedFrames: number;
   previewFps: number;
   quality: string;

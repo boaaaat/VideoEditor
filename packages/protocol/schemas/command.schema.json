@@ -9,6 +9,7 @@
         "import_media",
         "remove_media",
         "add_track",
+        "update_track",
         "delete_track",
         "add_clip",
         "move_clip",

@@ -77,6 +77,7 @@ import type { LogStatus } from "../../features/logging/appLog";
 import { importMediaPaths, type ImportMediaResult } from "../../features/media/importMedia";
 import {
   getMediaDurationUs,
+  generateMediaProxy,
   getMediaCacheStatus,
   getMediaPreviewFrameDataUrl,
   getMediaSourceUrl,
@@ -84,6 +85,7 @@ import {
   getMediaWaveformDataUrl,
   isSupportedMediaPath,
   pathToMediaAsset,
+  mediaNeedsProxy,
   supportedMediaExtensions,
   type MediaCacheStatus,
   type MediaAsset
@@ -266,7 +268,9 @@ export function EditTab({
   const [renamingAssetId, setRenamingAssetId] = useState("");
   const [renameDraft, setRenameDraft] = useState("");
   const [speedDialogClipId, setSpeedDialogClipId] = useState("");
-  const [speedDraft, setSpeedDraft] = useState(100);
+  const [speedDraft, setSpeedDraft] = useState("100");
+  const [proxyRefreshKey, setProxyRefreshKey] = useState(0);
+  const [generatingProxyIds, setGeneratingProxyIds] = useState<Set<string>>(() => new Set());
   const selectedClipId = selectedClipIds.at(-1) ?? "";
   const selectedClip = timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === selectedClipId);
   const contextMediaAsset = contextMenu?.kind === "media" ? mediaAssets.find((asset) => asset.id === contextMenu.assetId) : undefined;
@@ -367,6 +371,23 @@ export function EditTab({
     }
   }
 
+  async function runTimelineCommandBatch(items: Array<{ command: EditorCommand; fallbackError: string }>) {
+    const results: CommandResult[] = [];
+    let lastTimelineData: unknown;
+    for (const item of items) {
+      const result = await runCommand(item.command, item.fallbackError);
+      results.push(result);
+      if (result.data) {
+        lastTimelineData = result.data;
+      }
+      if (!result.ok) {
+        break;
+      }
+    }
+    applyEngineTimeline(lastTimelineData);
+    return results;
+  }
+
   async function splitAtPlayhead(targetClip?: TimelineClip) {
     const clip = targetClip ?? selectedClip;
     if (clip) {
@@ -378,61 +399,18 @@ export function EditTab({
     }
 
     const result = await runCommand({ type: "split_clip", clipId: targetClip?.id, playheadUs }, "Split failed");
-    const usedEngineTimeline = applyEngineTimeline(result.data);
-    if (!usedEngineTimeline && clip && playheadUs > clip.startUs && playheadUs < clip.startUs + getClipDisplayDurationUs(clip)) {
-      const firstOutUs = getClipMediaTimeUs(clip, playheadUs);
-      const secondDurationUs = clip.outUs - firstOutUs;
-      const secondClip = {
-        ...clip,
-        id: `clip_${Date.now()}`,
-        startUs: playheadUs,
-        inUs: firstOutUs,
-        outUs: firstOutUs + secondDurationUs
-      };
-
-      setTimeline((current) => withTimelineEditDuration({
-        ...current,
-        tracks: current.tracks.map((track) =>
-          track.id === clip.trackId
-            ? {
-                ...track,
-                clips: track.clips.flatMap((item) => (item.id === clip.id ? [{ ...item, outUs: firstOutUs }, secondClip] : [item]))
-              }
-            : track
-        )
-      }));
-      setSelectedClipIds([secondClip.id]);
-    }
+    applyEngineTimeline(result.data);
 
     setStatusMessage(result.ok ? "Split command accepted" : result.error ?? "Split failed", { level: result.ok ? "success" : "error" });
   }
 
   async function addTrack(kind: "video" | "audio") {
     const result = await runCommand({ type: "add_track", kind }, "Add track failed");
-    if (!applyEngineTimeline(result.data)) {
-      setTimeline((current) => {
-        const trackCount = current.tracks.filter((track) => track.kind === kind).length + 1;
-        const track = {
-          id: `${kind[0]}${Date.now()}`,
-          name: `${kind === "video" ? "Video" : "Audio"} ${trackCount}`,
-          kind,
-          index: current.tracks.length,
-          locked: false,
-          muted: false,
-          visible: true,
-          clips: []
-        };
-
-        return {
-          ...current,
-          tracks: [...current.tracks, track]
-        };
-      });
-    }
+    applyEngineTimeline(result.data);
     setStatusMessage(result.ok ? `Add ${kind} track command accepted` : result.error ?? "Add track failed", { level: result.ok ? "success" : "error" });
   }
 
-  function toggleTrack(trackId: string, field: "locked" | "muted" | "visible" | "solo") {
+  async function toggleTrack(trackId: string, field: "locked" | "muted" | "visible" | "solo") {
     const track = timeline.tracks.find((item) => item.id === trackId);
     if (field === "solo") {
       setSoloTrackIds((current) => (current.includes(trackId) ? current.filter((id) => id !== trackId) : [...current, trackId]));
@@ -442,13 +420,12 @@ export function EditTab({
       return;
     }
 
-    setTimeline((current) => ({
-      ...current,
-      tracks: current.tracks.map((track) => (track.id === trackId ? { ...track, [field]: !track[field] } : track))
-    }));
-    if (track) {
-      setStatusMessage(`${track.name} ${field} ${track[field] ? "off" : "on"}`);
+    if (!track) {
+      return;
     }
+    const result = await runCommand({ type: "update_track", trackId, [field]: !track[field] }, "Track update failed");
+    applyEngineTimeline(result.data);
+    setStatusMessage(result.ok ? `${track.name} ${field} ${track[field] ? "off" : "on"}` : result.error ?? "Track update failed", { level: result.ok ? "success" : "error" });
   }
 
   async function deleteSelectedClip(targetClip?: TimelineClip) {
@@ -464,18 +441,7 @@ export function EditTab({
       return;
     }
 
-    const results = await Promise.all(clips.map((clip) => runCommand({ type: "delete_clip", clipId: clip.id }, "Delete failed")));
-    const lastResult = results.at(-1);
-    if (!applyEngineTimeline(lastResult?.data)) {
-      const deletedIds = new Set(clips.map((clip) => clip.id));
-      setTimeline((current) => withTimelineEditDuration({
-        ...current,
-        tracks: current.tracks.map((track) => ({
-          ...track,
-          clips: track.clips.filter((item) => !deletedIds.has(item.id))
-        }))
-      }));
-    }
+    const results = await runTimelineCommandBatch(clips.map((clip) => ({ command: { type: "delete_clip", clipId: clip.id }, fallbackError: "Delete failed" })));
     clearClipSelection();
     const failed = results.find((result) => !result.ok);
     setStatusMessage(failed ? failed.error ?? "Delete failed" : `Deleted ${clips.length} clip${clips.length === 1 ? "" : "s"}`, {
@@ -497,11 +463,12 @@ export function EditTab({
     }
 
     const orderedClips = [...clips].sort(compareClipsByTimeline);
-    const results = await Promise.all(orderedClips.map((clip) => runCommand({ type: "ripple_delete_clip", clipId: clip.id, trackMode: "selected_track" }, "Ripple delete failed")));
-    const lastResult = results.at(-1);
-    if (!applyEngineTimeline(lastResult?.data)) {
-      setTimeline((current) => withTimelineEditDuration(rippleDeleteClips(current, orderedClips)));
-    }
+    const results = await runTimelineCommandBatch(
+      orderedClips.map((clip) => ({
+        command: { type: "ripple_delete_clip", clipId: clip.id, trackMode: "selected_track" },
+        fallbackError: "Ripple delete failed"
+      }))
+    );
     clearClipSelection();
     const failed = results.find((result) => !result.ok);
     setStatusMessage(failed ? failed.error ?? "Ripple delete failed" : `Ripple deleted ${clips.length} clip${clips.length === 1 ? "" : "s"}`, {
@@ -561,28 +528,18 @@ export function EditTab({
     }
 
     const moved = clips.map((clip) => ({ ...clip, startUs: Math.max(0, clip.startUs + direction * 100_000) }));
-    const results = await Promise.all(
-      moved.map((clip) =>
-        runCommand({
+    const results = await runTimelineCommandBatch(
+      moved.map((clip) => ({
+        command: {
           type: "move_clip",
           clipId: clip.id,
           trackId: clip.trackId,
           startUs: clip.startUs,
           snapping
-        }, "Nudge failed")
-      )
+        },
+        fallbackError: "Nudge failed"
+      }))
     );
-    const lastResult = results.at(-1);
-    if (!applyEngineTimeline(lastResult?.data)) {
-      const movedById = new Map(moved.map((clip) => [clip.id, clip]));
-      setTimeline((current) => ({
-        ...current,
-        tracks: current.tracks.map((track) => ({
-          ...track,
-          clips: track.clips.map((item) => movedById.get(item.id) ?? item).sort((left, right) => left.startUs - right.startUs)
-        }))
-      }));
-    }
     const failed = results.find((result) => !result.ok);
     setStatusMessage(failed ? failed.error ?? "Nudge failed" : `Nudged ${clips.length} clip${clips.length === 1 ? "" : "s"}`, {
       level: failed ? "error" : "success"
@@ -631,33 +588,18 @@ export function EditTab({
       return;
     }
 
-    const results = await Promise.all(
-      movedClips.map((item) =>
-        runCommand({
+    const results = await runTimelineCommandBatch(
+      movedClips.map((item) => ({
+        command: {
           type: "move_clip",
           clipId: item.id,
           trackId: item.trackId,
           startUs: item.startUs,
           snapping
-        }, "Move clip failed")
-      )
+        },
+        fallbackError: "Move clip failed"
+      }))
     );
-    const lastResult = results.at(-1);
-    if (!applyEngineTimeline(lastResult?.data)) {
-      const movedById = new Map(movedClips.map((item) => [item.id, item]));
-      setTimeline((current) => {
-        return withTimelineEditDuration({
-          ...current,
-          tracks: current.tracks.map((track) => ({
-            ...track,
-            clips: [
-              ...track.clips.filter((item) => !movedById.has(item.id)),
-              ...movedClips.filter((item) => item.trackId === track.id)
-            ].sort((left, right) => left.startUs - right.startUs)
-          }))
-        });
-      });
-    }
     setSelectedClipIds(selectedMoveClips.map((item) => item.id));
     const failed = results.find((result) => !result.ok);
     setStatusMessage(failed ? failed.error ?? "Move clip failed" : `Moved ${movedClips.length} clip${movedClips.length === 1 ? "" : "s"}`, {
@@ -701,15 +643,7 @@ export function EditTab({
       edge,
       timeUs: edge === "start" ? nextClip.startUs : nextClip.outUs
     }, "Trim failed");
-    if (!applyEngineTimeline(result.data)) {
-      setTimeline((current) => withTimelineEditDuration({
-        ...current,
-        tracks: current.tracks.map((track) => ({
-          ...track,
-          clips: track.clips.map((item) => (item.id === clipId ? nextClip : item))
-        }))
-      }));
-    }
+    applyEngineTimeline(result.data);
     setSelectedClipIds([clipId]);
     setStatusMessage(result.ok ? "Trimmed clip" : result.error ?? "Trim failed", { level: result.ok ? "success" : "error" });
   }
@@ -739,38 +673,7 @@ export function EditTab({
       ? Math.max(0, startUs)
       : resolveMediaDropPlacement(timeline, asset, targetTrack.id, getTrackEndUs(targetTrack), timelineZoom, snapping).startUs;
     const clipId = `clip_${Date.now()}`;
-    const newClip = {
-      id: clipId,
-      mediaId: asset.id,
-      trackId: targetTrack.id,
-      startUs: nextStartUs,
-      inUs: 0,
-      outUs: fallbackDurationUs,
-      speedPercent: 100,
-      color: {
-        brightness: 0,
-        contrast: 0,
-        saturation: 1,
-        temperature: 0,
-        tint: 0
-      }
-    };
-
-    setTimeline((current) => withTimelineEditDuration({
-      ...current,
-      tracks: current.tracks.map((track) =>
-        track.id === targetTrack.id
-          ? {
-              ...track,
-              clips: [...track.clips, newClip].sort((left, right) => left.startUs - right.startUs)
-            }
-          : track
-      )
-    }));
-    setSelectedClipIds([clipId]);
-    setStatusMessage(`Added ${asset.name} to timeline`, { level: "success", details: { mediaId: asset.id, clipId, trackId: targetTrack.id } });
-
-    void runCommand({
+    const result = await runCommand({
       type: "add_clip",
       clipId,
       mediaId: asset.id,
@@ -779,12 +682,14 @@ export function EditTab({
       inUs: 0,
       outUs: fallbackDurationUs,
       speedPercent: 100
-    }, "Add clip failed").then((result) => {
-      if (!result.ok) {
-        setStatusMessage(result.error ?? "Add clip failed", { level: "error" });
-        return;
-      }
+    }, "Add clip failed");
+    if (result.ok) {
       applyEngineTimeline(result.data);
+      setSelectedClipIds([clipId]);
+    }
+    setStatusMessage(result.ok ? `Added ${asset.name} to timeline` : result.error ?? "Add clip failed", {
+      level: result.ok ? "success" : "error",
+      details: { mediaId: asset.id, clipId, trackId: targetTrack.id }
     });
 
     void getMediaDurationUs(asset, fallbackDurationUs);
@@ -1082,7 +987,7 @@ export function EditTab({
     }
 
     const duplicateOffsetUs = Math.max(...clips.map((clip) => clip.startUs + getClipDisplayDurationUs(clip))) - Math.min(...clips.map((clip) => clip.startUs)) + snapIntervalUs;
-    insertTimelineClips(
+    void insertTimelineClips(
       clips.map((clip, index) => ({
         ...clip,
         id: `clip_${Date.now()}_${index}`,
@@ -1104,10 +1009,45 @@ export function EditTab({
       id: `clip_${Date.now()}_${index}`,
       startUs: pasteStartUs + item.offsetUs
     }));
-    insertTimelineClips(nextClips, "Pasted");
+    void insertTimelineClips(nextClips, "Pasted");
   }
 
-  function insertTimelineClips(clips: TimelineClip[], actionLabel: string) {
+  async function generateProxyForMedia(asset: MediaAsset) {
+    if (!projectPath) {
+      setStatusMessage("Save or open a project before generating proxies", { level: "warning", source: "media" });
+      return;
+    }
+    if (!mediaNeedsProxy(asset)) {
+      setStatusMessage(`${asset.name} does not need a proxy`, { source: "media" });
+      return;
+    }
+    setGeneratingProxyIds((current) => new Set(current).add(asset.id));
+    setStatusMessage(`Generating proxy for ${asset.name}`, { source: "media", details: { mediaId: asset.id } });
+    try {
+      const result = await generateMediaProxy(asset, projectPath);
+      setProxyRefreshKey((value) => value + 1);
+      setStatusMessage(result.status === "ready" ? `Proxy ready for ${asset.name}` : `Proxy ${result.status} for ${asset.name}`, {
+        level: result.status === "ready" ? "success" : "warning",
+        source: "media",
+        details: { mediaId: asset.id, proxyPath: result.path }
+      });
+    } catch (error) {
+      setProxyRefreshKey((value) => value + 1);
+      setStatusMessage(error instanceof Error ? error.message : "Proxy generation failed", {
+        level: "error",
+        source: "media",
+        details: { mediaId: asset.id }
+      });
+    } finally {
+      setGeneratingProxyIds((current) => {
+        const next = new Set(current);
+        next.delete(asset.id);
+        return next;
+      });
+    }
+  }
+
+  async function insertTimelineClips(clips: TimelineClip[], actionLabel: string) {
     const blockedTrack = clips
       .map((clip) => timeline.tracks.find((track) => track.id === clip.trackId))
       .find((track) => track?.locked);
@@ -1116,23 +1056,9 @@ export function EditTab({
       return;
     }
 
-    setTimeline((current) => withTimelineEditDuration({
-      ...current,
-      tracks: current.tracks.map((track) => ({
-        ...track,
-        clips: [...track.clips, ...clips.filter((clip) => clip.trackId === track.id)].sort((left, right) => left.startUs - right.startUs)
-      }))
-    }));
-    setSelectedClipIds(clips.map((clip) => clip.id));
-    setStatusMessage(`${actionLabel} ${clips.length} clip${clips.length === 1 ? "" : "s"}`, {
-      level: "success",
-      source: "timeline",
-      details: { clipIds: clips.map((clip) => clip.id) }
-    });
-
-    void Promise.all(
-      clips.map((clip) =>
-        runCommand({
+    const results = await runTimelineCommandBatch(
+      clips.map((clip) => ({
+        command: {
           type: "add_clip",
           clipId: clip.id,
           mediaId: clip.mediaId,
@@ -1141,13 +1067,18 @@ export function EditTab({
           inUs: clip.inUs,
           outUs: clip.outUs,
           speedPercent: normalizeClipSpeedPercent(clip.speedPercent)
-        }, `${actionLabel} clip failed`)
-      )
-    ).then((results) => {
-      const lastResult = results.at(-1);
-      if (lastResult?.ok) {
-        applyEngineTimeline(lastResult.data);
-      }
+        },
+        fallbackError: `${actionLabel} clip failed`
+      }))
+    );
+    if (results.every((result) => result.ok)) {
+      setSelectedClipIds(clips.map((clip) => clip.id));
+    }
+    const failed = results.find((result) => !result.ok);
+    setStatusMessage(failed ? failed.error ?? `${actionLabel} failed` : `${actionLabel} ${clips.length} clip${clips.length === 1 ? "" : "s"}`, {
+      level: failed ? "error" : "success",
+      source: "timeline",
+      details: { clipIds: clips.map((clip) => clip.id) }
     });
   }
 
@@ -1164,7 +1095,7 @@ export function EditTab({
 
   function startChangingClipSpeed(clip: TimelineClip) {
     setSpeedDialogClipId(clip.id);
-    setSpeedDraft(normalizeClipSpeedPercent(clip.speedPercent));
+    setSpeedDraft(String(normalizeClipSpeedPercent(clip.speedPercent)));
   }
 
   async function applyClipSpeed() {
@@ -1173,20 +1104,13 @@ export function EditTab({
     }
 
     const nextSpeedPercent = normalizeClipSpeedPercent(speedDraft);
-    setTimeline((current) => withTimelineEditDuration({
-      ...current,
-      tracks: current.tracks.map((track) => ({
-        ...track,
-        clips: track.clips.map((clip) => (clip.id === speedDialogClip.id ? { ...clip, speedPercent: nextSpeedPercent } : clip))
-      }))
-    }));
     setSpeedDialogClipId("");
     const result = await runCommand({ type: "apply_clip_speed", clipId: speedDialogClip.id, speedPercent: nextSpeedPercent }, "Change speed failed");
     applyEngineTimeline(result.data);
     setStatusMessage(result.ok ? `Clip speed ${nextSpeedPercent}%` : result.error ?? "Change speed failed", { level: result.ok ? "success" : "error", source: "timeline" });
   }
 
-  function renameTrack(trackId: string) {
+  async function renameTrack(trackId: string) {
     const track = timeline.tracks.find((item) => item.id === trackId);
     if (!track) {
       return;
@@ -1195,42 +1119,36 @@ export function EditTab({
     if (!nextName || nextName === track.name) {
       return;
     }
-    setTimeline((current) => ({
-      ...current,
-      tracks: current.tracks.map((item) => (item.id === trackId ? { ...item, name: nextName } : item))
-    }));
-    setStatusMessage(`Renamed ${track.name} to ${nextName}`, { source: "timeline" });
+    const result = await runCommand({ type: "update_track", trackId, name: nextName }, "Rename track failed");
+    applyEngineTimeline(result.data);
+    setStatusMessage(result.ok ? `Renamed ${track.name} to ${nextName}` : result.error ?? "Rename track failed", {
+      level: result.ok ? "success" : "error",
+      source: "timeline"
+    });
   }
 
-  function addTrackNear(trackId: string, placement: "above" | "below") {
+  async function addTrackNear(trackId: string, placement: "above" | "below") {
     const anchor = timeline.tracks.find((track) => track.id === trackId);
     if (!anchor) {
       return;
     }
     const insertAt = timeline.tracks.findIndex((track) => track.id === trackId) + (placement === "below" ? 1 : 0);
-    setTimeline((current) => {
-      const trackCount = current.tracks.filter((track) => track.kind === anchor.kind).length + 1;
-      const nextTrack = {
-        id: `${anchor.kind[0]}${Date.now()}`,
-        name: `${anchor.kind === "video" ? "Video" : "Audio"} ${trackCount}`,
-        kind: anchor.kind,
-        index: insertAt,
-        locked: false,
-        muted: false,
-        visible: true,
-        clips: []
-      };
-      const tracks = [...current.tracks];
-      tracks.splice(insertAt, 0, nextTrack);
-      return {
-        ...current,
-        tracks: tracks.map((track, index) => ({ ...track, index }))
-      };
+    const trackCount = timeline.tracks.filter((track) => track.kind === anchor.kind).length + 1;
+    const result = await runCommand({
+      type: "add_track",
+      trackId: `${anchor.kind[0]}${Date.now()}`,
+      name: `${anchor.kind === "video" ? "Video" : "Audio"} ${trackCount}`,
+      kind: anchor.kind,
+      index: insertAt
+    }, "Add track failed");
+    applyEngineTimeline(result.data);
+    setStatusMessage(result.ok ? `Added ${anchor.kind} track ${placement} ${anchor.name}` : result.error ?? "Add track failed", {
+      level: result.ok ? "success" : "error",
+      source: "timeline"
     });
-    setStatusMessage(`Added ${anchor.kind} track ${placement} ${anchor.name}`, { source: "timeline" });
   }
 
-  function deleteEmptyTrack(trackId: string) {
+  async function deleteEmptyTrack(trackId: string) {
     const track = timeline.tracks.find((item) => item.id === trackId);
     if (!track) {
       return;
@@ -1239,12 +1157,10 @@ export function EditTab({
       setStatusMessage("Delete Track is only available for empty tracks", { level: "warning", source: "timeline" });
       return;
     }
-    setTimeline((current) => ({
-      ...current,
-      tracks: current.tracks.filter((item) => item.id !== trackId).map((item, index) => ({ ...item, index }))
-    }));
+    const result = await runCommand({ type: "delete_track", trackId }, "Delete track failed");
+    applyEngineTimeline(result.data);
     setSoloTrackIds((current) => current.filter((id) => id !== trackId));
-    setStatusMessage(`Deleted ${track.name}`, { level: "success", source: "timeline" });
+    setStatusMessage(result.ok ? `Deleted ${track.name}` : result.error ?? "Delete track failed", { level: result.ok ? "success" : "error", source: "timeline" });
   }
 
   async function detachClipAudio(clip: TimelineClip) {
@@ -1278,35 +1194,6 @@ export function EditTab({
       trackId: targetTrack.id,
       audio: detachedAudio
     };
-    const mutedSourceClip: TimelineClip = {
-      ...clip,
-      audio: {
-        ...defaultAudioAdjustment,
-        ...clip.audio,
-        muted: true
-      }
-    };
-
-    setTimeline((current) => withTimelineEditDuration({
-      ...current,
-      tracks: current.tracks.map((track) => {
-        if (track.id === sourceTrack.id) {
-          return {
-            ...track,
-            clips: track.clips.map((item) => (item.id === clip.id ? mutedSourceClip : item))
-          };
-        }
-        if (track.id === targetTrack.id) {
-          return {
-            ...track,
-            clips: [...track.clips, detachedClip].sort((left, right) => left.startUs - right.startUs)
-          };
-        }
-        return track;
-      })
-    }));
-    setSelectedClipIds([detachedClip.id]);
-
     const muteResult = await runCommand({ type: "apply_audio_adjustment", clipId: clip.id, adjustment: { muted: true } }, "Mute source clip failed");
     const addResult = await runCommand({
       type: "add_clip",
@@ -1325,6 +1212,7 @@ export function EditTab({
     }, "Detached audio settings failed");
     if (audioResult.ok) {
       applyEngineTimeline(audioResult.data);
+      setSelectedClipIds([detachedClip.id]);
     } else if (addResult.ok) {
       applyEngineTimeline(addResult.data);
     }
@@ -1339,6 +1227,8 @@ export function EditTab({
   function contextMenuItems(): ContextMenuItem[] {
     if (contextMenu?.kind === "media" && contextMediaAsset) {
       const canReveal = "__TAURI_INTERNALS__" in window;
+      const proxyEligible = mediaNeedsProxy(contextMediaAsset);
+      const generatingProxy = generatingProxyIds.has(contextMediaAsset.id);
       return [
         {
           id: "add-to-timeline",
@@ -1358,6 +1248,13 @@ export function EditTab({
           icon: <Link2 size={15} />,
           disabled: !canReveal,
           onSelect: () => void relinkMedia(contextMediaAsset)
+        },
+        {
+          id: "generate-proxy",
+          label: generatingProxy ? "Generating Proxy..." : "Generate Proxy",
+          icon: <Repeat size={15} />,
+          disabled: !canReveal || !projectPath || !proxyEligible || generatingProxy,
+          onSelect: () => void generateProxyForMedia(contextMediaAsset)
         },
         {
           id: "reveal-in-explorer",
@@ -1785,7 +1682,7 @@ export function EditTab({
                           onBlur={cancelMediaRename}
                         />
                         <small>Enter to rename</small>
-                        <MediaManagementStatus asset={asset} projectPath={projectPath} missing={missing} />
+                        <MediaManagementStatus asset={asset} projectPath={projectPath} missing={missing} refreshKey={proxyRefreshKey} generating={generatingProxyIds.has(asset.id)} />
                       </div>
                     ) : (
                       <button
@@ -1802,7 +1699,7 @@ export function EditTab({
                         <MediaThumbnail asset={asset} />
                         <span>{asset.name}</span>
                         <small>{formatMediaAssetDetail(asset)}</small>
-                        <MediaManagementStatus asset={asset} projectPath={projectPath} missing={missing} />
+                        <MediaManagementStatus asset={asset} projectPath={projectPath} missing={missing} refreshKey={proxyRefreshKey} generating={generatingProxyIds.has(asset.id)} />
                       </button>
                       )}
                   </div>
@@ -1981,7 +1878,7 @@ export function EditTab({
         <div className="control-stack">
           <label>
             Speed %
-            <input type="number" min={25} max={400} step={5} value={speedDraft} onChange={(event) => setSpeedDraft(Number(event.target.value))} />
+            <input type="number" min={25} max={400} step={5} value={speedDraft} onChange={(event) => setSpeedDraft(event.target.value)} />
           </label>
           <div className="export-actions">
             <Button icon={<SlidersHorizontal size={16} />} onClick={() => void applyClipSpeed()}>
@@ -2140,7 +2037,15 @@ const TimelineSurface = memo(function TimelineSurface({
   }
 
   function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || isPointerInNativeScrollbar(event)) {
+      return;
+    }
+
     const target = event.target as HTMLElement;
+    if (target === event.currentTarget || !target.closest(".track-lane, .time-ruler-content, .playhead")) {
+      return;
+    }
+
     if (target.closest(".timeline-clip, .track-header, .icon-button")) {
       return;
     }
@@ -2207,6 +2112,17 @@ const TimelineSurface = memo(function TimelineSurface({
     }
     const horizontalDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
     event.currentTarget.scrollLeft += horizontalDelta;
+  }
+
+  function isPointerInNativeScrollbar(event: ReactPointerEvent<HTMLDivElement>) {
+    const element = event.currentTarget;
+    const rect = element.getBoundingClientRect();
+    const verticalScrollbarWidth = element.offsetWidth - element.clientWidth;
+    const horizontalScrollbarHeight = element.offsetHeight - element.clientHeight;
+    return (
+      (verticalScrollbarWidth > 0 && event.clientX >= rect.right - verticalScrollbarWidth) ||
+      (horizontalScrollbarHeight > 0 && event.clientY >= rect.bottom - horizontalScrollbarHeight)
+    );
   }
 
   function beginClipInteraction(event: ReactPointerEvent<HTMLElement>, clip: TimelineClip, mode: ClipInteraction["mode"]) {
@@ -2739,7 +2655,7 @@ function PreviewSurface({
   useEffect(() => {
     syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent);
     applyMediaElementAudio(videoRef, videoAudioGraphRef, videoClip, projectSettings, mediaElementSyncPlayheadUs, playing, previewVolumePercent);
-  }, [videoClip, mediaElementSyncPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, videoSrc, projectSettings, stats?.childHwnd, separateAudioPreviewActive]);
+  }, [videoClip, mediaElementSyncPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, videoSrc, projectSettings, stats?.childHwnd, stats?.renderMode, separateAudioPreviewActive]);
 
   useEffect(() => {
     syncMediaElement(audioRef, audioClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent);
@@ -2749,9 +2665,9 @@ function PreviewSurface({
   useEffect(() => {
     const interval = window.setInterval(() => {
       void getNativePreviewStats().then(setStats).catch(() => undefined);
-    }, 1000);
+    }, playing && !separateAudioPreviewActive ? 500 : 1000);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [playing, separateAudioPreviewActive]);
 
   const activeAsset = videoAsset ?? audioAsset;
   const activeClip = videoClip ?? audioClip;
@@ -2759,7 +2675,9 @@ function PreviewSurface({
   const displayedPreviewFps = playing ? Math.round(stats?.previewFps || projectSettings.fps) : Math.round(stats?.previewFps ?? 0);
   const previewScaleStyle = getPreviewScaleStyle(previewScale, projectSettings);
   const visualPreviewStyle = getClipVisualPreviewStyle(videoClip, previewScaleStyle);
-  const nativePreviewActive = Boolean(stats?.childHwnd) && !clipHasVisualEdits(videoClip) && !separateAudioPreviewActive;
+  const nativePreviewActive = stats?.renderMode === "native-d3d" && Boolean(stats.childHwnd) && !clipHasVisualEdits(videoClip) && !separateAudioPreviewActive;
+  const engineFrameActive = stats?.renderMode === "engine-frame" && Boolean(stats.frameDataUrl) && !clipHasVisualEdits(videoClip) && !separateAudioPreviewActive;
+  const hiddenVideoCarrierActive = nativePreviewActive || engineFrameActive;
   const frameClassName = activeAsset
     ? nativePreviewActive
       ? "preview-frame has-native"
@@ -2771,10 +2689,10 @@ function PreviewSurface({
   return (
     <div ref={frameRef} className={frameClassName}>
       {nativePreviewActive ? <div className="native-preview-surface" style={previewScaleStyle} /> : null}
-      {!nativePreviewActive && videoAsset && videoClip && videoSrc ? (
+      {!nativePreviewActive && !engineFrameActive && videoAsset && videoClip && videoSrc ? (
         <video ref={videoRef} src={videoSrc} muted={false} playsInline style={visualPreviewStyle} onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent)} />
       ) : null}
-      {nativePreviewActive && videoAsset && videoClip && videoSrc ? (
+      {hiddenVideoCarrierActive && videoAsset && videoClip && videoSrc ? (
         <video
           ref={videoRef}
           src={videoSrc}
@@ -2787,7 +2705,8 @@ function PreviewSurface({
           onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent)}
         />
       ) : null}
-      {!nativePreviewActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" style={visualPreviewStyle} /> : null}
+      {!nativePreviewActive && engineFrameActive ? <img className="preview-frame-image" src={stats?.frameDataUrl ?? ""} alt="" style={visualPreviewStyle} /> : null}
+      {!nativePreviewActive && !engineFrameActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" style={visualPreviewStyle} /> : null}
       {!nativePreviewActive && audioAsset && audioClip && audioSrc ? (
         <>
           <audio ref={audioRef} src={audioSrc} onLoadedMetadata={() => syncMediaElement(audioRef, audioClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent)} />
@@ -3001,7 +2920,19 @@ function TimelineClipWaveform({ asset, clip }: { asset: MediaAsset; clip: Timeli
   );
 }
 
-function MediaManagementStatus({ asset, projectPath, missing }: { asset: MediaAsset; projectPath?: string; missing: boolean }) {
+function MediaManagementStatus({
+  asset,
+  projectPath,
+  missing,
+  refreshKey,
+  generating
+}: {
+  asset: MediaAsset;
+  projectPath?: string;
+  missing: boolean;
+  refreshKey: number;
+  generating: boolean;
+}) {
   const [cacheStatus, setCacheStatus] = useState<MediaCacheStatus>(() => ({
     thumbnail: asset.kind === "video" ? "ready-on-demand" : "not-applicable",
     waveform: asset.kind === "audio" || asset.metadata?.hasAudio ? "ready-on-demand" : "not-applicable",
@@ -3009,6 +2940,11 @@ function MediaManagementStatus({ asset, projectPath, missing }: { asset: MediaAs
   }));
 
   useEffect(() => {
+    if (generating) {
+      setCacheStatus((current) => ({ ...current, proxy: "generating" }));
+      return;
+    }
+
     let cancelled = false;
     void getMediaCacheStatus(asset, projectPath).then((status) => {
       if (!cancelled) {
@@ -3018,14 +2954,14 @@ function MediaManagementStatus({ asset, projectPath, missing }: { asset: MediaAs
     return () => {
       cancelled = true;
     };
-  }, [asset, projectPath]);
+  }, [asset, projectPath, refreshKey, generating]);
 
   return (
     <span className="media-management-status">
       <span className={missing ? "media-status-danger" : "media-status-ok"}>{missing ? "Missing" : "Linked"}</span>
       <span>{statusLabel("Thumb", cacheStatus.thumbnail)}</span>
       <span>{statusLabel("Wave", cacheStatus.waveform)}</span>
-      <span className={cacheStatus.proxy === "missing" || cacheStatus.proxy === "error" ? "media-status-warning" : ""}>
+      <span className={cacheStatus.proxy === "missing" || cacheStatus.proxy === "error" || cacheStatus.proxy === "generating" ? "media-status-warning" : ""}>
         {statusLabel("Proxy", cacheStatus.proxy)}
       </span>
     </span>
@@ -3375,36 +3311,6 @@ function withTimelineEditDuration(timeline: Timeline): Timeline {
   return {
     ...timeline,
     durationUs: getTimelineEditDurationUs(timeline)
-  };
-}
-
-function rippleDeleteClips(timeline: Timeline, deletedClips: TimelineClip[]) {
-  const deletedByTrack = new Map<string, TimelineClip[]>();
-  for (const clip of deletedClips) {
-    deletedByTrack.set(clip.trackId, [...(deletedByTrack.get(clip.trackId) ?? []), clip]);
-  }
-  const deletedIds = new Set(deletedClips.map((clip) => clip.id));
-
-  return {
-    ...timeline,
-    tracks: timeline.tracks.map((track) => {
-      const trackDeletedClips = (deletedByTrack.get(track.id) ?? []).sort((left, right) => left.startUs - right.startUs);
-      if (trackDeletedClips.length === 0) {
-        return track;
-      }
-
-      return {
-        ...track,
-        clips: track.clips
-          .filter((clip) => !deletedIds.has(clip.id))
-          .map((clip) => {
-            const offsetUs = trackDeletedClips
-              .filter((deletedClip) => deletedClip.startUs < clip.startUs)
-              .reduce((offset, deletedClip) => offset + getClipDisplayDurationUs(deletedClip), 0);
-            return offsetUs > 0 ? { ...clip, startUs: Math.max(0, clip.startUs - offsetUs) } : clip;
-          })
-      };
-    })
   };
 }
 

@@ -26,6 +26,7 @@ fn main() {
             commands::engine_rpc,
             commands::engine_status,
             commands::media_probe,
+            commands::media_generate_proxy,
             commands::media_proxy_status,
             commands::media_preview_frame_data_url,
             commands::media_thumbnail_data_url,

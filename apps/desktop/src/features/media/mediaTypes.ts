@@ -1,7 +1,7 @@
 import type { MediaIntelligence, MediaMetadata } from "@ai-video-editor/protocol";
 
 export type MediaKind = "video" | "audio";
-export type MediaCacheAvailability = "ready" | "ready-on-demand" | "missing" | "not-needed" | "unavailable" | "not-applicable" | "error";
+export type MediaCacheAvailability = "ready" | "ready-on-demand" | "generating" | "missing" | "not-needed" | "unavailable" | "not-applicable" | "error";
 
 export interface MediaCacheStatus {
   thumbnail: MediaCacheAvailability;
@@ -141,6 +141,20 @@ export async function getMediaCacheStatus(asset: MediaAsset, projectPath?: strin
   }
 }
 
+export async function generateMediaProxy(asset: MediaAsset, projectPath?: string) {
+  if (!projectPath || !mediaNeedsProxy(asset) || !("__TAURI_INTERNALS__" in window)) {
+    return {
+      status: !mediaNeedsProxy(asset) ? "not-needed" : "unavailable"
+    } satisfies { status: MediaCacheAvailability; path?: string };
+  }
+
+  const { invoke } = await import("@tauri-apps/api/core");
+  return await invoke<{ status: MediaCacheAvailability; path?: string }>("media_generate_proxy", {
+    path: asset.path,
+    projectPath
+  });
+}
+
 export async function getMediaDurationUs(asset: MediaAsset, fallbackUs: number) {
   if (asset.metadata?.durationUs && asset.metadata.durationUs > 0) {
     return asset.metadata.durationUs;
@@ -172,7 +186,7 @@ function mediaHasAudio(asset: MediaAsset) {
   return asset.kind === "audio" || Boolean(asset.metadata?.hasAudio);
 }
 
-function mediaNeedsProxy(asset: MediaAsset) {
+export function mediaNeedsProxy(asset: MediaAsset) {
   if (asset.kind !== "video") {
     return false;
   }

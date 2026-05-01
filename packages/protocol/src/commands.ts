@@ -5,6 +5,7 @@ export type CommandType =
   | "import_media"
   | "remove_media"
   | "add_track"
+  | "update_track"
   | "delete_track"
   | "add_clip"
   | "move_clip"
@@ -37,8 +38,18 @@ export interface RemoveMediaCommand {
 export interface AddTrackCommand {
   type: "add_track";
   kind: TrackKind;
+  trackId?: string;
   name?: string;
   index?: number;
+}
+
+export interface UpdateTrackCommand {
+  type: "update_track";
+  trackId: string;
+  name?: string;
+  locked?: boolean;
+  muted?: boolean;
+  visible?: boolean;
 }
 
 export interface DeleteTrackCommand {
@@ -150,6 +161,7 @@ export type EditorCommand =
   | ImportMediaCommand
   | RemoveMediaCommand
   | AddTrackCommand
+  | UpdateTrackCommand
   | DeleteTrackCommand
   | AddClipCommand
   | MoveClipCommand

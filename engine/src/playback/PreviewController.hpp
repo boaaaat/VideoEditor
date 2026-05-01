@@ -1,12 +1,18 @@
 #pragma once
 
+#include "platform/FfmpegLocator.hpp"
 #include "platform/GpuDetector.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iterator>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
@@ -52,11 +58,14 @@ struct PreviewState {
   std::int64_t playheadUs = 0;
   std::int64_t inUs = 0;
   std::int64_t outUs = 0;
+  double playbackRate = 1.0;
   bool playing = false;
 };
 
 class PreviewController {
  public:
+  explicit PreviewController(const FfmpegLocator& locator) : locator_(locator) {}
+
   nlohmann::json attach(const nlohmann::json& params, const GpuStatus& gpu) {
     parentHwnd_ = params.value("parentHwnd", std::string{});
     if (params.contains("rect")) {
@@ -82,6 +91,7 @@ class PreviewController {
   }
 
   nlohmann::json setState(const nlohmann::json& params) {
+    const auto previousMediaPath = state_.mediaPath;
     state_.mediaId = params.value("mediaId", state_.mediaId);
     state_.mediaPath = params.value("mediaPath", state_.mediaPath);
     state_.codec = params.value("codec", state_.codec);
@@ -91,30 +101,44 @@ class PreviewController {
     state_.playheadUs = params.value("playheadUs", state_.playheadUs);
     state_.inUs = params.value("inUs", state_.inUs);
     state_.outUs = params.value("outUs", state_.outUs);
+    state_.playbackRate = params.value("playbackRate", state_.playbackRate);
     state_.playing = params.value("playing", state_.playing);
+    if (previousMediaPath != state_.mediaPath) {
+      resetDecodedFrame();
+    }
     if (state_.mediaPath.empty()) {
       decodeMode_ = "idle";
+    }
+    if (state_.playing) {
+      playbackStartedAt_ = std::chrono::steady_clock::now();
+      playbackStartUs_ = state_.playheadUs;
     }
     return stats();
   }
 
   nlohmann::json play() {
     state_.playing = true;
+    playbackStartedAt_ = std::chrono::steady_clock::now();
+    playbackStartUs_ = state_.playheadUs;
     return stats();
   }
 
   nlohmann::json pause() {
+    updatePlaybackPosition();
     state_.playing = false;
     return stats();
   }
 
   nlohmann::json seek(const nlohmann::json& params) {
     state_.playheadUs = params.value("playheadUs", state_.playheadUs);
+    playbackStartedAt_ = std::chrono::steady_clock::now();
+    playbackStartUs_ = state_.playheadUs;
     return stats();
   }
 
   nlohmann::json stats() {
-    updateFrameStats();
+    updatePlaybackPosition();
+    updateDecodedFrame();
     const auto warning = warningMessage();
     return {
         {"attached", !parentHwnd_.empty()},
@@ -126,7 +150,12 @@ class PreviewController {
         {"mediaPath", state_.mediaPath},
         {"codec", state_.codec},
         {"decodeMode", decodeMode_},
+        {"renderMode", renderMode_},
         {"frameNumber", frameNumber_},
+        {"renderedFrames", renderedFrames_},
+        {"frameDataUrl", frameDataUrl_},
+        {"lastFramePlayheadUs", lastDecodedPlayheadUs_},
+        {"lastFrameDecodeMs", lastFrameDecodeMs_},
         {"droppedFrames", droppedFrames_},
         {"previewFps", previewFps_},
         {"quality", state_.quality},
@@ -169,26 +198,75 @@ class PreviewController {
         {"parentHwnd", parentHwnd_},
         {"childHwnd", childHwnd_},
         {"rect", rect_.toJson()},
+        {"renderMode", renderMode_},
         {"hdrOutputAvailable", hdrOutputAvailable_},
         {"warning", warningMessage()},
     };
   }
 
-  void updateFrameStats() {
+  void updatePlaybackPosition() {
     if (!state_.playing || state_.mediaPath.empty()) {
       previewFps_ = 0.0;
       return;
     }
 
     const auto now = std::chrono::steady_clock::now();
-    const auto elapsed = std::chrono::duration<double>(now - statsStartedAt_).count();
+    const auto elapsed = std::chrono::duration<double>(now - playbackStartedAt_).count();
     if (elapsed <= 0.0) {
       return;
     }
 
-    previewFps_ = state_.quality == "Full" ? 59.94 : 30.0;
-    previewFps_ = state_.fps > 0.0 ? state_.fps : previewFps_;
-    frameNumber_ = static_cast<std::int64_t>(elapsed * previewFps_);
+    const auto playbackRate = std::isfinite(state_.playbackRate) && state_.playbackRate > 0.0 ? state_.playbackRate : 1.0;
+    auto nextPlayheadUs = playbackStartUs_ + static_cast<std::int64_t>(elapsed * playbackRate * 1'000'000.0);
+    if (state_.outUs > state_.inUs) {
+      nextPlayheadUs = std::min(nextPlayheadUs, state_.outUs);
+    }
+    state_.playheadUs = std::max<std::int64_t>(0, nextPlayheadUs);
+    const auto fps = state_.fps > 0.0 ? state_.fps : 30.0;
+    frameNumber_ = static_cast<std::int64_t>(std::floor((state_.playheadUs / 1'000'000.0) * fps));
+  }
+
+  void updateDecodedFrame() {
+    if (state_.mediaPath.empty()) {
+      resetDecodedFrame();
+      decodeMode_ = "idle";
+      return;
+    }
+
+    const auto targetPlayheadUs = quantizeFrameTime(state_.playheadUs);
+    if (targetPlayheadUs == lastDecodedPlayheadUs_ && state_.mediaPath == lastDecodedMediaPath_ && !frameDataUrl_.empty()) {
+      return;
+    }
+
+    const auto ffmpeg = locator_.locate("ffmpeg");
+    if (!ffmpeg.available) {
+      frameDecodeWarning_ = ffmpeg.message.empty() ? "FFmpeg unavailable; preview decode is disabled." : ffmpeg.message;
+      decodeMode_ = "idle";
+      renderMode_ = "fallback";
+      return;
+    }
+
+    const auto startedAt = std::chrono::steady_clock::now();
+    try {
+      const auto bytes = decodeFrame(ffmpeg.path, state_.mediaPath, targetPlayheadUs);
+      const auto finishedAt = std::chrono::steady_clock::now();
+      lastFrameDecodeMs_ = std::chrono::duration<double, std::milli>(finishedAt - startedAt).count();
+      frameDataUrl_ = "data:image/png;base64," + base64Encode(bytes);
+      lastDecodedMediaPath_ = state_.mediaPath;
+      lastDecodedPlayheadUs_ = targetPlayheadUs;
+      ++renderedFrames_;
+      frameDecodeWarning_.clear();
+      decodeMode_ = "engine/ffmpeg";
+      renderMode_ = "engine-frame";
+      previewFps_ = lastFrameDecodeMs_ > 0.0 ? std::min(state_.fps > 0.0 ? state_.fps : 30.0, 1000.0 / lastFrameDecodeMs_) : 0.0;
+    } catch (const std::exception& error) {
+      ++droppedFrames_;
+      frameDecodeWarning_ = error.what();
+      renderMode_ = "fallback";
+      if (frameDataUrl_.empty()) {
+        decodeMode_ = "idle";
+      }
+    }
   }
 
   [[nodiscard]] std::string warningMessage() const {
@@ -198,23 +276,119 @@ class PreviewController {
     if (state_.colorMode == "HDR" && !hdrOutputAvailable_) {
       return "HDR preview output unavailable; displaying SDR preview. HDR export remains available.";
     }
+    if (!frameDecodeWarning_.empty()) {
+      return frameDecodeWarning_;
+    }
     if (decodeMode_ == "software") {
       return "GPU decode unavailable; preview may drop frames.";
     }
     return "";
   }
 
+  [[nodiscard]] static std::int64_t quantizeFrameTime(std::int64_t playheadUs) {
+    constexpr std::int64_t frameStepUs = 100'000;
+    return std::max<std::int64_t>(0, (playheadUs / frameStepUs) * frameStepUs);
+  }
+
+  [[nodiscard]] std::vector<unsigned char> decodeFrame(const std::string& ffmpegPath, const std::string& mediaPath, std::int64_t playheadUs) const {
+    const auto outputPath = std::filesystem::temp_directory_path() / ("ai-video-preview-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".png");
+    const auto command = quoteArg(ffmpegPath) + " -hide_banner -loglevel error -y -ss " + formatSeconds(playheadUs) + " -i " + quoteArg(mediaPath) +
+                         " -vf " + quoteArg(previewScaleFilter()) + " -frames:v 1 -f image2 -vcodec png " + quoteArg(outputPath.string()) + stderrRedirect();
+
+    const auto exitCode = std::system(command.c_str());
+    if (exitCode != 0 || !std::filesystem::is_regular_file(outputPath)) {
+      std::filesystem::remove(outputPath);
+      throw std::runtime_error("Engine preview decode failed.");
+    }
+
+    std::ifstream file(outputPath, std::ios::binary);
+    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    std::filesystem::remove(outputPath);
+    if (bytes.empty()) {
+      throw std::runtime_error("Engine preview decode produced an empty frame.");
+    }
+    return bytes;
+  }
+
+  static std::string formatSeconds(std::int64_t playheadUs) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3) << (std::max<std::int64_t>(0, playheadUs) / 1'000'000.0);
+    return stream.str();
+  }
+
+  [[nodiscard]] std::string previewScaleFilter() const {
+    const auto maxHeight = state_.quality == "Full" ? 1080 : 720;
+    return "scale=-2:min(" + std::to_string(maxHeight) + "\\,ih)";
+  }
+
+  static std::string quoteArg(const std::string& value) {
+    std::string escaped = "\"";
+    for (const auto character : value) {
+      if (character == '"') {
+        escaped += "\\\"";
+      } else {
+        escaped += character;
+      }
+    }
+    escaped += '"';
+    return escaped;
+  }
+
+  static std::string stderrRedirect() {
+#ifdef _WIN32
+    return " 2>NUL";
+#else
+    return " 2>/dev/null";
+#endif
+  }
+
+  static std::string base64Encode(const std::vector<unsigned char>& bytes) {
+    static constexpr char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string output;
+    output.reserve(((bytes.size() + 2) / 3) * 4);
+    for (std::size_t index = 0; index < bytes.size(); index += 3) {
+      const auto octetA = bytes[index];
+      const auto octetB = index + 1 < bytes.size() ? bytes[index + 1] : 0;
+      const auto octetC = index + 2 < bytes.size() ? bytes[index + 2] : 0;
+      const auto triple = (static_cast<unsigned int>(octetA) << 16) | (static_cast<unsigned int>(octetB) << 8) | static_cast<unsigned int>(octetC);
+      output.push_back(alphabet[(triple >> 18) & 0x3F]);
+      output.push_back(alphabet[(triple >> 12) & 0x3F]);
+      output.push_back(index + 1 < bytes.size() ? alphabet[(triple >> 6) & 0x3F] : '=');
+      output.push_back(index + 2 < bytes.size() ? alphabet[triple & 0x3F] : '=');
+    }
+    return output;
+  }
+
+  void resetDecodedFrame() {
+    frameDataUrl_.clear();
+    lastDecodedMediaPath_.clear();
+    lastDecodedPlayheadUs_ = -1;
+    lastFrameDecodeMs_ = 0.0;
+    frameDecodeWarning_.clear();
+    renderedFrames_ = 0;
+    renderMode_ = "fallback";
+  }
+
+  const FfmpegLocator& locator_;
   std::string parentHwnd_;
   std::string childHwnd_;
   std::string nativeSurfaceError_;
+  std::string frameDecodeWarning_;
+  std::string frameDataUrl_;
+  std::string lastDecodedMediaPath_;
   PreviewRect rect_;
   PreviewState state_;
   std::string decodeMode_ = "idle";
+  std::string renderMode_ = "fallback";
   bool hdrOutputAvailable_ = false;
   int droppedFrames_ = 0;
   double previewFps_ = 0.0;
+  double lastFrameDecodeMs_ = 0.0;
   std::int64_t frameNumber_ = 0;
-  std::chrono::steady_clock::time_point statsStartedAt_ = std::chrono::steady_clock::now();
+  std::int64_t renderedFrames_ = 0;
+  std::int64_t lastDecodedPlayheadUs_ = -1;
+  std::int64_t playbackStartUs_ = 0;
+  std::chrono::steady_clock::time_point playbackStartedAt_ = std::chrono::steady_clock::now();
 
 #ifdef _WIN32
   Microsoft::WRL::ComPtr<ID3D11Device> d3dDevice_;

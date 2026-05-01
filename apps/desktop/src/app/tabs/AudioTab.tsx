@@ -6,6 +6,7 @@ import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Slider } from "../../components/Slider";
 import { Toggle } from "../../components/Toggle";
+import { executeCommand } from "../../features/commands/commandClient";
 import type { LogStatus } from "../../features/logging/appLog";
 import type { MediaAsset } from "../../features/media/mediaTypes";
 import { getMediaSourceUrl, getMediaWaveformDataUrl } from "../../features/media/mediaTypes";
@@ -149,24 +150,17 @@ export function AudioTab({
       return;
     }
 
-    setTimeline((current) => ({
-      ...current,
-      tracks: current.tracks.map((track) => ({
-        ...track,
-        clips: track.clips.map((clip) =>
-          clip.id === selectedClip.id
-            ? {
-                ...clip,
-                audio: {
-                  ...normalizeAudioAdjustment(clip.audio),
-                  ...next
-                }
-              }
-            : clip
-        )
-      }))
-    }));
-    setStatusMessage(label, { details: { clipId: selectedClip.id, adjustment: next } });
+    void executeCommand({ type: "apply_audio_adjustment", clipId: selectedClip.id, adjustment: next }).then((result) => {
+      const nextTimeline = (result.data as { timeline?: Timeline } | undefined)?.timeline;
+      if (result.ok && nextTimeline?.tracks) {
+        setTimeline(nextTimeline);
+        setStatusMessage(label, { details: { clipId: selectedClip.id, adjustment: next } });
+      } else {
+        setStatusMessage(result.error ?? "Audio adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
+      }
+    }).catch((error) => {
+      setStatusMessage(error instanceof Error ? error.message : "Audio adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
+    });
   }
 
   function updateProjectAudio(next: Partial<ProjectSettings>, label: string) {

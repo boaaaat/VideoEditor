@@ -1,6 +1,6 @@
 import { RotateCcw } from "lucide-react";
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
-import { defaultColorAdjustment, type ColorAdjustment, type ClipLut, type ProjectSettings, type Timeline, type TimelineClip } from "@ai-video-editor/protocol";
+import { defaultColorAdjustment, type ColorAdjustment, type ClipLut, type ProjectSettings, type Timeline } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Slider } from "../../components/Slider";
@@ -73,23 +73,16 @@ export function ColorTab({
       return;
     }
 
-    setTimeline((current) => updateClip(current, selectedClip.id, (clip) => ({
-      ...clip,
-      color: {
-        ...normalizeColor(clip.color),
-        ...next
-      }
-    })));
     void executeCommand({ type: "apply_color_adjustment", clipId: selectedClip.id, adjustment: next }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
+        setStatusMessage(label, { details: { clipId: selectedClip.id, adjustment: next } });
       } else {
         setStatusMessage(result.error ?? "Color adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
       }
     }).catch((error) => {
       setStatusMessage(error instanceof Error ? error.message : "Color adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
     });
-    setStatusMessage(label, { details: { clipId: selectedClip.id, adjustment: next } });
   }
 
   function updateSelectedClipLut(next: ClipLut | undefined, label: string) {
@@ -98,20 +91,16 @@ export function ColorTab({
       return;
     }
 
-    setTimeline((current) => updateClip(current, selectedClip.id, (clip) => ({
-      ...clip,
-      lut: next
-    })));
     void executeCommand({ type: "apply_lut", clipId: selectedClip.id, lutId: next?.lutId ?? null, strength: next?.strength ?? 1 }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
+        setStatusMessage(label, { details: { clipId: selectedClip.id, lut: next } });
       } else {
         setStatusMessage(result.error ?? "LUT adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
       }
     }).catch((error) => {
       setStatusMessage(error instanceof Error ? error.message : "LUT adjustment failed", { level: "error", details: { clipId: selectedClip.id } });
     });
-    setStatusMessage(label, { details: { clipId: selectedClip.id, lut: next } });
   }
 
   function resetColor() {
@@ -119,11 +108,6 @@ export function ColorTab({
       setStatusMessage("Select a video clip first", { level: "warning" });
       return;
     }
-    setTimeline((current) => updateClip(current, selectedClip.id, (clip) => ({
-      ...clip,
-      color: defaultColorAdjustment,
-      lut: undefined
-    })));
     void executeCommand({ type: "apply_color_adjustment", clipId: selectedClip.id, adjustment: defaultColorAdjustment })
       .then((result) => {
         if (result.ok) {
@@ -134,6 +118,7 @@ export function ColorTab({
       .then((result) => {
         if (result.ok) {
           applyEngineTimeline(result.data);
+          setStatusMessage("Reset clip color", { details: { clipId: selectedClip.id } });
         } else {
           setStatusMessage(result.error ?? "Reset color failed", { level: "error", details: { clipId: selectedClip.id } });
         }
@@ -141,7 +126,6 @@ export function ColorTab({
       .catch((error) => {
         setStatusMessage(error instanceof Error ? error.message : "Reset color failed", { level: "error", details: { clipId: selectedClip.id } });
       });
-    setStatusMessage("Reset clip color", { details: { clipId: selectedClip.id } });
   }
 
   return (
@@ -232,16 +216,6 @@ function normalizeColor(value?: Partial<ColorAdjustment>): ColorAdjustment {
   return {
     ...defaultColorAdjustment,
     ...value
-  };
-}
-
-function updateClip(timeline: Timeline, clipId: string, updater: (clip: TimelineClip) => TimelineClip): Timeline {
-  return {
-    ...timeline,
-    tracks: timeline.tracks.map((track) => ({
-      ...track,
-      clips: track.clips.map((clip) => (clip.id === clipId ? updater(clip) : clip))
-    }))
   };
 }
 

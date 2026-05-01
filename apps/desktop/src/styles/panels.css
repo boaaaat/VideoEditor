@@ -649,19 +649,23 @@
 
 .color-effects-workspace {
   display: grid;
-  grid-template-rows: minmax(360px, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   gap: 12px;
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .color-effects-playback {
   display: grid;
   grid-template-rows: 40px minmax(0, 1fr);
-  min-height: 360px;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .color-effects-playback .panel-body {
-  height: auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .color-effects-controls-dock {
@@ -677,6 +681,7 @@
   gap: 12px;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
 
 .editor-playback-preview {

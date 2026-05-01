@@ -55,6 +55,7 @@ const browserPreviewState: PreviewState = {
   state: "paused",
   codec: "unknown",
   decodeMode: "idle",
+  renderMode: "fallback",
   droppedFrames: 0,
   previewFps: 0,
   quality: "Proxy",
@@ -62,7 +63,7 @@ const browserPreviewState: PreviewState = {
   hdrOutputAvailable: false
 };
 
-const browserTimeline: Timeline = {
+let browserTimeline: Timeline = {
   id: "timeline_main",
   name: "Main Timeline",
   fps: 30,
@@ -97,9 +98,11 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
     }
 
     if (method === "command.execute") {
+      const command = params as EditorCommand;
+      browserTimeline = applyBrowserTimelineCommand(browserTimeline, command);
       browserUndoCount += 1;
       browserRedoCount = 0;
-      return { ok: true, commandId: `browser-${Date.now()}`, undoCount: browserUndoCount, redoCount: browserRedoCount } as T;
+      return { ok: true, commandId: `browser-${Date.now()}`, commandType: command.type, data: { timeline: browserTimeline }, undoCount: browserUndoCount, redoCount: browserRedoCount } as T;
     }
 
     if (method === "command.undo") {
@@ -334,4 +337,150 @@ export function getCommandHistory(): Promise<CommandHistoryStatus> {
 
 function emitCommandExecutionEvent(detail: CommandExecutionEventDetail) {
   window.dispatchEvent(new CustomEvent("ai-video-editor:command-execution", { detail }));
+}
+
+function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand): Timeline {
+  switch (command.type) {
+    case "add_track": {
+      const index = clampInteger(command.index ?? timeline.tracks.length, 0, timeline.tracks.length);
+      const sameKindCount = timeline.tracks.filter((track) => track.kind === command.kind).length + 1;
+      const nextTrack = {
+        id: command.trackId ?? `${command.kind[0]}${Date.now()}`,
+        name: command.name ?? `${command.kind === "video" ? "Video" : "Audio"} ${sameKindCount}`,
+        kind: command.kind,
+        index,
+        locked: false,
+        muted: false,
+        visible: true,
+        clips: []
+      };
+      const tracks = [...timeline.tracks];
+      tracks.splice(index, 0, nextTrack);
+      return { ...timeline, tracks: reindexTracks(tracks) };
+    }
+    case "update_track":
+      return {
+        ...timeline,
+        tracks: timeline.tracks.map((track) =>
+          track.id === command.trackId
+            ? {
+                ...track,
+                name: command.name?.trim() || track.name,
+                locked: command.locked ?? track.locked,
+                muted: command.muted ?? track.muted,
+                visible: command.visible ?? track.visible
+              }
+            : track
+        )
+      };
+    case "delete_track":
+      return { ...timeline, tracks: reindexTracks(timeline.tracks.filter((track) => track.id !== command.trackId)) };
+    case "add_clip":
+      return updateBrowserTrackClips(timeline, command.trackId, (clips) => [
+        ...clips.filter((clip) => clip.id !== (command.clipId ?? "")),
+        {
+          id: command.clipId ?? `clip_${Date.now()}`,
+          mediaId: command.mediaId,
+          trackId: command.trackId,
+          startUs: command.startUs,
+          inUs: command.inUs ?? 0,
+          outUs: command.outUs ?? Math.max((command.inUs ?? 0) + 1_000_000, 8_000_000),
+          speedPercent: normalizeBrowserSpeed(command.speedPercent),
+          color: { brightness: 0, contrast: 0, saturation: 1, temperature: 0, tint: 0 },
+          audio: { gainDb: 0, muted: false, fadeInUs: 0, fadeOutUs: 0, normalize: false, cleanup: false },
+          transform: { enabled: true, scale: 1, positionX: 0, positionY: 0, rotation: 0, opacity: 1 },
+          effects: []
+        }
+      ]);
+    case "move_clip": {
+      const clip = timeline.tracks.flatMap((track) => track.clips).find((item) => item.id === command.clipId);
+      if (!clip) {
+        return timeline;
+      }
+      const withoutClip = {
+        ...timeline,
+        tracks: timeline.tracks.map((track) => ({ ...track, clips: track.clips.filter((item) => item.id !== command.clipId) }))
+      };
+      return updateBrowserTrackClips(withoutClip, command.trackId, (clips) => [...clips, { ...clip, trackId: command.trackId, startUs: command.startUs }]);
+    }
+    case "trim_clip":
+      return updateBrowserClip(timeline, command.clipId, (clip) =>
+        command.edge === "start"
+          ? { ...clip, inUs: Math.max(0, clip.inUs + Math.max(0, command.timeUs - clip.startUs)), startUs: Math.max(0, command.timeUs) }
+          : { ...clip, outUs: Math.max(clip.inUs + 250_000, command.timeUs) }
+      );
+    case "split_clip": {
+      const clip = command.clipId
+        ? timeline.tracks.flatMap((track) => track.clips).find((item) => item.id === command.clipId)
+        : timeline.tracks.flatMap((track) => track.clips).find((item) => command.playheadUs > item.startUs && command.playheadUs < item.startUs + getBrowserClipDisplayDurationUs(item));
+      if (!clip || command.playheadUs <= clip.startUs || command.playheadUs >= clip.startUs + getBrowserClipDisplayDurationUs(clip)) {
+        return timeline;
+      }
+      const splitInUs = clip.inUs + Math.round((command.playheadUs - clip.startUs) * (normalizeBrowserSpeed(clip.speedPercent) / 100));
+      const secondClip = { ...clip, id: `clip_${Date.now()}`, startUs: command.playheadUs, inUs: splitInUs };
+      return updateBrowserTrackClips(timeline, clip.trackId, (clips) => clips.flatMap((item) => (item.id === clip.id ? [{ ...item, outUs: splitInUs }, secondClip] : [item])));
+    }
+    case "delete_clip":
+      return { ...timeline, tracks: timeline.tracks.map((track) => ({ ...track, clips: track.clips.filter((clip) => clip.id !== command.clipId) })) };
+    case "ripple_delete_clip": {
+      const deletedClip = timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === command.clipId);
+      if (!deletedClip) {
+        return timeline;
+      }
+      const deletedDurationUs = getBrowserClipDisplayDurationUs(deletedClip);
+      return updateBrowserTrackClips(timeline, deletedClip.trackId, (clips) =>
+        clips
+          .filter((clip) => clip.id !== deletedClip.id)
+          .map((clip) => (clip.startUs > deletedClip.startUs ? { ...clip, startUs: Math.max(0, clip.startUs - deletedDurationUs) } : clip))
+      );
+    }
+    case "apply_color_adjustment":
+      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, color: { ...clip.color, ...command.adjustment } }));
+    case "apply_lut":
+      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, lut: command.lutId ? { lutId: command.lutId, strength: command.strength } : undefined }));
+    case "apply_audio_adjustment":
+      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, audio: { gainDb: 0, muted: false, fadeInUs: 0, fadeOutUs: 0, normalize: false, cleanup: false, ...clip.audio, ...command.adjustment } }));
+    case "apply_clip_speed":
+      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, speedPercent: normalizeBrowserSpeed(command.speedPercent) }));
+    case "apply_transform":
+      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, transform: { enabled: true, scale: 1, positionX: 0, positionY: 0, rotation: 0, opacity: 1, ...clip.transform, ...command.transform } }));
+    case "apply_effect_stack":
+      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, effects: command.effects }));
+    default:
+      return timeline;
+  }
+}
+
+function updateBrowserTrackClips(timeline: Timeline, trackId: string, updater: (clips: Timeline["tracks"][number]["clips"]) => Timeline["tracks"][number]["clips"]): Timeline {
+  return {
+    ...timeline,
+    tracks: timeline.tracks.map((track) => (track.id === trackId ? { ...track, clips: updater(track.clips).sort((left, right) => left.startUs - right.startUs) } : track))
+  };
+}
+
+function updateBrowserClip(timeline: Timeline, clipId: string, updater: (clip: Timeline["tracks"][number]["clips"][number]) => Timeline["tracks"][number]["clips"][number]): Timeline {
+  return {
+    ...timeline,
+    tracks: timeline.tracks.map((track) => ({
+      ...track,
+      clips: track.clips.map((clip) => (clip.id === clipId ? updater(clip) : clip))
+    }))
+  };
+}
+
+function reindexTracks(tracks: Timeline["tracks"]) {
+  return tracks.map((track, index) => ({ ...track, index }));
+}
+
+function getBrowserClipDisplayDurationUs(clip: Timeline["tracks"][number]["clips"][number]) {
+  return Math.max(1, Math.round(Math.max(0, clip.outUs - clip.inUs) / (normalizeBrowserSpeed(clip.speedPercent) / 100)));
+}
+
+function normalizeBrowserSpeed(value: unknown) {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? Math.min(400, Math.max(25, Math.round(numeric))) : 100;
+}
+
+function clampInteger(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, Math.trunc(value)));
 }

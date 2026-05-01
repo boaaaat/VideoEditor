@@ -8,7 +8,7 @@ namespace ai_editor {
 EngineApp::EngineApp()
     : previewServer_("127.0.0.1", 47110),
       ffprobeService_(ffmpegLocator_),
-      previewController_(),
+      previewController_(ffmpegLocator_),
       exportEngine_(ffmpegLocator_, gpuDetector_),
       mediaImporter_(),
       commandRegistry_(mediaImporter_) {}

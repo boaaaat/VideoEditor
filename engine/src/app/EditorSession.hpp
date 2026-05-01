@@ -283,6 +283,8 @@ class EditorSession {
     const auto type = command.value("type", std::string{});
     if (type == "add_track") {
       addTrack(command);
+    } else if (type == "update_track") {
+      updateTrack(command);
     } else if (type == "add_clip") {
       addClip(command);
     } else if (type == "move_clip") {
@@ -826,10 +828,28 @@ class EditorSession {
     const auto kind = command.value("kind", std::string{"video"});
     Track track;
     track.kind = kind == "audio" ? TrackKind::Audio : TrackKind::Video;
-    track.index = static_cast<int>(timeline_.tracks.size());
+    const auto requestedIndex = command.value("index", static_cast<int>(timeline_.tracks.size()));
+    track.index = std::clamp(requestedIndex, 0, static_cast<int>(timeline_.tracks.size()));
     track.id = command.value("trackId", std::string{kind.substr(0, 1) + std::to_string(track.index + 1)});
     track.name = command.value("name", std::string{kind == "audio" ? "Audio " : "Video "} + std::to_string(track.index + 1));
-    timeline_.tracks.push_back(track);
+    timeline_.tracks.insert(timeline_.tracks.begin() + track.index, track);
+    reindexTracks();
+  }
+
+  void updateTrack(const nlohmann::json& command) {
+    auto* track = findTrack(command.value("trackId", std::string{}));
+    if (!track) {
+      throw std::runtime_error("track not found");
+    }
+    if (command.contains("name")) {
+      const auto name = command.at("name").get<std::string>();
+      if (!name.empty()) {
+        track->name = name;
+      }
+    }
+    track->locked = command.value("locked", track->locked);
+    track->muted = command.value("muted", track->muted);
+    track->visible = command.value("visible", track->visible);
   }
 
   void deleteTrack(const nlohmann::json& command) {
@@ -838,6 +858,7 @@ class EditorSession {
                              return track.id == trackId;
                            }),
                            timeline_.tracks.end());
+    reindexTracks();
   }
 
   void addClip(const nlohmann::json& command) {
@@ -1202,6 +1223,12 @@ class EditorSession {
     std::sort(track.clips.begin(), track.clips.end(), [](const Clip& left, const Clip& right) {
       return left.startUs < right.startUs;
     });
+  }
+
+  void reindexTracks() {
+    for (std::size_t index = 0; index < timeline_.tracks.size(); ++index) {
+      timeline_.tracks.at(index).index = static_cast<int>(index);
+    }
   }
 
   static double normalizeSpeedPercent(double value) {
