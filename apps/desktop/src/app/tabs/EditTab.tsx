@@ -8,7 +8,6 @@ import {
   type CSSProperties,
   type Dispatch,
   type DragEvent as ReactDragEvent,
-  type MutableRefObject,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type RefObject,
@@ -117,13 +116,6 @@ const snapThresholdPx = 18;
 const visualClipGapPx = 2;
 const defaultVideoDurationUs = 8_000_000;
 const defaultAudioDurationUs = 12_000_000;
-
-interface MediaAudioGraph {
-  element: HTMLMediaElement;
-  context: AudioContext;
-  source: MediaElementAudioSourceNode;
-  gain: GainNode;
-}
 
 interface EditTabProps {
   previewUrl?: string;
@@ -2493,8 +2485,6 @@ function PreviewSurface({
   const frameRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
-  const videoAudioGraphRef = useRef<MediaAudioGraph | null>(null);
-  const audioAudioGraphRef = useRef<MediaAudioGraph | null>(null);
   const playbackStartPlayheadRef = useRef(playheadUs);
   const nativeSeekSequenceRef = useRef(0);
   const frameRequestSequenceRef = useRef(0);
@@ -2654,12 +2644,12 @@ function PreviewSurface({
 
   useEffect(() => {
     syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent);
-    applyMediaElementAudio(videoRef, videoAudioGraphRef, videoClip, projectSettings, mediaElementSyncPlayheadUs, playing, previewVolumePercent);
+    applyMediaElementAudio(videoRef, videoClip, projectSettings, mediaElementSyncPlayheadUs, previewVolumePercent);
   }, [videoClip, mediaElementSyncPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, videoSrc, projectSettings, stats?.childHwnd, stats?.renderMode, separateAudioPreviewActive]);
 
   useEffect(() => {
     syncMediaElement(audioRef, audioClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent);
-    applyMediaElementAudio(audioRef, audioAudioGraphRef, audioClip, projectSettings, mediaElementSyncPlayheadUs, playing, previewVolumePercent);
+    applyMediaElementAudio(audioRef, audioClip, projectSettings, mediaElementSyncPlayheadUs, previewVolumePercent);
   }, [audioClip, mediaElementSyncPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, audioSrc, projectSettings, separateAudioPreviewActive]);
 
   useEffect(() => {
@@ -3387,11 +3377,9 @@ function syncMediaElement<T extends HTMLVideoElement | HTMLAudioElement>(
 
 function applyMediaElementAudio<T extends HTMLVideoElement | HTMLAudioElement>(
   ref: RefObject<T>,
-  graphRef: MutableRefObject<MediaAudioGraph | null>,
   clip: TimelineClip | undefined,
   projectSettings: ProjectSettings,
   playheadUs: number,
-  playing: boolean,
   previewVolumePercent = 100
 ) {
   const element = ref.current;
@@ -3400,7 +3388,7 @@ function applyMediaElementAudio<T extends HTMLVideoElement | HTMLAudioElement>(
   }
 
   if (!clip || !projectSettings.audioEnabled) {
-    setMediaElementGain(element, graphRef, 0, playing);
+    setMediaElementGain(element, 0);
     return;
   }
 
@@ -3408,54 +3396,13 @@ function applyMediaElementAudio<T extends HTMLVideoElement | HTMLAudioElement>(
   const clipTimeUs = clamp(Math.round((playheadUs - clip.startUs) * getClipSpeedFactor(clip)), 0, clip.outUs - clip.inUs);
   const fadeMultiplier = audioFadeMultiplier(audio, clipTimeUs, clip.outUs - clip.inUs);
   const linearGain = dbToLinear((projectSettings.masterGainDb ?? 0) + audio.gainDb) * fadeMultiplier * clamp(previewVolumePercent / 100, 0, 2);
-  setMediaElementGain(element, graphRef, audio.muted ? 0 : linearGain, playing);
+  setMediaElementGain(element, audio.muted ? 0 : linearGain);
 }
 
-function setMediaElementGain(
-  element: HTMLMediaElement,
-  graphRef: MutableRefObject<MediaAudioGraph | null>,
-  linearGain: number,
-  playing: boolean
-) {
+function setMediaElementGain(element: HTMLMediaElement, linearGain: number) {
   const gain = clamp(linearGain, 0, 4);
-  const graph = ensureMediaAudioGraph(element, graphRef);
-  if (graph) {
-    graph.gain.gain.value = gain;
-    element.muted = false;
-    element.volume = 1;
-    if (playing && graph.context.state === "suspended") {
-      void graph.context.resume().catch(() => undefined);
-    }
-    return;
-  }
-
   element.muted = gain <= 0.001;
   element.volume = clamp(gain, 0, 1);
-}
-
-function ensureMediaAudioGraph(
-  element: HTMLMediaElement,
-  graphRef: MutableRefObject<MediaAudioGraph | null>
-): MediaAudioGraph | null {
-  if (graphRef.current?.element === element) {
-    return graphRef.current;
-  }
-
-  try {
-    const AudioContextCtor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextCtor) {
-      return null;
-    }
-    const context = new AudioContextCtor();
-    const source = context.createMediaElementSource(element);
-    const gain = context.createGain();
-    source.connect(gain);
-    gain.connect(context.destination);
-    graphRef.current = { element, context, source, gain };
-    return graphRef.current;
-  } catch {
-    return null;
-  }
 }
 
 function normalizeAudioAdjustment(value?: Partial<AudioAdjustment>): AudioAdjustment {
