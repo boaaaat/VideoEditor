@@ -8,6 +8,7 @@ import type { LogStatus } from "../../features/logging/appLog";
 import {
   createProjectFromDialog,
   deleteProjectFolder,
+  errorMessage,
   openProjectFromDialog,
   removeRecentProject,
   revealProjectInExplorer,
@@ -158,7 +159,7 @@ export function HomeTab({ engineStatus, recentProjects, onProjectOpen, onRecentP
       onProjectDeleted(project);
       setStatusMessage(`Deleted project: ${project.name}`, { level: "success", details: { projectPath: project.path } });
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : "Delete project failed", { level: "error", details: { projectPath: project.path } });
+      setStatusMessage(errorMessage(error, "Delete project failed"), { level: "error", details: { projectPath: project.path } });
     }
   }
 

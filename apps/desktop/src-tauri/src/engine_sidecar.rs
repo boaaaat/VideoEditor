@@ -93,6 +93,11 @@ impl EngineSidecar {
 
         Ok(response.get("result").cloned().unwrap_or(Value::Null))
     }
+
+    pub fn stop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 fn find_engine_executable() -> Option<PathBuf> {

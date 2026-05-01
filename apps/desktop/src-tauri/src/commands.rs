@@ -1,4 +1,4 @@
-use crate::engine_rpc::send_engine_request;
+use crate::engine_rpc::{send_engine_request, stop_engine_sidecar};
 use crate::preview_url::default_preview_url;
 use crate::AppState;
 use base64::{engine::general_purpose, Engine as _};
@@ -280,7 +280,10 @@ pub fn reveal_media_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn delete_project_folder(project_path: String) -> Result<(), String> {
+pub fn delete_project_folder(
+    state: State<'_, AppState>,
+    project_path: String,
+) -> Result<(), String> {
     let path = PathBuf::from(project_path);
     if !path.exists() {
         return Ok(());
@@ -292,7 +295,60 @@ pub fn delete_project_folder(project_path: String) -> Result<(), String> {
         return Err("refusing to delete a folder without project.aivproj".to_string());
     }
 
-    fs::remove_dir_all(&path).map_err(|error| format!("failed to delete project folder: {error}"))
+    match remove_project_folder(&path) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            stop_engine_sidecar(state)?;
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            remove_project_folder(&path).map_err(|second_error| {
+                format!("{second_error}. Initial delete attempt failed with: {first_error}")
+            })
+        }
+    }
+}
+
+fn remove_project_folder(path: &Path) -> Result<(), String> {
+    clear_readonly_flags(path)?;
+    fs::remove_dir_all(path).map_err(|error| {
+        format!(
+            "failed to delete project folder '{}': {error}",
+            path.display()
+        )
+    })
+}
+
+fn clear_readonly_flags(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("failed to inspect '{}': {error}", path.display()))?;
+    let mut permissions = metadata.permissions();
+    if permissions.readonly() {
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions)
+            .map_err(|error| format!("failed to make '{}' writable: {error}", path.display()))?;
+    }
+
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).map_err(|error| {
+            format!(
+                "failed to read project folder '{}': {error}",
+                path.display()
+            )
+        })? {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "failed to read an item inside '{}': {error}",
+                    path.display()
+                )
+            })?;
+            clear_readonly_flags(&entry.path())?;
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]

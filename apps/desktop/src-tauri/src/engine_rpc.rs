@@ -23,3 +23,17 @@ pub fn send_engine_request(
 
     sidecar.request(&method, params.unwrap_or(Value::Null))
 }
+
+pub fn stop_engine_sidecar(state: State<'_, AppState>) -> Result<(), String> {
+    let mut sidecar_guard = state
+        .sidecar
+        .lock()
+        .map_err(|_| "engine sidecar lock poisoned".to_string())?;
+
+    if let Some(sidecar) = sidecar_guard.as_mut() {
+        sidecar.stop();
+    }
+    *sidecar_guard = None;
+
+    Ok(())
+}
