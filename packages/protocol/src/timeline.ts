@@ -73,6 +73,7 @@ export interface AudioAdjustment {
   fadeOutUs: number;
   normalize: boolean;
   cleanup: boolean;
+  streamIndex?: number;
 }
 
 export const defaultColorAdjustment: ColorAdjustment = {

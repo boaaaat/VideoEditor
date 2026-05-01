@@ -514,6 +514,7 @@ class EditorSession {
     clip.audioFadeOutUs = audio.value("fadeOutUs", 0LL);
     clip.audioNormalize = audio.value("normalize", false);
     clip.audioCleanup = audio.value("cleanup", false);
+    clip.audioStreamIndex = audio.value("streamIndex", 0);
 
     if (value.contains("transform")) {
       clip.transform = transformFromJson(value.at("transform"));
@@ -698,6 +699,7 @@ class EditorSession {
       clip.audioFadeOutUs = audio.value("fadeOutUs", 0LL);
       clip.audioNormalize = audio.value("normalize", false);
       clip.audioCleanup = audio.value("cleanup", false);
+      clip.audioStreamIndex = audio.value("streamIndex", 0);
       clip.transform = transformFromJson(parseJson(columnText(statement, 8), defaultTransformJson()));
       clip.effects = effectsFromJson(parseJson(columnText(statement, 9), defaultEffectsJson()));
       clip.speedPercent = normalizeSpeedPercent(sqlite3_column_double(statement, 10));
@@ -872,6 +874,9 @@ class EditorSession {
     if (!media) {
       throw std::runtime_error("add_clip media not found: " + mediaId);
     }
+    if (!canPlaceMediaOnTrack(*media, *track)) {
+      throw std::runtime_error("add_clip media is not compatible with target track");
+    }
 
     Clip clip;
     clip.id = command.value("clipId", std::string{"clip_" + stableHash(idSeed() + mediaId + std::to_string(track->clips.size()))});
@@ -890,13 +895,24 @@ class EditorSession {
   }
 
   void moveClip(const nlohmann::json& command) {
-    auto clip = removeClip(command.value("clipId", std::string{}));
-    clip.trackId = command.value("trackId", clip.trackId);
-    clip.startUs = command.value("startUs", clip.startUs);
-    auto* track = findTrack(clip.trackId);
+    const auto clipId = command.value("clipId", std::string{});
+    auto* existingClip = findClip(clipId);
+    if (!existingClip) {
+      throw std::runtime_error("clip not found: " + clipId);
+    }
+    auto* sourceTrack = findTrack(existingClip->trackId);
+    const auto targetTrackId = command.value("trackId", existingClip->trackId);
+    auto* track = findTrack(targetTrackId);
     if (!track) {
       throw std::runtime_error("move_clip target track not found");
     }
+    if (sourceTrack && sourceTrack->kind != track->kind) {
+      throw std::runtime_error("move_clip cannot move clips between video and audio tracks");
+    }
+
+    auto clip = removeClip(clipId);
+    clip.trackId = targetTrackId;
+    clip.startUs = command.value("startUs", clip.startUs);
     track->clips.push_back(clip);
     sortTrack(*track);
   }
@@ -985,6 +1001,7 @@ class EditorSession {
       clip->audioFadeOutUs = adjustment.value("fadeOutUs", clip->audioFadeOutUs);
       clip->audioNormalize = adjustment.value("normalize", clip->audioNormalize);
       clip->audioCleanup = adjustment.value("cleanup", clip->audioCleanup);
+      clip->audioStreamIndex = adjustment.value("streamIndex", clip->audioStreamIndex);
     }
   }
 
@@ -1225,6 +1242,13 @@ class EditorSession {
     });
   }
 
+  static bool canPlaceMediaOnTrack(const IndexedMedia& media, const Track& track) {
+    if (track.kind == TrackKind::Video) {
+      return media.kind == "video";
+    }
+    return media.kind == "audio" || media.metadata.value("hasAudio", false);
+  }
+
   void reindexTracks() {
     for (std::size_t index = 0; index < timeline_.tracks.size(); ++index) {
       timeline_.tracks.at(index).index = static_cast<int>(index);
@@ -1264,6 +1288,7 @@ class EditorSession {
         {"fadeOutUs", clip.audioFadeOutUs},
         {"normalize", clip.audioNormalize},
         {"cleanup", clip.audioCleanup},
+        {"streamIndex", clip.audioStreamIndex},
     };
   }
 
@@ -1327,7 +1352,7 @@ class EditorSession {
   }
 
   static nlohmann::json defaultAudioJson() {
-    return {{"gainDb", 0}, {"muted", false}, {"fadeInUs", 0}, {"fadeOutUs", 0}, {"normalize", false}, {"cleanup", false}};
+    return {{"gainDb", 0}, {"muted", false}, {"fadeInUs", 0}, {"fadeOutUs", 0}, {"normalize", false}, {"cleanup", false}, {"streamIndex", 0}};
   }
 
   static nlohmann::json defaultTransformJson() {
@@ -1370,6 +1395,8 @@ class EditorSession {
           {"colorTransfer", "unknown"},
           {"hdr", false},
           {"hasAudio", kind == "audio"},
+          {"audioStreamCount", kind == "audio" ? 1 : 0},
+          {"audioStreams", kind == "audio" ? nlohmann::json::array({{{"index", 0}, {"codec", "unknown"}, {"channels", 0}, {"title", "Audio 1"}}}) : nlohmann::json::array()},
       };
     }
   }

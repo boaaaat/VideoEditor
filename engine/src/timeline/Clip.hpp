@@ -39,6 +39,7 @@ struct Clip {
   std::int64_t audioFadeOutUs = 0;
   bool audioNormalize = false;
   bool audioCleanup = false;
+  int audioStreamIndex = 0;
   ClipTransform transform;
   std::vector<ClipEffect> effects;
   double speedPercent = 100.0;

@@ -206,7 +206,9 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
         pixelFormat: "yuv420p",
         colorTransfer: "bt709",
         hdr: false,
-        hasAudio: true
+        hasAudio: true,
+        audioStreamCount: 1,
+        audioStreams: [{ index: 0, codec: "aac", channels: 2, title: "Audio 1" }]
       } as MediaMetadata as T;
     }
 
@@ -395,6 +397,11 @@ function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand)
     case "move_clip": {
       const clip = timeline.tracks.flatMap((track) => track.clips).find((item) => item.id === command.clipId);
       if (!clip) {
+        return timeline;
+      }
+      const sourceTrack = timeline.tracks.find((track) => track.id === clip.trackId);
+      const targetTrack = timeline.tracks.find((track) => track.id === command.trackId);
+      if (sourceTrack?.kind && targetTrack?.kind && sourceTrack.kind !== targetTrack.kind) {
         return timeline;
       }
       const withoutClip = {

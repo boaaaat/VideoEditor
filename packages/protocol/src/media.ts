@@ -16,6 +16,15 @@ export interface MediaMetadata {
   colorTransfer: string;
   hdr: boolean;
   hasAudio: boolean;
+  audioStreamCount?: number;
+  audioStreams?: MediaAudioStream[];
+}
+
+export interface MediaAudioStream {
+  index: number;
+  codec: string;
+  channels: number;
+  title?: string;
 }
 
 export interface MediaIntelligence {

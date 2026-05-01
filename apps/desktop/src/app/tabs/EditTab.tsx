@@ -550,9 +550,8 @@ export function EditTab({
       return;
     }
 
-    const sourceAsset = mediaAssets.find((asset) => asset.id === clip.mediaId);
-    if (sourceAsset && !canMediaAssetUseTrack(sourceAsset, targetTrack.kind)) {
-      setStatusMessage(`${sourceAsset.name} cannot be used on a ${targetTrack.kind} track`, { level: "warning" });
+    if (!canClipUseTrack(timeline, clip, targetTrack.kind)) {
+      setStatusMessage(`Clips cannot be moved between video and audio tracks`, { level: "warning" });
       return;
     }
 
@@ -561,6 +560,14 @@ export function EditTab({
     const lockedTrackName = lockedTrackNameForClips(selectedMoveClips);
     if (lockedTrackName) {
       setStatusMessage(`${lockedTrackName} is locked`, { level: "warning" });
+      return;
+    }
+    const incompatibleClip = selectedMoveClips.find((item) => {
+      const nextTrackKind = item.id === clipId ? targetTrack.kind : timeline.tracks.find((candidate) => candidate.id === item.trackId)?.kind;
+      return !nextTrackKind || !canClipUseTrack(timeline, item, nextTrackKind);
+    });
+    if (incompatibleClip) {
+      setStatusMessage("Clips cannot be moved between video and audio tracks", { level: "warning" });
       return;
     }
 
@@ -572,8 +579,7 @@ export function EditTab({
     }));
     const invalidMovedClip = movedClips.find((item) => {
       const track = timeline.tracks.find((candidate) => candidate.id === item.trackId);
-      const asset = mediaAssets.find((candidate) => candidate.id === item.mediaId);
-      return !track || track.locked || (asset && !canMediaAssetUseTrack(asset, track.kind));
+      return !track || track.locked;
     });
     if (invalidMovedClip) {
       setStatusMessage("Move blocked by track type or lock state", { level: "warning" });
@@ -1163,56 +1169,70 @@ export function EditTab({
       return;
     }
 
-    const targetTrack =
-      timeline.tracks.find((track) => track.kind === "audio" && !track.locked) ??
-      timeline.tracks.find((track) => track.kind === "audio");
-    if (!targetTrack) {
-      setStatusMessage("Add an audio track before detaching audio", { level: "warning", source: "audio" });
-      return;
-    }
-    if (targetTrack.locked) {
-      setStatusMessage(`${targetTrack.name} is locked`, { level: "warning", source: "audio" });
-      return;
-    }
+    const refreshedMetadata = asset.metadata?.audioStreamCount ? asset.metadata : await probeMediaPath(asset.path).catch(() => undefined);
+    const audioStreams = getAudioStreams({ ...asset, metadata: refreshedMetadata ?? asset.metadata });
+    const existingAudioTracks = timeline.tracks.filter((track) => track.kind === "audio" && !track.locked);
+    const missingTrackCount = Math.max(0, audioStreams.length - existingAudioTracks.length);
+    const createdTrackIds = Array.from({ length: missingTrackCount }, (_, index) => `a_detached_${Date.now()}_${index}`);
+    const targetTrackIds = [...existingAudioTracks.map((track) => track.id), ...createdTrackIds].slice(0, audioStreams.length);
+    const detachedClipIds = audioStreams.map((stream, index) => `audio_${clip.id}_${stream.index}_${Date.now()}_${index}`);
 
-    const detachedAudio = {
-      ...defaultAudioAdjustment,
-      ...clip.audio,
-      muted: false
-    };
-    const detachedClip: TimelineClip = {
-      ...clip,
-      id: `audio_${clip.id}_${Date.now()}`,
-      trackId: targetTrack.id,
-      audio: detachedAudio
-    };
-    const muteResult = await runCommand({ type: "apply_audio_adjustment", clipId: clip.id, adjustment: { muted: true } }, "Mute source clip failed");
-    const addResult = await runCommand({
-      type: "add_clip",
-      clipId: detachedClip.id,
-      mediaId: detachedClip.mediaId,
-      trackId: detachedClip.trackId,
-      startUs: detachedClip.startUs,
-      inUs: detachedClip.inUs,
-      outUs: detachedClip.outUs,
-      speedPercent: normalizeClipSpeedPercent(detachedClip.speedPercent)
-    }, "Detach audio failed");
-    const audioResult = await runCommand({
-      type: "apply_audio_adjustment",
-      clipId: detachedClip.id,
-      adjustment: detachedAudio
-    }, "Detached audio settings failed");
-    if (audioResult.ok) {
-      applyEngineTimeline(audioResult.data);
-      setSelectedClipIds([detachedClip.id]);
-    } else if (addResult.ok) {
-      applyEngineTimeline(addResult.data);
+    const commands: Array<{ command: EditorCommand; fallbackError: string }> = [
+      { command: { type: "apply_audio_adjustment", clipId: clip.id, adjustment: { muted: true } }, fallbackError: "Mute source clip failed" },
+      ...createdTrackIds.map((trackId, index) => ({
+        command: {
+          type: "add_track" as const,
+          trackId,
+          name: audioStreams[existingAudioTracks.length + index]?.title || `Audio ${timeline.tracks.filter((track) => track.kind === "audio").length + index + 1}`,
+          kind: "audio" as const,
+          index: timeline.tracks.length + index
+        },
+        fallbackError: "Add detached audio track failed"
+      })),
+      ...audioStreams.flatMap((stream, index) => {
+        const detachedAudio = {
+          ...defaultAudioAdjustment,
+          ...clip.audio,
+          muted: false,
+          streamIndex: stream.index
+        };
+        const detachedClipId = detachedClipIds[index];
+        const targetTrackId = targetTrackIds[index];
+        return [
+          {
+            command: {
+              type: "add_clip" as const,
+              clipId: detachedClipId,
+              mediaId: clip.mediaId,
+              trackId: targetTrackId,
+              startUs: clip.startUs,
+              inUs: clip.inUs,
+              outUs: clip.outUs,
+              speedPercent: normalizeClipSpeedPercent(clip.speedPercent)
+            },
+            fallbackError: "Detach audio failed"
+          },
+          {
+            command: {
+              type: "apply_audio_adjustment" as const,
+              clipId: detachedClipId,
+              adjustment: detachedAudio
+            },
+            fallbackError: "Detached audio settings failed"
+          }
+        ];
+      })
+    ];
+
+    const results = await runTimelineCommandBatch(commands);
+    if (results.every((result) => result.ok)) {
+      setSelectedClipIds(detachedClipIds);
     }
-    const failed = [muteResult, addResult, audioResult].find((result) => !result.ok);
-    setStatusMessage(failed ? failed.error ?? "Detach audio failed" : `Detached audio from ${asset.name}`, {
+    const failed = results.find((result) => !result.ok);
+    setStatusMessage(failed ? failed.error ?? "Detach audio failed" : `Detached ${audioStreams.length} audio track${audioStreams.length === 1 ? "" : "s"} from ${asset.name}`, {
       level: failed ? "error" : "success",
       source: "audio",
-      details: { sourceClipId: clip.id, audioClipId: detachedClip.id, trackId: targetTrack.id }
+      details: { sourceClipId: clip.id, audioClipIds: detachedClipIds, trackIds: targetTrackIds, streamIndexes: audioStreams.map((stream) => stream.index) }
     });
   }
 
@@ -3491,7 +3511,27 @@ function resolveMediaDropPlacement(
 }
 
 function canMediaAssetUseTrack(asset: MediaAsset, trackKind: "video" | "audio") {
-  return asset.kind === trackKind || (trackKind === "audio" && Boolean(asset.metadata?.hasAudio));
+  return asset.kind === trackKind;
+}
+
+function canClipUseTrack(timeline: typeof starterTimeline, clip: TimelineClip, trackKind: "video" | "audio") {
+  const sourceTrack = timeline.tracks.find((track) => track.id === clip.trackId);
+  return sourceTrack?.kind === trackKind;
+}
+
+function getAudioStreams(asset: MediaAsset) {
+  const streams = asset.metadata?.audioStreams?.filter((stream) => Number.isFinite(stream.index));
+  if (streams?.length) {
+    return streams.map((stream, index) => ({
+      index: stream.index,
+      title: stream.title?.trim() || `Audio ${index + 1}`
+    }));
+  }
+  const count = Math.max(1, asset.metadata?.audioStreamCount ?? (asset.metadata?.hasAudio ? 1 : 0));
+  return Array.from({ length: count }, (_, index) => ({
+    index,
+    title: `Audio ${index + 1}`
+  }));
 }
 
 function resolveTrackSnapStart(

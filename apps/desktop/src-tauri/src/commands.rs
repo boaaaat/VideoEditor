@@ -633,6 +633,7 @@ fn parse_media_metadata(path: &str, root: &Value) -> Value {
     let mut color_transfer = "unknown".to_string();
     let mut hdr = false;
     let mut has_audio = false;
+    let mut audio_streams = Vec::new();
 
     if let Some(streams) = root.get("streams").and_then(Value::as_array) {
         for stream in streams {
@@ -643,6 +644,17 @@ fn parse_media_metadata(path: &str, root: &Value) -> Value {
 
             if codec_type == "audio" {
                 has_audio = true;
+                let audio_index = audio_streams.len();
+                audio_streams.push(json!({
+                    "index": audio_index,
+                    "codec": stream.get("codec_name").and_then(Value::as_str).unwrap_or("unknown"),
+                    "channels": stream.get("channels").and_then(Value::as_i64).unwrap_or(0),
+                    "title": stream
+                        .get("tags")
+                        .and_then(|tags| tags.get("title"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                }));
                 continue;
             }
 
@@ -707,7 +719,9 @@ fn parse_media_metadata(path: &str, root: &Value) -> Value {
         "pixelFormat": pixel_format,
         "colorTransfer": color_transfer,
         "hdr": hdr,
-        "hasAudio": has_audio
+        "hasAudio": has_audio,
+        "audioStreamCount": audio_streams.len(),
+        "audioStreams": audio_streams
     })
 }
 

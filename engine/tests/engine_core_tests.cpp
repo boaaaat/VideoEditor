@@ -87,6 +87,14 @@ int runTests() {
                {
                    {"codec_type", "audio"},
                    {"codec_name", "aac"},
+                   {"index", 1},
+                   {"channels", 2},
+               },
+               {
+                   {"codec_type", "audio"},
+                   {"codec_name", "aac"},
+                   {"index", 2},
+                   {"channels", 1},
                },
            }},
           {"format", {{"duration", "12.500000"}}},
@@ -98,6 +106,8 @@ int runTests() {
   assert(metadata.durationUs == 12500000);
   assert(metadata.hdr);
   assert(metadata.hasAudio);
+  assert(metadata.audioStreams.size() == 2);
+  assert(metadata.audioStreams.at(0).index == 0);
 
   ai_editor::ExportRequest request;
   request.outputPath = "C:\\exports\\movie.mp4";

@@ -47,6 +47,7 @@ struct ExportTimelineClip {
   std::int64_t audioFadeOutUs = 0;
   bool audioNormalize = false;
   bool audioCleanup = false;
+  int audioStreamIndex = 0;
   double brightness = 0.0;
   double contrast = 0.0;
   double saturation = 1.0;

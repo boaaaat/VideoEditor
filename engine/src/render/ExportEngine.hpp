@@ -410,7 +410,7 @@ class ExportEngine {
       const auto delayMs = std::max<std::int64_t>(0, clip->startUs / 1000);
       const auto label = "aud" + std::to_string(index);
       args.insert(args.end(), {"-i", media->path});
-      filters.push_back("[" + std::to_string(inputIndex) + ":a]" + audioFilterChain(*clip, sourceDurationUs, durationUs, delayMs, label));
+      filters.push_back("[" + std::to_string(inputIndex) + ":a:" + std::to_string(std::max(0, clip->audioStreamIndex)) + "]" + audioFilterChain(*clip, sourceDurationUs, durationUs, delayMs, label));
       audioInputs.push_back("[" + label + "]");
       inputIndex += 1;
     }
@@ -799,6 +799,7 @@ class ExportEngine {
           clip.audioFadeOutUs = audio.value("fadeOutUs", 0LL);
           clip.audioNormalize = audio.value("normalize", false);
           clip.audioCleanup = audio.value("cleanup", false);
+          clip.audioStreamIndex = audio.value("streamIndex", 0);
         }
         if (item.contains("color") && item.at("color").is_object()) {
           const auto& color = item.at("color");

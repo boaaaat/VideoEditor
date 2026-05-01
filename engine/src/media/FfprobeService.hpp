@@ -42,6 +42,14 @@ class FfprobeService {
       const auto codecType = stream.value("codec_type", std::string{});
       if (codecType == "audio") {
         metadata.hasAudio = true;
+        MediaAudioStream audioStream;
+        audioStream.index = static_cast<int>(metadata.audioStreams.size());
+        audioStream.codec = stream.value("codec_name", std::string{"unknown"});
+        audioStream.channels = stream.value("channels", 0);
+        if (stream.contains("tags") && stream.at("tags").is_object()) {
+          audioStream.title = stream.at("tags").value("title", std::string{});
+        }
+        metadata.audioStreams.push_back(audioStream);
         continue;
       }
 
