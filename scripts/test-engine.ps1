@@ -9,4 +9,11 @@ if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
 }
 
 cmake --build $buildDir --config Debug --target engine-core-tests
+if ($LASTEXITCODE -ne 0) {
+  exit $LASTEXITCODE
+}
+
 ctest --test-dir $buildDir --build-config Debug --output-on-failure
+if ($LASTEXITCODE -ne 0) {
+  exit $LASTEXITCODE
+}
