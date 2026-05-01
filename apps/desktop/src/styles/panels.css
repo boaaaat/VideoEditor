@@ -685,6 +685,7 @@
 }
 
 .editor-playback-preview {
+  position: relative;
   display: grid;
   place-items: center;
   min-width: 0;
@@ -696,8 +697,12 @@
 
 .editor-playback-preview video {
   display: block;
-  width: 100%;
-  height: 100%;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
   object-position: center;
   transform-origin: center;
