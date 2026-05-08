@@ -73,7 +73,7 @@ export function ColorTab({
       return;
     }
 
-    void executeCommand({ type: "apply_color_adjustment", clipId: selectedClip.id, adjustment: next }).then((result) => {
+    void executeCommand({ type: "apply_color_adjustment", clipId: selectedClip.id, adjustment: next, history: { mode: "replace", group: `color:${selectedClip.id}` } }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
         setStatusMessage(label, { details: { clipId: selectedClip.id, adjustment: next } });
@@ -91,7 +91,7 @@ export function ColorTab({
       return;
     }
 
-    void executeCommand({ type: "apply_lut", clipId: selectedClip.id, lutId: next?.lutId ?? null, strength: next?.strength ?? 1 }).then((result) => {
+    void executeCommand({ type: "apply_lut", clipId: selectedClip.id, lutId: next?.lutId ?? null, strength: next?.strength ?? 1, history: { mode: "replace", group: `lut:${selectedClip.id}` } }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
         setStatusMessage(label, { details: { clipId: selectedClip.id, lut: next } });

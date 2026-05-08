@@ -198,6 +198,48 @@ int runTests() {
   assert(speedCommand.find("atempo=2.0000") != std::string::npos);
   assert(speedCommand.find("atempo=0.5000") != std::string::npos);
 
+  ai_editor::ExportJob multiAudioExportJob;
+  multiAudioExportJob.outputPath = request.outputPath;
+  multiAudioExportJob.width = 1920;
+  multiAudioExportJob.height = 1080;
+  multiAudioExportJob.fps = 30;
+  multiAudioExportJob.durationUs = 4'000'000;
+  multiAudioExportJob.codec = "h264_nvenc";
+  multiAudioExportJob.container = "mp4";
+  multiAudioExportJob.quality = "medium";
+  multiAudioExportJob.audioEnabled = true;
+  multiAudioExportJob.bitrateMbps = 12;
+  multiAudioExportJob.timeline.media.push_back({"dual_audio", "C:\\media\\dual-audio.mp4", "video", true});
+  ai_editor::ExportTimelineClip mutedVideoClip;
+  mutedVideoClip.mediaId = "dual_audio";
+  mutedVideoClip.trackId = "v1";
+  mutedVideoClip.trackKind = "video";
+  mutedVideoClip.trackIndex = 0;
+  mutedVideoClip.startUs = 0;
+  mutedVideoClip.inUs = 0;
+  mutedVideoClip.outUs = 4'000'000;
+  mutedVideoClip.audioMuted = true;
+  multiAudioExportJob.timeline.clips.push_back(mutedVideoClip);
+  ai_editor::ExportTimelineClip gameAudioClip;
+  gameAudioClip.mediaId = "dual_audio";
+  gameAudioClip.trackId = "a1";
+  gameAudioClip.trackKind = "audio";
+  gameAudioClip.trackIndex = 1;
+  gameAudioClip.startUs = 0;
+  gameAudioClip.inUs = 0;
+  gameAudioClip.outUs = 4'000'000;
+  gameAudioClip.audioStreamIndex = 0;
+  multiAudioExportJob.timeline.clips.push_back(gameAudioClip);
+  ai_editor::ExportTimelineClip micAudioClip = gameAudioClip;
+  micAudioClip.trackId = "a2";
+  micAudioClip.trackIndex = 2;
+  micAudioClip.audioStreamIndex = 1;
+  multiAudioExportJob.timeline.clips.push_back(micAudioClip);
+  const auto multiAudioCommand = ai_editor::ExportEngine::buildFfmpegCommand(multiAudioExportJob);
+  assert(multiAudioCommand.find(":a:0]") != std::string::npos);
+  assert(multiAudioCommand.find(":a:1]") != std::string::npos);
+  assert(multiAudioCommand.find("amix=inputs=2") != std::string::npos);
+
   ai_editor::GpuStatus gpu;
   gpu.nvencAvailable = true;
   gpu.h264NvencAvailable = true;
@@ -403,6 +445,83 @@ int runTests() {
   assert(updatedTrack->at("name") == "Renamed Video");
   assert(updatedTrack->at("locked") == true);
   assert(updatedTrack->at("visible") == false);
+
+  const auto noOpTrackResult = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 152},
+      {"method", "command.execute"},
+      {"params", {{"type", "update_track"}, {"trackId", "v3"}, {"name", "Renamed Video"}, {"locked", true}, {"visible", false}}},
+  });
+  assert(noOpTrackResult.at("ok") == true);
+  assert(noOpTrackResult.at("undoCount") == updateTrackResult.at("undoCount"));
+
+  const auto coalescedTrackResult = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 153},
+      {"method", "command.execute"},
+      {"params", {{"type", "update_track"}, {"trackId", "v3"}, {"name", "Coalesced 1"}, {"history", {{"mode", "replace"}, {"group", "track-name:v3"}}}}},
+  });
+  assert(coalescedTrackResult.at("undoCount") == updateTrackResult.at("undoCount").get<int>() + 1);
+  const auto coalescedTrackResult2 = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 154},
+      {"method", "command.execute"},
+      {"params", {{"type", "update_track"}, {"trackId", "v3"}, {"name", "Coalesced 2"}, {"history", {{"mode", "replace"}, {"group", "track-name:v3"}}}}},
+  });
+  assert(coalescedTrackResult2.at("undoCount") == coalescedTrackResult.at("undoCount"));
+
+  const auto undoCoalescedResult = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 155},
+      {"method", "command.undo"},
+      {"params", nlohmann::json::object()},
+  });
+  const auto undoCoalescedTracks = undoCoalescedResult.at("data").at("timeline").at("tracks");
+  const auto undoCoalescedTrack = std::find_if(undoCoalescedTracks.begin(), undoCoalescedTracks.end(), [](const nlohmann::json& track) {
+    return track.at("id") == "v3";
+  });
+  assert(undoCoalescedTrack != undoCoalescedTracks.end());
+  assert(undoCoalescedTrack->at("name") == "Renamed Video");
+
+  const auto relockTrackResult = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 156},
+      {"method", "command.execute"},
+      {"params", {{"type", "update_track"}, {"trackId", "v3"}, {"locked", true}}},
+  });
+  assert(relockTrackResult.at("ok") == true);
+
+  const auto lockedMediaResult = reloadedApp.handleRequest({
+      {"jsonrpc", "2.0"},
+      {"id", 157},
+      {"method", "command.execute"},
+      {"params", {{"type", "import_media"}, {"paths", {"locked-media.mp4"}}}},
+  });
+  const auto lockedMediaId = lockedMediaResult.at("data").at("media").at(0).at("id").get<std::string>();
+  bool lockedAddRejected = false;
+  try {
+    (void)reloadedApp.handleRequest({
+        {"jsonrpc", "2.0"},
+        {"id", 158},
+        {"method", "command.execute"},
+        {"params", {{"type", "add_clip"}, {"mediaId", lockedMediaId}, {"trackId", "v3"}, {"startUs", 0}}},
+    });
+  } catch (const std::exception&) {
+    lockedAddRejected = true;
+  }
+  assert(lockedAddRejected);
+
+  for (int index = 0; index < 205; ++index) {
+    const auto cappedResult = reloadedApp.handleRequest({
+        {"jsonrpc", "2.0"},
+        {"id", 2000 + index},
+        {"method", "command.execute"},
+        {"params", {{"type", "add_track"}, {"kind", "audio"}, {"trackId", "history_cap_" + std::to_string(index)}, {"name", "History Cap " + std::to_string(index)}}},
+    });
+    assert(cappedResult.at("undoCount") <= 200);
+  }
+  const auto cappedHistory = reloadedApp.handleRequest({{"jsonrpc", "2.0"}, {"id", 2206}, {"method", "command.history"}});
+  assert(cappedHistory.at("undoCount") == 200);
 
   const auto projectRoot = std::filesystem::absolute("engine-project-db-test");
   std::filesystem::remove_all(projectRoot);

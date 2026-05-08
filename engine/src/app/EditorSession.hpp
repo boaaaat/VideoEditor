@@ -296,6 +296,7 @@ class EditorSession {
     } else if (type == "delete_clip") {
       deleteClip(command);
     } else if (type == "ripple_delete_clip") {
+      ensureClipTrackEditable(command.value("clipId", std::string{}), "ripple_delete_clip");
       TimelineService::rippleDelete(timeline_, command.value("clipId", std::string{}));
     } else if (type == "delete_track") {
       deleteTrack(command);
@@ -868,6 +869,9 @@ class EditorSession {
     if (!track) {
       throw std::runtime_error("add_clip target track not found");
     }
+    if (track->locked) {
+      throw std::runtime_error("add_clip target track is locked");
+    }
 
     const auto mediaId = command.value("mediaId", std::string{});
     const auto* media = findMedia(mediaId);
@@ -906,13 +910,24 @@ class EditorSession {
     if (!track) {
       throw std::runtime_error("move_clip target track not found");
     }
+    if (sourceTrack && sourceTrack->locked) {
+      throw std::runtime_error("move_clip source track is locked");
+    }
+    if (track->locked) {
+      throw std::runtime_error("move_clip target track is locked");
+    }
     if (sourceTrack && sourceTrack->kind != track->kind) {
       throw std::runtime_error("move_clip cannot move clips between video and audio tracks");
     }
 
+    const auto nextStartUs = command.value("startUs", existingClip->startUs);
+    if (targetTrackId == existingClip->trackId && nextStartUs == existingClip->startUs) {
+      return;
+    }
+
     auto clip = removeClip(clipId);
     clip.trackId = targetTrackId;
-    clip.startUs = command.value("startUs", clip.startUs);
+    clip.startUs = nextStartUs;
     track->clips.push_back(clip);
     sortTrack(*track);
   }
@@ -922,6 +937,7 @@ class EditorSession {
     if (!clip) {
       throw std::runtime_error("trim_clip clip not found");
     }
+    ensureClipTrackEditable(clip->id, "trim_clip");
     const auto edge = command.value("edge", std::string{"end"});
     const auto timeUs = command.value("timeUs", edge == "start" ? clip->startUs : clip->outUs);
     if (edge == "start") {
@@ -962,6 +978,7 @@ class EditorSession {
   }
 
   void deleteClip(const nlohmann::json& command) {
+    ensureClipTrackEditable(command.value("clipId", std::string{}), "delete_clip");
     (void)removeClip(command.value("clipId", std::string{}));
   }
 
@@ -1117,7 +1134,18 @@ class EditorSession {
 
     const auto type = command.value("type", std::string{"command"});
     const auto commandId = type + "_" + stableHash(idSeed() + beforeState.dump() + afterState.dump());
-    history_.push({commandId, type, command, beforeState, afterState});
+    const auto historyPolicy = command.value("history", nlohmann::json::object());
+    const auto historyMode = historyPolicy.value("mode", std::string{"push"});
+    const auto historyGroup = historyPolicy.value("group", std::string{});
+    if (historyMode == "none") {
+      history_.clearRedo();
+      result["commandId"] = commandId;
+      result["undoCount"] = history_.undoCount();
+      result["redoCount"] = history_.redoCount();
+      return;
+    }
+
+    history_.push({commandId, type, historyGroup, command, beforeState, afterState}, historyMode == "replace");
     result["commandId"] = commandId;
     result["undoCount"] = history_.undoCount();
     result["redoCount"] = history_.redoCount();
@@ -1217,6 +1245,17 @@ class EditorSession {
       }
     }
     throw std::runtime_error("clip not found: " + id);
+  }
+
+  void ensureClipTrackEditable(const std::string& clipId, const std::string& commandType) {
+    auto* clip = findClip(clipId);
+    if (!clip) {
+      throw std::runtime_error(commandType + " clip not found");
+    }
+    auto* track = findTrack(clip->trackId);
+    if (track && track->locked) {
+      throw std::runtime_error(commandType + " track is locked");
+    }
   }
 
   [[nodiscard]] std::optional<AiEditProposal> proposalById(const std::string& id) const {

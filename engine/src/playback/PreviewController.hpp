@@ -291,9 +291,18 @@ class PreviewController {
   }
 
   [[nodiscard]] std::vector<unsigned char> decodeFrame(const std::string& ffmpegPath, const std::string& mediaPath, std::int64_t playheadUs) const {
+    try {
+      return decodeFrameAttempt(ffmpegPath, mediaPath, playheadUs, true);
+    } catch (...) {
+      return decodeFrameAttempt(ffmpegPath, mediaPath, playheadUs, false);
+    }
+  }
+
+  [[nodiscard]] std::vector<unsigned char> decodeFrameAttempt(const std::string& ffmpegPath, const std::string& mediaPath, std::int64_t playheadUs, bool useHardwareDecode) const {
     const auto outputPath = std::filesystem::temp_directory_path() / ("ai-video-preview-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".png");
-    const auto command = quoteArg(ffmpegPath) + " -hide_banner -loglevel error -y -ss " + formatSeconds(playheadUs) + " -i " + quoteArg(mediaPath) +
-                         " -vf " + quoteArg(previewScaleFilter()) + " -frames:v 1 -f image2 -vcodec png " + quoteArg(outputPath.string()) + stderrRedirect();
+    const auto hwaccel = useHardwareDecode ? " -hwaccel cuda" : "";
+    const auto command = quoteArg(ffmpegPath) + " -hide_banner -loglevel error -y" + hwaccel + " -ss " + formatSeconds(playheadUs) + " -i " + quoteArg(mediaPath) +
+                         " -map 0:v:0 -an -vf " + quoteArg(previewScaleFilter()) + " -frames:v 1 -f image2 -vcodec png " + quoteArg(outputPath.string()) + stderrRedirect();
 
     const auto exitCode = std::system(command.c_str());
     if (exitCode != 0 || !std::filesystem::is_regular_file(outputPath)) {

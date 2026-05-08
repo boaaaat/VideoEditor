@@ -23,6 +23,12 @@ export type CommandType =
 
 export type TrackKind = "video" | "audio";
 export type TrackMode = "selected_track" | "all_tracks";
+export type CommandHistoryMode = "push" | "replace" | "none";
+
+export interface CommandHistoryPolicy {
+  mode?: CommandHistoryMode;
+  group?: string;
+}
 
 export interface ImportMediaCommand {
   type: "import_media";
@@ -157,7 +163,7 @@ export interface ExportTimelineCommand {
   overwrite?: boolean;
 }
 
-export type EditorCommand =
+export type EditorCommand = (
   | ImportMediaCommand
   | RemoveMediaCommand
   | AddTrackCommand
@@ -175,7 +181,10 @@ export type EditorCommand =
   | ApplyTransformCommand
   | ApplyEffectStackCommand
   | ApplyLutCommand
-  | ExportTimelineCommand;
+  | ExportTimelineCommand
+) & {
+  history?: CommandHistoryPolicy;
+};
 
 export interface CommandEnvelope<T extends EditorCommand = EditorCommand> {
   requestId: string;

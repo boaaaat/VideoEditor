@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
 use std::fs::{self, OpenOptions};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -160,6 +162,66 @@ pub fn media_waveform_data_url(
         "data:image/png;base64,{}",
         general_purpose::STANDARD.encode(bytes)
     ))
+}
+
+#[tauri::command]
+pub async fn media_audio_preview_source(path: String, stream_index: usize) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let ffmpeg = find_ffmpeg_executable()
+            .ok_or_else(|| "could not find ffmpeg in tools/ffmpeg/bin or PATH".to_string())?;
+        let source_path = normalize_media_path(&path);
+        let source = PathBuf::from(&source_path);
+        if !source.is_file() {
+            return Err("media file does not exist".to_string());
+        }
+
+        let cache_dir = env::temp_dir().join("ai-video-editor").join("audio-preview");
+        fs::create_dir_all(&cache_dir)
+            .map_err(|error| format!("failed to create audio preview cache folder: {error}"))?;
+        let output_path = cache_dir.join(format!("{}-a{}.wav", stable_path_hash(&source_path), stream_index));
+        if output_path.is_file() {
+            return Ok(output_path.to_string_lossy().to_string());
+        }
+
+        let temp_path = output_path.with_extension("tmp.wav");
+        let output = Command::new(ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                &source_path,
+                "-map",
+                &format!("0:a:{stream_index}"),
+                "-vn",
+                "-ac",
+                "2",
+                "-ar",
+                "48000",
+                "-c:a",
+                "pcm_s16le",
+                temp_path.to_string_lossy().as_ref(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|error| format!("failed to run ffmpeg audio preview command: {error}"))?;
+
+        if !output.status.success() {
+            let _ = fs::remove_file(&temp_path);
+            return Err(format!(
+                "ffmpeg audio preview failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        fs::rename(&temp_path, &output_path)
+            .map_err(|error| format!("failed to finalize audio preview file: {error}"))?;
+        Ok(output_path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|error| format!("audio preview task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -621,6 +683,12 @@ fn run_ffmpeg_waveform(
 fn format_ffmpeg_timestamp(time_us: i64) -> String {
     let seconds = (time_us.max(0) as f64) / 1_000_000.0;
     format!("{seconds:.3}")
+}
+
+fn stable_path_hash(path: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn parse_media_metadata(path: &str, root: &Value) -> Value {

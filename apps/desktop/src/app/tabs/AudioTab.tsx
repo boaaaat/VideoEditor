@@ -150,7 +150,7 @@ export function AudioTab({
       return;
     }
 
-    void executeCommand({ type: "apply_audio_adjustment", clipId: selectedClip.id, adjustment: next }).then((result) => {
+    void executeCommand({ type: "apply_audio_adjustment", clipId: selectedClip.id, adjustment: next, history: { mode: "replace", group: `audio:${selectedClip.id}` } }).then((result) => {
       const nextTimeline = (result.data as { timeline?: Timeline } | undefined)?.timeline;
       if (result.ok && nextTimeline?.tracks) {
         setTimeline(nextTimeline);

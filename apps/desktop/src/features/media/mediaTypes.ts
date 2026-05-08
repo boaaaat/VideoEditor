@@ -107,6 +107,27 @@ export async function getMediaWaveformDataUrl(asset: MediaAsset, startUs?: numbe
   }
 }
 
+export async function getMediaAudioPreviewSourceUrl(asset: MediaAsset, streamIndex = 0) {
+  if (!("__TAURI_INTERNALS__" in window)) {
+    return streamIndex <= 0 ? getMediaSourceUrl(asset.path) : "";
+  }
+
+  if (streamIndex <= 0) {
+    return getMediaSourceUrl(asset.path);
+  }
+
+  try {
+    const { convertFileSrc, invoke } = await import("@tauri-apps/api/core");
+    const previewPath = await invoke<string>("media_audio_preview_source", {
+      path: asset.path,
+      streamIndex
+    });
+    return convertFileSrc(previewPath);
+  } catch {
+    return "";
+  }
+}
+
 export async function getMediaCacheStatus(asset: MediaAsset, projectPath?: string): Promise<MediaCacheStatus> {
   const baseStatus: MediaCacheStatus = {
     thumbnail: asset.kind === "video" ? "ready-on-demand" : "not-applicable",

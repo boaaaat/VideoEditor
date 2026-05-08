@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -11,6 +12,7 @@ namespace ai_editor {
 struct CommandHistoryEntry {
   std::string id;
   std::string type;
+  std::string group;
   nlohmann::json command;
   nlohmann::json beforeState;
   nlohmann::json afterState;
@@ -18,8 +20,23 @@ struct CommandHistoryEntry {
 
 class CommandHistory {
  public:
-  void push(CommandHistoryEntry entry) {
+  static constexpr std::size_t maxEntries = 200;
+
+  void push(CommandHistoryEntry entry, bool replaceLatest = false) {
+    if (replaceLatest && !entry.group.empty() && !undoStack_.empty()) {
+      auto& latest = undoStack_.back();
+      if (latest.group == entry.group) {
+        entry.beforeState = latest.beforeState;
+        latest = std::move(entry);
+        redoStack_.clear();
+        return;
+      }
+    }
+
     undoStack_.push_back(std::move(entry));
+    if (undoStack_.size() > maxEntries) {
+      undoStack_.erase(undoStack_.begin(), undoStack_.begin() + static_cast<std::ptrdiff_t>(undoStack_.size() - maxEntries));
+    }
     redoStack_.clear();
   }
 
@@ -46,6 +63,8 @@ class CommandHistory {
     undoStack_.clear();
     redoStack_.clear();
   }
+
+  void clearRedo() { redoStack_.clear(); }
 
   [[nodiscard]] nlohmann::json statusJson() const {
     return {

@@ -77,6 +77,7 @@ import { importMediaPaths, type ImportMediaResult } from "../../features/media/i
 import {
   getMediaDurationUs,
   generateMediaProxy,
+  getMediaAudioPreviewSourceUrl,
   getMediaCacheStatus,
   getMediaPreviewFrameDataUrl,
   getMediaSourceUrl,
@@ -237,6 +238,16 @@ export function EditTab({
   const playbackFrameRef = useRef<number | null>(null);
   const lastPlaybackTimeRef = useRef<number | null>(null);
   const internalMediaDragRef = useRef(false);
+  const mediaDragStateRef = useRef<MediaPointerDragState | null>(null);
+  const mediaDragFrameRef = useRef<number | null>(null);
+  const pendingMediaDragRef = useRef<{
+    dragState: MediaPointerDragState;
+    draggingId: string | null;
+    dropTrackId: string | null;
+    preview: MediaDropPreviewState | null;
+  } | null>(null);
+  const lastTimelineDropRef = useRef<{ key: string; at: number } | null>(null);
+  const importDroppedPathsRef = useRef<(paths: string[]) => Promise<void>>(async () => undefined);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [mediaDragOver, setMediaDragOver] = useState(false);
   const [snapping, setSnapping] = useState(true);
@@ -270,9 +281,18 @@ export function EditTab({
   const contextTrack = contextMenu?.kind === "track" ? timeline.tracks.find((track) => track.id === contextMenu.trackId) : undefined;
   const speedDialogClip = speedDialogClipId ? timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === speedDialogClipId) : undefined;
   const activeVideoClip = findActiveClip(timeline, playheadUs, "video", soloTrackIds);
-  const activeAudioClip = findActiveClip(timeline, playheadUs, "audio", soloTrackIds);
+  const activeAudioClips = findActiveClips(timeline, playheadUs, "audio", soloTrackIds);
   const activeVideoAsset = activeVideoClip ? mediaAssets.find((asset) => asset.id === activeVideoClip.mediaId) : undefined;
-  const activeAudioAsset = activeAudioClip ? mediaAssets.find((asset) => asset.id === activeAudioClip.mediaId) : undefined;
+  const activeAudioItems = useMemo(
+    () =>
+      activeAudioClips
+        .map((clip) => {
+          const asset = mediaAssets.find((item) => item.id === clip.mediaId);
+          return asset ? { clip, asset } : null;
+        })
+        .filter((item): item is { clip: TimelineClip; asset: MediaAsset } => Boolean(item)),
+    [activeAudioClips, mediaAssets]
+  );
   const missingMediaSet = useMemo(() => new Set(missingMediaPaths), [missingMediaPaths]);
   const visibleMediaAssets = useMemo(
     () => filterAndSortMediaAssets(mediaAssets, {
@@ -577,6 +597,14 @@ export function EditTab({
       trackId: item.id === clipId ? targetTrackId : item.trackId,
       startUs: Math.max(0, item.startUs + deltaUs)
     }));
+    const changedClips = movedClips.filter((item) => {
+      const original = selectedMoveClips.find((candidate) => candidate.id === item.id);
+      return original && (original.trackId !== item.trackId || original.startUs !== item.startUs);
+    });
+    if (changedClips.length === 0) {
+      setSelectedClipIds(selectedMoveClips.map((item) => item.id));
+      return;
+    }
     const invalidMovedClip = movedClips.find((item) => {
       const track = timeline.tracks.find((candidate) => candidate.id === item.trackId);
       return !track || track.locked;
@@ -587,7 +615,7 @@ export function EditTab({
     }
 
     const results = await runTimelineCommandBatch(
-      movedClips.map((item) => ({
+      changedClips.map((item) => ({
         command: {
           type: "move_clip",
           clipId: item.id,
@@ -600,7 +628,7 @@ export function EditTab({
     );
     setSelectedClipIds(selectedMoveClips.map((item) => item.id));
     const failed = results.find((result) => !result.ok);
-    setStatusMessage(failed ? failed.error ?? "Move clip failed" : `Moved ${movedClips.length} clip${movedClips.length === 1 ? "" : "s"}`, {
+    setStatusMessage(failed ? failed.error ?? "Move clip failed" : `Moved ${changedClips.length} clip${changedClips.length === 1 ? "" : "s"}`, {
       level: failed ? "error" : "success"
     });
   }
@@ -633,6 +661,9 @@ export function EditTab({
       const clipEndUs = clip.startUs + Math.round((nextOutUs - clip.inUs) / speed);
       const resolvedEndUs = snapping ? resolveTrackSnapStart(timeline, clip.trackId, clipEndUs, timelineZoom, clip.id, false).startUs : clipEndUs;
       nextClip = { ...clip, outUs: Math.max(clip.inUs + minDurationUs, clip.inUs + Math.round((resolvedEndUs - clip.startUs) * speed)) };
+    }
+    if (nextClip.startUs === clip.startUs && nextClip.inUs === clip.inUs && nextClip.outUs === clip.outUs) {
+      return;
     }
 
     const result = await runCommand({
@@ -670,24 +701,115 @@ export function EditTab({
     const nextStartUs = targetTrackId
       ? Math.max(0, startUs)
       : resolveMediaDropPlacement(timeline, asset, targetTrack.id, getTrackEndUs(targetTrack), timelineZoom, snapping).startUs;
-    const clipId = `clip_${Date.now()}`;
-    const result = await runCommand({
-      type: "add_clip",
-      clipId,
-      mediaId: asset.id,
-      trackId: targetTrack.id,
-      startUs: nextStartUs,
-      inUs: 0,
-      outUs: fallbackDurationUs,
-      speedPercent: 100
-    }, "Add clip failed");
-    if (result.ok) {
-      applyEngineTimeline(result.data);
-      setSelectedClipIds([clipId]);
+    if (targetTrackId) {
+      const dropKey = `${asset.id}:${targetTrack.id}:${nextStartUs}`;
+      const now = performance.now();
+      if (lastTimelineDropRef.current?.key === dropKey && now - lastTimelineDropRef.current.at < 500) {
+        return;
+      }
+      lastTimelineDropRef.current = { key: dropKey, at: now };
     }
-    setStatusMessage(result.ok ? `Added ${asset.name} to timeline` : result.error ?? "Add clip failed", {
-      level: result.ok ? "success" : "error",
-      details: { mediaId: asset.id, clipId, trackId: targetTrack.id }
+    const groupId = `add-media:${asset.id}:${Date.now()}`;
+    const videoClipId = `clip_${Date.now()}`;
+    const commands: Array<{ command: EditorCommand; fallbackError: string }> = [];
+    const selectedIds: string[] = [];
+
+    if (targetTrack.kind === "video") {
+      commands.push({
+        command: {
+          type: "add_clip",
+          clipId: videoClipId,
+          mediaId: asset.id,
+          trackId: targetTrack.id,
+          startUs: nextStartUs,
+          inUs: 0,
+          outUs: fallbackDurationUs,
+          speedPercent: 100,
+          history: { mode: "replace", group: groupId }
+        },
+        fallbackError: "Add clip failed"
+      });
+      selectedIds.push(videoClipId);
+    }
+
+    if (asset.kind === "audio" || asset.metadata?.hasAudio) {
+      const audioStreams = getAudioStreams(asset);
+      const existingAudioTracks = timeline.tracks.filter((track) => track.kind === "audio" && !track.locked);
+      const orderedAudioTracks = targetTrack.kind === "audio" ? [targetTrack, ...existingAudioTracks.filter((track) => track.id !== targetTrack.id)] : existingAudioTracks;
+      const missingTrackCount = Math.max(0, audioStreams.length - orderedAudioTracks.length);
+      const createdTrackIds = Array.from({ length: missingTrackCount }, (_, index) => `a_media_${Date.now()}_${index}`);
+      const targetTrackIds = [...orderedAudioTracks.map((track) => track.id), ...createdTrackIds].slice(0, audioStreams.length);
+
+      commands.push(
+        ...createdTrackIds.map((trackId, index) => ({
+          command: {
+            type: "add_track" as const,
+            trackId,
+            name: audioStreams[orderedAudioTracks.length + index]?.title || `Audio ${timeline.tracks.filter((track) => track.kind === "audio").length + index + 1}`,
+            kind: "audio" as const,
+            index: timeline.tracks.length + index,
+            history: { mode: "replace" as const, group: groupId }
+          },
+          fallbackError: "Add audio track failed"
+        }))
+      );
+
+      for (const [index, stream] of audioStreams.entries()) {
+        const audioClipId = `${asset.kind === "video" ? "audio_" : "clip_"}${videoClipId}_${stream.index}_${index}`;
+        const audio = {
+          ...defaultAudioAdjustment,
+          muted: false,
+          streamIndex: stream.index
+        };
+        commands.push(
+          {
+            command: {
+              type: "add_clip",
+              clipId: audioClipId,
+              mediaId: asset.id,
+              trackId: targetTrackIds[index],
+              startUs: nextStartUs,
+              inUs: 0,
+              outUs: fallbackDurationUs,
+              speedPercent: 100,
+              history: { mode: "replace", group: groupId }
+            },
+            fallbackError: "Add audio clip failed"
+          },
+          {
+            command: {
+              type: "apply_audio_adjustment",
+              clipId: audioClipId,
+              adjustment: audio,
+              history: { mode: "replace", group: groupId }
+            },
+            fallbackError: "Set audio stream failed"
+          }
+        );
+        selectedIds.push(audioClipId);
+      }
+
+      if (targetTrack.kind === "video" && selectedIds.length > 1) {
+        commands.push({
+          command: {
+            type: "apply_audio_adjustment",
+            clipId: videoClipId,
+            adjustment: { muted: true },
+            history: { mode: "replace", group: groupId }
+          },
+          fallbackError: "Mute embedded video audio failed"
+        });
+      }
+    }
+
+    const results = await runTimelineCommandBatch(commands);
+    const failed = results.find((result) => !result.ok);
+    if (!failed) {
+      setSelectedClipIds(selectedIds);
+    }
+    setStatusMessage(failed ? failed.error ?? "Add clip failed" : `Added ${asset.name} to timeline`, {
+      level: failed ? "error" : "success",
+      details: { mediaId: asset.id, clipIds: selectedIds, trackId: targetTrack.id }
     });
 
     void getMediaDurationUs(asset, fallbackDurationUs);
@@ -727,7 +849,25 @@ export function EditTab({
     await importDroppedPaths(paths);
   }
 
+  useEffect(() => {
+    importDroppedPathsRef.current = importDroppedPaths;
+  });
+
+  useEffect(() => {
+    return () => {
+      if (mediaDragFrameRef.current !== null) {
+        cancelAnimationFrame(mediaDragFrameRef.current);
+      }
+    };
+  }, []);
+
   function clearMediaPointerDrag() {
+    if (mediaDragFrameRef.current !== null) {
+      cancelAnimationFrame(mediaDragFrameRef.current);
+      mediaDragFrameRef.current = null;
+    }
+    pendingMediaDragRef.current = null;
+    mediaDragStateRef.current = null;
     setMediaDragState(null);
     setDraggingMediaId(null);
     setMediaDropTrackId(null);
@@ -745,7 +885,7 @@ export function EditTab({
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     internalMediaDragRef.current = true;
-    setMediaDragState({
+    const nextState = {
       asset,
       pointerId: event.pointerId,
       originX: event.clientX,
@@ -753,36 +893,59 @@ export function EditTab({
       x: event.clientX,
       y: event.clientY,
       active: false
-    });
+    };
+    mediaDragStateRef.current = nextState;
+    setMediaDragState(nextState);
     setStatusMessage(`Drag ${asset.name} onto a ${asset.kind} track`, { source: "media" });
   }
 
   function updateMediaPointerDrag(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (!mediaDragState || event.pointerId !== mediaDragState.pointerId) {
+    const currentDrag = mediaDragStateRef.current;
+    if (!currentDrag || event.pointerId !== currentDrag.pointerId) {
       return;
     }
 
     event.preventDefault();
-    const moved = Math.hypot(event.clientX - mediaDragState.originX, event.clientY - mediaDragState.originY) > 4;
-    const active = mediaDragState.active || moved;
+    const moved = Math.hypot(event.clientX - currentDrag.originX, event.clientY - currentDrag.originY) > 4;
+    const active = currentDrag.active || moved;
     const drop = active ? getMediaDropAtPoint(event.clientX, event.clientY, timelineZoom, getTimelineDurationSeconds(timeline.durationUs)) : null;
     const preview = drop
-      ? resolveMediaDropPlacement(timeline, mediaDragState.asset, drop.trackId, drop.startUs, timelineZoom, snapping)
+      ? resolveMediaDropPlacement(timeline, currentDrag.asset, drop.trackId, drop.startUs, timelineZoom, snapping)
       : null;
 
-    setMediaDragState({
-      ...mediaDragState,
+    const nextDrag = {
+      ...currentDrag,
       x: event.clientX,
       y: event.clientY,
       active
+    };
+    mediaDragStateRef.current = nextDrag;
+    pendingMediaDragRef.current = {
+      dragState: nextDrag,
+      draggingId: active ? currentDrag.asset.id : null,
+      dropTrackId: drop?.trackId ?? null,
+      preview
+    };
+    if (mediaDragFrameRef.current !== null) {
+      return;
+    }
+    mediaDragFrameRef.current = requestAnimationFrame(() => {
+      mediaDragFrameRef.current = null;
+      const pending = pendingMediaDragRef.current;
+      if (!pending) {
+        return;
+      }
+      pendingMediaDragRef.current = null;
+      setMediaDragState(pending.dragState);
+      setDraggingMediaId(pending.draggingId);
+      setMediaDropTrackId(pending.dropTrackId);
+      setMediaDropPreview(pending.preview);
     });
-    setDraggingMediaId(active ? mediaDragState.asset.id : null);
-    setMediaDropTrackId(drop?.trackId ?? null);
-    setMediaDropPreview(preview);
   }
 
   function finishMediaPointerDrag(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (!mediaDragState || event.pointerId !== mediaDragState.pointerId) {
+    const currentDrag = mediaDragStateRef.current;
+    if (!currentDrag || event.pointerId !== currentDrag.pointerId) {
       return;
     }
 
@@ -791,23 +954,23 @@ export function EditTab({
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
 
-    const moved = mediaDragState.active || Math.hypot(event.clientX - mediaDragState.originX, event.clientY - mediaDragState.originY) > 4;
+    const moved = currentDrag.active || Math.hypot(event.clientX - currentDrag.originX, event.clientY - currentDrag.originY) > 4;
     if (!moved) {
       clearMediaPointerDrag();
       return;
     }
 
     const drop = getMediaDropAtPoint(event.clientX, event.clientY, timelineZoom, getTimelineDurationSeconds(timeline.durationUs));
-    const placement = drop ? resolveMediaDropPlacement(timeline, mediaDragState.asset, drop.trackId, drop.startUs, timelineZoom, snapping) : null;
+    const placement = drop ? resolveMediaDropPlacement(timeline, currentDrag.asset, drop.trackId, drop.startUs, timelineZoom, snapping) : null;
     const targetTrack = placement ? timeline.tracks.find((track) => track.id === placement.trackId) : undefined;
     if (!drop || !targetTrack) {
-      setStatusMessage(`Drop ${mediaDragState.asset.name} onto a compatible track`, { level: "warning", source: "media" });
+      setStatusMessage(`Drop ${currentDrag.asset.name} onto a compatible track`, { level: "warning", source: "media" });
       clearMediaPointerDrag();
       return;
     }
 
-    if (!canMediaAssetUseTrack(mediaDragState.asset, targetTrack.kind)) {
-      setStatusMessage(`${mediaDragState.asset.name} cannot be used on a ${targetTrack.kind} track`, { level: "warning", source: "media" });
+    if (!canMediaAssetUseTrack(currentDrag.asset, targetTrack.kind)) {
+      setStatusMessage(`${currentDrag.asset.name} cannot be used on a ${targetTrack.kind} track`, { level: "warning", source: "media" });
       clearMediaPointerDrag();
       return;
     }
@@ -818,14 +981,15 @@ export function EditTab({
       return;
     }
 
-    const asset = mediaDragState.asset;
+    const asset = currentDrag.asset;
     clearMediaPointerDrag();
     void addMediaToTimeline(asset, targetTrack.id, placement?.startUs ?? drop.startUs);
   }
 
   function cancelMediaPointerDrag(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (mediaDragState && event.currentTarget.hasPointerCapture(mediaDragState.pointerId)) {
-      event.currentTarget.releasePointerCapture(mediaDragState.pointerId);
+    const currentDrag = mediaDragStateRef.current;
+    if (currentDrag && event.currentTarget.hasPointerCapture(currentDrag.pointerId)) {
+      event.currentTarget.releasePointerCapture(currentDrag.pointerId);
     }
     clearMediaPointerDrag();
   }
@@ -1176,16 +1340,18 @@ export function EditTab({
     const createdTrackIds = Array.from({ length: missingTrackCount }, (_, index) => `a_detached_${Date.now()}_${index}`);
     const targetTrackIds = [...existingAudioTracks.map((track) => track.id), ...createdTrackIds].slice(0, audioStreams.length);
     const detachedClipIds = audioStreams.map((stream, index) => `audio_${clip.id}_${stream.index}_${Date.now()}_${index}`);
+    const groupId = `detach-audio:${clip.id}:${Date.now()}`;
 
     const commands: Array<{ command: EditorCommand; fallbackError: string }> = [
-      { command: { type: "apply_audio_adjustment", clipId: clip.id, adjustment: { muted: true } }, fallbackError: "Mute source clip failed" },
+      { command: { type: "apply_audio_adjustment", clipId: clip.id, adjustment: { muted: true }, history: { mode: "replace", group: groupId } }, fallbackError: "Mute source clip failed" },
       ...createdTrackIds.map((trackId, index) => ({
         command: {
           type: "add_track" as const,
           trackId,
           name: audioStreams[existingAudioTracks.length + index]?.title || `Audio ${timeline.tracks.filter((track) => track.kind === "audio").length + index + 1}`,
           kind: "audio" as const,
-          index: timeline.tracks.length + index
+          index: timeline.tracks.length + index,
+          history: { mode: "replace" as const, group: groupId }
         },
         fallbackError: "Add detached audio track failed"
       })),
@@ -1208,7 +1374,8 @@ export function EditTab({
               startUs: clip.startUs,
               inUs: clip.inUs,
               outUs: clip.outUs,
-              speedPercent: normalizeClipSpeedPercent(clip.speedPercent)
+              speedPercent: normalizeClipSpeedPercent(clip.speedPercent),
+              history: { mode: "replace" as const, group: groupId }
             },
             fallbackError: "Detach audio failed"
           },
@@ -1216,7 +1383,8 @@ export function EditTab({
             command: {
               type: "apply_audio_adjustment" as const,
               clipId: detachedClipId,
-              adjustment: detachedAudio
+              adjustment: detachedAudio,
+              history: { mode: "replace" as const, group: groupId }
             },
             fallbackError: "Detached audio settings failed"
           }
@@ -1439,7 +1607,7 @@ export function EditTab({
           }
 
           if (payload.type === "drop" && payload.paths) {
-            void importDroppedPaths(payload.paths);
+            void importDroppedPathsRef.current(payload.paths);
           }
         })
         .then((cleanup) => {
@@ -1450,7 +1618,7 @@ export function EditTab({
     return () => {
       unlisten?.();
     };
-  }, [onImportMediaResult]);
+  }, []);
 
   useEffect(() => {
     setPlayheadUs((current) => clamp(current, 0, Math.max(timeline.durationUs, 1_000_000)));
@@ -1756,8 +1924,7 @@ export function EditTab({
               previewUrl={previewUrl}
               videoAsset={activeVideoAsset}
               videoClip={activeVideoClip}
-              audioAsset={activeAudioAsset}
-              audioClip={activeAudioClip}
+              audioItems={activeAudioItems}
               projectSettings={projectSettings}
               previewQuality={previewQuality}
               previewScale={previewScale}
@@ -2479,8 +2646,7 @@ function PreviewSurface({
   previewUrl,
   videoAsset,
   videoClip,
-  audioAsset,
-  audioClip,
+  audioItems,
   projectSettings,
   previewQuality,
   previewScale,
@@ -2492,8 +2658,7 @@ function PreviewSurface({
   previewUrl?: string;
   videoAsset?: MediaAsset;
   videoClip?: TimelineClip;
-  audioAsset?: MediaAsset;
-  audioClip?: TimelineClip;
+  audioItems: Array<{ clip: TimelineClip; asset: MediaAsset }>;
   projectSettings: ProjectSettings;
   previewQuality: PreviewQuality;
   previewScale: PreviewScaleMode;
@@ -2504,15 +2669,15 @@ function PreviewSurface({
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
   const playbackStartPlayheadRef = useRef(playheadUs);
   const nativeSeekSequenceRef = useRef(0);
   const frameRequestSequenceRef = useRef(0);
+  const nativeStateKeyRef = useRef("");
+  const nativeSeekKeyRef = useRef("");
   const [videoSrc, setVideoSrc] = useState("");
-  const [audioSrc, setAudioSrc] = useState("");
   const [frameSrc, setFrameSrc] = useState("");
   const [stats, setStats] = useState<PreviewState | null>(null);
-  const separateAudioPreviewActive = Boolean(audioAsset && audioClip);
+  const separateAudioPreviewActive = audioItems.length > 0;
   const settledPlayheadUs = useDebouncedValue(playheadUs, playing ? 120 : 45);
   const previewCommandPlayheadUs = playing ? playbackStartPlayheadRef.current : settledPlayheadUs;
   const mediaElementSyncPlayheadUs = playing ? settledPlayheadUs : playheadUs;
@@ -2587,24 +2752,6 @@ function PreviewSurface({
     };
   }, [videoAsset]);
 
-  useEffect(() => {
-    let cancelled = false;
-    if (!audioAsset) {
-      setAudioSrc("");
-      return;
-    }
-
-    void getMediaSourceUrl(audioAsset.path).then((url) => {
-      if (!cancelled) {
-        setAudioSrc(url);
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [audioAsset]);
-
   const previewFrameTimeUs = videoAsset && videoClip ? quantizePreviewFrameTime(getClipMediaTimeUs(videoClip, settledPlayheadUs)) : 0;
 
   useEffect(() => {
@@ -2628,22 +2775,28 @@ function PreviewSurface({
 
   useEffect(() => {
     const nativeMediaActive = !separateAudioPreviewActive;
-    void setNativePreviewState({
-      mediaId: nativeMediaActive ? videoAsset?.id ?? audioAsset?.id ?? "" : "",
-      mediaPath: nativeMediaActive ? videoAsset?.path ?? audioAsset?.path ?? "" : "",
-      codec: nativeMediaActive ? videoAsset?.metadata?.codec ?? audioAsset?.metadata?.codec ?? "unknown" : "unknown",
+    const params = {
+      mediaId: nativeMediaActive ? videoAsset?.id ?? audioItems[0]?.asset.id ?? "" : "",
+      mediaPath: nativeMediaActive ? videoAsset?.path ?? audioItems[0]?.asset.path ?? "" : "",
+      codec: nativeMediaActive ? videoAsset?.metadata?.codec ?? audioItems[0]?.asset.metadata?.codec ?? "unknown" : "unknown",
       quality: previewQuality,
       scale: previewScale,
       colorMode: projectSettings.colorMode,
       fps: projectSettings.fps,
       playheadUs: previewCommandPlayheadUs,
-      inUs: videoClip?.inUs ?? audioClip?.inUs ?? 0,
-      outUs: videoClip?.outUs ?? audioClip?.outUs ?? 0,
-      playbackRate: effectivePlaybackRate(videoClip ?? audioClip, previewSpeedPercent),
+      inUs: videoClip?.inUs ?? audioItems[0]?.clip.inUs ?? 0,
+      outUs: videoClip?.outUs ?? audioItems[0]?.clip.outUs ?? 0,
+      playbackRate: effectivePlaybackRate(videoClip ?? audioItems[0]?.clip, previewSpeedPercent),
       volume: clamp(previewVolumePercent / 100, 0, 2),
       playing: nativeMediaActive && playing
-    }).then(setStats).catch(() => undefined);
-  }, [audioAsset, audioClip, previewCommandPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, previewQuality, previewScale, projectSettings.colorMode, projectSettings.fps, separateAudioPreviewActive, videoAsset, videoClip]);
+    };
+    const key = JSON.stringify(params);
+    if (nativeStateKeyRef.current === key) {
+      return;
+    }
+    nativeStateKeyRef.current = key;
+    void setNativePreviewState(params).then(setStats).catch(() => undefined);
+  }, [audioItems, previewCommandPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, previewQuality, previewScale, projectSettings.colorMode, projectSettings.fps, separateAudioPreviewActive, videoAsset, videoClip]);
 
   useEffect(() => {
     void (playing && !separateAudioPreviewActive ? playNativePreview() : pauseNativePreview()).then(setStats).catch(() => undefined);
@@ -2654,6 +2807,11 @@ function PreviewSurface({
       return;
     }
 
+    const seekKey = String(settledPlayheadUs);
+    if (nativeSeekKeyRef.current === seekKey) {
+      return;
+    }
+    nativeSeekKeyRef.current = seekKey;
     const sequence = ++nativeSeekSequenceRef.current;
     void seekNativePreview(settledPlayheadUs).then((nextStats) => {
       if (sequence === nativeSeekSequenceRef.current) {
@@ -2668,19 +2826,14 @@ function PreviewSurface({
   }, [videoClip, mediaElementSyncPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, videoSrc, projectSettings, stats?.childHwnd, stats?.renderMode, separateAudioPreviewActive]);
 
   useEffect(() => {
-    syncMediaElement(audioRef, audioClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent);
-    applyMediaElementAudio(audioRef, audioClip, projectSettings, mediaElementSyncPlayheadUs, previewVolumePercent);
-  }, [audioClip, mediaElementSyncPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, audioSrc, projectSettings, separateAudioPreviewActive]);
-
-  useEffect(() => {
     const interval = window.setInterval(() => {
       void getNativePreviewStats().then(setStats).catch(() => undefined);
     }, playing && !separateAudioPreviewActive ? 500 : 1000);
     return () => window.clearInterval(interval);
   }, [playing, separateAudioPreviewActive]);
 
-  const activeAsset = videoAsset ?? audioAsset;
-  const activeClip = videoClip ?? audioClip;
+  const activeAsset = videoAsset ?? audioItems[0]?.asset;
+  const activeClip = videoClip ?? audioItems[0]?.clip;
   const activeTime = activeClip ? formatTimelineTime(Math.max(0, Math.floor((playheadUs - activeClip.startUs) / 1_000_000))) : "";
   const displayedPreviewFps = playing ? Math.round(stats?.previewFps || projectSettings.fps) : Math.round(stats?.previewFps ?? 0);
   const previewScaleStyle = getPreviewScaleStyle(previewScale, projectSettings);
@@ -2717,9 +2870,20 @@ function PreviewSurface({
       ) : null}
       {!nativePreviewActive && engineFrameActive ? <img className="preview-frame-image" src={stats?.frameDataUrl ?? ""} alt="" style={visualPreviewStyle} /> : null}
       {!nativePreviewActive && !engineFrameActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" style={visualPreviewStyle} /> : null}
-      {!nativePreviewActive && audioAsset && audioClip && audioSrc ? (
+      {!nativePreviewActive && audioItems.length > 0 ? (
         <>
-          <audio ref={audioRef} src={audioSrc} onLoadedMetadata={() => syncMediaElement(audioRef, audioClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent)} />
+          {audioItems.map((item) => (
+            <AudioPreviewElement
+              key={`${item.clip.id}:${normalizeAudioAdjustment(item.clip.audio).streamIndex ?? 0}`}
+              asset={item.asset}
+              clip={item.clip}
+              projectSettings={projectSettings}
+              playheadUs={mediaElementSyncPlayheadUs}
+              playing={playing}
+              previewSpeedPercent={previewSpeedPercent}
+              previewVolumePercent={previewVolumePercent}
+            />
+          ))}
           {!videoAsset ? <Music size={34} /> : null}
         </>
       ) : null}
@@ -2742,6 +2906,60 @@ function PreviewSurface({
       </div>
       {stats?.warning ? <div className="preview-warning">{stats.warning}</div> : null}
     </div>
+  );
+}
+
+function AudioPreviewElement({
+  asset,
+  clip,
+  projectSettings,
+  playheadUs,
+  playing,
+  previewSpeedPercent,
+  previewVolumePercent
+}: {
+  asset: MediaAsset;
+  clip: TimelineClip;
+  projectSettings: ProjectSettings;
+  playheadUs: number;
+  playing: boolean;
+  previewSpeedPercent: number;
+  previewVolumePercent: number;
+}) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [src, setSrc] = useState("");
+  const streamIndex = normalizeAudioAdjustment(clip.audio).streamIndex ?? 0;
+
+  useEffect(() => {
+    let cancelled = false;
+    setSrc("");
+    void getMediaAudioPreviewSourceUrl(asset, streamIndex).then((url) => {
+      if (!cancelled) {
+        setSrc(url);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [asset, streamIndex]);
+
+  useEffect(() => {
+    syncMediaElement(audioRef, clip, playheadUs, playing, previewSpeedPercent);
+    applyMediaElementAudio(audioRef, clip, projectSettings, playheadUs, previewVolumePercent);
+  }, [clip, playheadUs, previewSpeedPercent, previewVolumePercent, playing, src, projectSettings]);
+
+  if (!src) {
+    return null;
+  }
+
+  return (
+    <audio
+      ref={audioRef}
+      src={src}
+      preload="auto"
+      style={hiddenAudioCarrierStyle}
+      onLoadedMetadata={() => syncMediaElement(audioRef, clip, playheadUs, playing, previewSpeedPercent)}
+    />
   );
 }
 
@@ -2768,11 +2986,35 @@ const mediaThumbnailCache = new Map<string, string>();
 const mediaWaveformCache = new Map<string, string>();
 
 function MediaThumbnail({ asset }: { asset: MediaAsset }) {
+  const frameRef = useRef<HTMLSpanElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [visible, setVisible] = useState(false);
   const [src, setSrc] = useState("");
   const [thumbnailSrc, setThumbnailSrc] = useState("");
   const [waveformSrc, setWaveformSrc] = useState("");
   const [loaded, setLoaded] = useState(asset.kind === "audio");
+
+  useEffect(() => {
+    const element = frameRef.current;
+    if (!element) {
+      return;
+    }
+    if (!("IntersectionObserver" in window)) {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "320px" }
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -2788,6 +3030,9 @@ function MediaThumbnail({ asset }: { asset: MediaAsset }) {
       setSrc("");
       setThumbnailSrc("");
       setLoaded(true);
+      return;
+    }
+    if (!visible) {
       return;
     }
 
@@ -2816,7 +3061,7 @@ function MediaThumbnail({ asset }: { asset: MediaAsset }) {
     return () => {
       cancelled = true;
     };
-  }, [asset]);
+  }, [asset, visible]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -2849,6 +3094,9 @@ function MediaThumbnail({ asset }: { asset: MediaAsset }) {
   useEffect(() => {
     let cancelled = false;
     setWaveformSrc("");
+    if (!visible) {
+      return;
+    }
     const cachedWaveform = mediaWaveformCache.get(asset.path);
     if (cachedWaveform) {
       setWaveformSrc(cachedWaveform);
@@ -2865,11 +3113,11 @@ function MediaThumbnail({ asset }: { asset: MediaAsset }) {
     return () => {
       cancelled = true;
     };
-  }, [asset]);
+  }, [asset, visible]);
 
   if (asset.kind === "audio") {
     return (
-      <span className="media-thumb-frame audio">
+      <span ref={frameRef} className="media-thumb-frame audio">
         {waveformSrc ? <img src={waveformSrc} alt="" /> : null}
         <Music size={18} />
       </span>
@@ -2877,7 +3125,7 @@ function MediaThumbnail({ asset }: { asset: MediaAsset }) {
   }
 
   return (
-    <span className={loaded ? "media-thumb-frame video loaded" : "media-thumb-frame video"}>
+    <span ref={frameRef} className={loaded ? "media-thumb-frame video loaded" : "media-thumb-frame video"}>
       {thumbnailSrc ? <img src={thumbnailSrc} alt="" /> : null}
       {!thumbnailSrc && src ? <video ref={videoRef} src={src} muted preload="metadata" playsInline /> : null}
       {waveformSrc ? <img className="media-waveform-strip" src={waveformSrc} alt="" /> : null}
@@ -3325,10 +3573,14 @@ function withTimelineEditDuration(timeline: Timeline): Timeline {
 }
 
 function findActiveClip(timeline: typeof starterTimeline, playheadUs: number, kind: "video" | "audio", soloTrackIds: string[] = []) {
+  return findActiveClips(timeline, playheadUs, kind, soloTrackIds)[0];
+}
+
+function findActiveClips(timeline: typeof starterTimeline, playheadUs: number, kind: "video" | "audio", soloTrackIds: string[] = []) {
   return timeline.tracks
     .filter((track) => track.kind === kind && !track.locked && (kind === "audio" ? !track.muted : track.visible) && (soloTrackIds.length === 0 || soloTrackIds.includes(track.id)))
     .flatMap((track) => track.clips)
-    .find((clip) => playheadUs >= clip.startUs && playheadUs < clip.startUs + getClipDisplayDurationUs(clip));
+    .filter((clip) => playheadUs >= clip.startUs && playheadUs < clip.startUs + getClipDisplayDurationUs(clip));
 }
 
 function getClipMediaTimeUs(clip: TimelineClip, playheadUs: number) {
@@ -3511,7 +3763,10 @@ function resolveMediaDropPlacement(
 }
 
 function canMediaAssetUseTrack(asset: MediaAsset, trackKind: "video" | "audio") {
-  return asset.kind === trackKind;
+  if (trackKind === "audio") {
+    return asset.kind === "audio" || Boolean(asset.metadata?.hasAudio);
+  }
+  return asset.kind === "video";
 }
 
 function canClipUseTrack(timeline: typeof starterTimeline, clip: TimelineClip, trackKind: "video" | "audio") {

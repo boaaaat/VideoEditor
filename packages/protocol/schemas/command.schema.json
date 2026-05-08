@@ -25,6 +25,14 @@
         "apply_lut",
         "export_timeline"
       ]
+    },
+    "history": {
+      "type": "object",
+      "properties": {
+        "mode": { "enum": ["push", "replace", "none"] },
+        "group": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
     }
   },
   "allOf": [

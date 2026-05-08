@@ -77,8 +77,18 @@ let browserTimeline: Timeline = {
 
 let browserProposals: AiEditProposal[] = [];
 let browserProjectState: unknown = null;
-let browserUndoCount = 0;
-let browserRedoCount = 0;
+const maxBrowserHistoryEntries = 200;
+
+interface BrowserHistoryEntry {
+  id: string;
+  type: EditorCommand["type"];
+  group: string;
+  beforeState: unknown;
+  afterState: unknown;
+}
+
+let browserUndoStack: BrowserHistoryEntry[] = [];
+let browserRedoStack: BrowserHistoryEntry[] = [];
 
 async function getInvoke(): Promise<TauriInvoke | null> {
   if (!("__TAURI_INTERNALS__" in window)) {
@@ -99,30 +109,37 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
 
     if (method === "command.execute") {
       const command = params as EditorCommand;
-      browserTimeline = applyBrowserTimelineCommand(browserTimeline, command);
-      browserUndoCount += 1;
-      browserRedoCount = 0;
-      return { ok: true, commandId: `browser-${Date.now()}`, commandType: command.type, data: { timeline: browserTimeline }, undoCount: browserUndoCount, redoCount: browserRedoCount } as T;
+      const beforeState = browserProjectSnapshot();
+      const nextTimeline = applyBrowserTimelineCommand(browserTimeline, command);
+      browserTimeline = nextTimeline;
+      const afterState = browserProjectSnapshot();
+      const commandId = `browser-${command.type}-${Date.now()}`;
+      recordBrowserCommand(command, commandId, beforeState, afterState);
+      return { ok: true, commandId, commandType: command.type, data: { timeline: browserTimeline }, undoCount: browserUndoStack.length, redoCount: browserRedoStack.length } as T;
     }
 
     if (method === "command.undo") {
-      if (browserUndoCount > 0) {
-        browserUndoCount -= 1;
-        browserRedoCount += 1;
+      if (browserUndoStack.length === 0) {
+        return { ok: false, error: "Nothing to undo", data: browserProjectSnapshot(), undoCount: browserUndoStack.length, redoCount: browserRedoStack.length } as T;
       }
-      return { ok: browserRedoCount > 0, data: browserProjectState, undoCount: browserUndoCount, redoCount: browserRedoCount } as T;
+      const entry = browserUndoStack.pop()!;
+      browserRedoStack.push(entry);
+      applyBrowserProjectSnapshot(entry.beforeState);
+      return { ok: true, commandId: entry.id, commandType: entry.type, data: browserProjectSnapshot(), undoCount: browserUndoStack.length, redoCount: browserRedoStack.length } as T;
     }
 
     if (method === "command.redo") {
-      if (browserRedoCount > 0) {
-        browserRedoCount -= 1;
-        browserUndoCount += 1;
+      if (browserRedoStack.length === 0) {
+        return { ok: false, error: "Nothing to redo", data: browserProjectSnapshot(), undoCount: browserUndoStack.length, redoCount: browserRedoStack.length } as T;
       }
-      return { ok: browserUndoCount > 0, data: browserProjectState, undoCount: browserUndoCount, redoCount: browserRedoCount } as T;
+      const entry = browserRedoStack.pop()!;
+      browserUndoStack.push(entry);
+      applyBrowserProjectSnapshot(entry.afterState);
+      return { ok: true, commandId: entry.id, commandType: entry.type, data: browserProjectSnapshot(), undoCount: browserUndoStack.length, redoCount: browserRedoStack.length } as T;
     }
 
     if (method === "command.history") {
-      return { undoCount: browserUndoCount, redoCount: browserRedoCount, canUndo: browserUndoCount > 0, canRedo: browserRedoCount > 0 } as T;
+      return { undoCount: browserUndoStack.length, redoCount: browserRedoStack.length, canUndo: browserUndoStack.length > 0, canRedo: browserRedoStack.length > 0 } as T;
     }
 
     if (method === "media.index") {
@@ -135,8 +152,9 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
 
     if (method === "project.reset") {
       browserProjectState = params;
-      browserUndoCount = 0;
-      browserRedoCount = 0;
+      applyBrowserProjectSnapshot(params);
+      browserUndoStack = [];
+      browserRedoStack = [];
       return {} as T;
     }
 
@@ -167,6 +185,7 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
 
     if (method === "project.save_state") {
       browserProjectState = params;
+      applyBrowserProjectSnapshot(params);
       return params as T;
     }
 
@@ -341,6 +360,61 @@ function emitCommandExecutionEvent(detail: CommandExecutionEventDetail) {
   window.dispatchEvent(new CustomEvent("ai-video-editor:command-execution", { detail }));
 }
 
+function browserProjectSnapshot() {
+  const base = cloneJson(browserProjectState) as Record<string, unknown> | null;
+  return {
+    ...(base ?? {}),
+    timeline: browserTimeline,
+    aiProposals: browserProposals
+  };
+}
+
+function applyBrowserProjectSnapshot(snapshot: unknown) {
+  browserProjectState = cloneJson(snapshot);
+  const state = browserProjectState as { timeline?: Timeline; aiProposals?: AiEditProposal[] } | null;
+  if (state?.timeline?.tracks) {
+    browserTimeline = state.timeline;
+  }
+  if (Array.isArray(state?.aiProposals)) {
+    browserProposals = state.aiProposals;
+  }
+}
+
+function recordBrowserCommand(command: EditorCommand, commandId: string, beforeState: unknown, afterState: unknown) {
+  if (JSON.stringify(beforeState) === JSON.stringify(afterState)) {
+    return;
+  }
+
+  const historyMode = command.history?.mode ?? "push";
+  if (historyMode === "none") {
+    browserRedoStack = [];
+    return;
+  }
+
+  const entry: BrowserHistoryEntry = {
+    id: commandId,
+    type: command.type,
+    group: command.history?.group ?? "",
+    beforeState: cloneJson(beforeState),
+    afterState: cloneJson(afterState)
+  };
+
+  if (historyMode === "replace" && entry.group && browserUndoStack.at(-1)?.group === entry.group) {
+    entry.beforeState = browserUndoStack.at(-1)!.beforeState;
+    browserUndoStack[browserUndoStack.length - 1] = entry;
+  } else {
+    browserUndoStack.push(entry);
+    if (browserUndoStack.length > maxBrowserHistoryEntries) {
+      browserUndoStack = browserUndoStack.slice(-maxBrowserHistoryEntries);
+    }
+  }
+  browserRedoStack = [];
+}
+
+function cloneJson<T>(value: T): T {
+  return value === null || value === undefined ? value : JSON.parse(JSON.stringify(value));
+}
+
 function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand): Timeline {
   switch (command.type) {
     case "add_track": {
@@ -377,7 +451,11 @@ function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand)
       };
     case "delete_track":
       return { ...timeline, tracks: reindexTracks(timeline.tracks.filter((track) => track.id !== command.trackId)) };
-    case "add_clip":
+    case "add_clip": {
+      const targetTrack = timeline.tracks.find((track) => track.id === command.trackId);
+      if (!targetTrack || targetTrack.locked) {
+        return timeline;
+      }
       return updateBrowserTrackClips(timeline, command.trackId, (clips) => [
         ...clips.filter((clip) => clip.id !== (command.clipId ?? "")),
         {
@@ -394,6 +472,7 @@ function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand)
           effects: []
         }
       ]);
+    }
     case "move_clip": {
       const clip = timeline.tracks.flatMap((track) => track.clips).find((item) => item.id === command.clipId);
       if (!clip) {
@@ -404,18 +483,30 @@ function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand)
       if (sourceTrack?.kind && targetTrack?.kind && sourceTrack.kind !== targetTrack.kind) {
         return timeline;
       }
+      if (sourceTrack?.locked || targetTrack?.locked || !targetTrack) {
+        return timeline;
+      }
+      if (clip.trackId === command.trackId && clip.startUs === command.startUs) {
+        return timeline;
+      }
       const withoutClip = {
         ...timeline,
         tracks: timeline.tracks.map((track) => ({ ...track, clips: track.clips.filter((item) => item.id !== command.clipId) }))
       };
       return updateBrowserTrackClips(withoutClip, command.trackId, (clips) => [...clips, { ...clip, trackId: command.trackId, startUs: command.startUs }]);
     }
-    case "trim_clip":
+    case "trim_clip": {
+      const clip = timeline.tracks.flatMap((track) => track.clips).find((item) => item.id === command.clipId);
+      const track = clip ? timeline.tracks.find((item) => item.id === clip.trackId) : undefined;
+      if (!clip || track?.locked) {
+        return timeline;
+      }
       return updateBrowserClip(timeline, command.clipId, (clip) =>
         command.edge === "start"
           ? { ...clip, inUs: Math.max(0, clip.inUs + Math.max(0, command.timeUs - clip.startUs)), startUs: Math.max(0, command.timeUs) }
           : { ...clip, outUs: Math.max(clip.inUs + 250_000, command.timeUs) }
       );
+    }
     case "split_clip": {
       const clip = command.clipId
         ? timeline.tracks.flatMap((track) => track.clips).find((item) => item.id === command.clipId)
@@ -427,11 +518,21 @@ function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand)
       const secondClip = { ...clip, id: `clip_${Date.now()}`, startUs: command.playheadUs, inUs: splitInUs };
       return updateBrowserTrackClips(timeline, clip.trackId, (clips) => clips.flatMap((item) => (item.id === clip.id ? [{ ...item, outUs: splitInUs }, secondClip] : [item])));
     }
-    case "delete_clip":
+    case "delete_clip": {
+      const clip = timeline.tracks.flatMap((track) => track.clips).find((item) => item.id === command.clipId);
+      const track = clip ? timeline.tracks.find((item) => item.id === clip.trackId) : undefined;
+      if (track?.locked) {
+        return timeline;
+      }
       return { ...timeline, tracks: timeline.tracks.map((track) => ({ ...track, clips: track.clips.filter((clip) => clip.id !== command.clipId) })) };
+    }
     case "ripple_delete_clip": {
       const deletedClip = timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === command.clipId);
       if (!deletedClip) {
+        return timeline;
+      }
+      const track = timeline.tracks.find((item) => item.id === deletedClip.trackId);
+      if (track?.locked) {
         return timeline;
       }
       const deletedDurationUs = getBrowserClipDisplayDurationUs(deletedClip);

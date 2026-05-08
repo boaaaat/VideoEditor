@@ -64,7 +64,7 @@ export function EffectsTab({
       return;
     }
 
-    void executeCommand({ type: "apply_transform", clipId: selectedClip.id, transform: next }).then((result) => {
+    void executeCommand({ type: "apply_transform", clipId: selectedClip.id, transform: next, history: { mode: "replace", group: `transform:${selectedClip.id}` } }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
         setStatusMessage(label, { details: { clipId: selectedClip.id, transform: next } });
@@ -82,7 +82,7 @@ export function EffectsTab({
       return;
     }
 
-    void executeCommand({ type: "apply_effect_stack", clipId: selectedClip.id, effects: nextEffects }).then((result) => {
+    void executeCommand({ type: "apply_effect_stack", clipId: selectedClip.id, effects: nextEffects, history: { mode: "replace", group: `effects:${selectedClip.id}` } }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
         setStatusMessage(label, { details: { clipId: selectedClip.id, effects: nextEffects } });
