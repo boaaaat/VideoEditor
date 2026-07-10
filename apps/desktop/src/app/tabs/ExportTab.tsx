@@ -68,6 +68,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
     gpu: gpuStatus
   });
   const av1Supported = Boolean(gpuStatus?.av1NvencAvailable);
+  const exportRunning = exportStatus.state === "running";
 
   useEffect(() => {
     setCodec((current) => (current === "av1_nvenc" && !av1Supported ? projectSettings.defaultCodec : current));
@@ -93,7 +94,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
           logs: [...current.logs, error instanceof Error ? error.message : "Export status failed"]
         }));
       });
-    }, 1200);
+    }, 250);
 
     return () => window.clearInterval(interval);
   }, [exportStatus.state]);
@@ -411,10 +412,10 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
         {!av1Supported ? <p className="form-warning">AV1 NVENC unsupported on this GPU.</p> : null}
         {validationErrors.length > 0 ? <p className="form-warning">{validationErrors[0]}</p> : null}
         <div className="export-actions">
-          <Button icon={<Download size={16} />} variant="primary" onClick={exportTimeline}>
+          <Button icon={<Download size={16} />} variant="primary" onClick={exportTimeline} disabled={exportRunning}>
             Export
           </Button>
-          <Button icon={<Ban size={16} />} onClick={cancelExport}>
+          <Button icon={<Ban size={16} />} onClick={cancelExport} disabled={!exportRunning}>
             Cancel
           </Button>
         </div>
@@ -428,6 +429,15 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
           <span>{exportStatus.state}</span>
           <span>{Math.round((exportStatus.progress ?? 0) * 100)}%</span>
         </div>
+        {exportRunning || exportStatus.state === "completed" ? (
+          <div className="export-status-line">
+            <span>{exportStatus.speed && exportStatus.speed > 0 ? `${exportStatus.speed.toFixed(2)}x` : "Starting GPU pipeline…"}</span>
+            <span>
+              {exportStatus.encodingFps && exportStatus.encodingFps > 0 ? `${Math.round(exportStatus.encodingFps)} fps` : ""}
+              {exportRunning && exportStatus.etaSeconds && exportStatus.etaSeconds > 0 ? ` · ${formatStatusDuration(exportStatus.etaSeconds)} remaining` : ""}
+            </span>
+          </div>
+        ) : null}
         <pre className="log-view">{exportStatus.logs.length > 0 ? exportStatus.logs.join("\n") : "Export logs will appear here."}</pre>
       </Panel>
     </div>
@@ -469,7 +479,9 @@ function getVisibleVideoDurationUs(timeline: Timeline, mediaAssets: MediaAsset[]
       if (asset?.kind !== "video" || clip.outUs <= clip.inUs) {
         return durationUs;
       }
-      return Math.max(durationUs, clip.startUs + (clip.outUs - clip.inUs));
+      const speedPercent = Number.isFinite(clip.speedPercent) ? Math.min(400, Math.max(25, clip.speedPercent ?? 100)) : 100;
+      const displayDurationUs = Math.max(1, Math.round((clip.outUs - clip.inUs) / (speedPercent / 100)));
+      return Math.max(durationUs, clip.startUs + displayDurationUs);
     }, 0);
 }
 
@@ -482,4 +494,14 @@ function formatDuration(durationUs: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+function formatStatusDuration(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "0s";
+  }
+  const rounded = Math.ceil(seconds);
+  const minutes = Math.floor(rounded / 60);
+  const remainder = rounded % 60;
+  return minutes > 0 ? `${minutes}m ${remainder}s` : `${remainder}s`;
 }

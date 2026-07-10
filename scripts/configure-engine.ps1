@@ -17,3 +17,6 @@ if (-not $toolchain -or -not (Test-Path $toolchain)) {
 
 $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$toolchain"
 cmake @cmakeArgs
+if ($LASTEXITCODE -ne 0) {
+  exit $LASTEXITCODE
+}

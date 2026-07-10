@@ -42,9 +42,9 @@ $gpuName = ""
 if ($nvidiaSmi) {
   $gpuName = (nvidia-smi --query-gpu=name --format=csv,noheader 2>$null | Select-Object -First 1)
 }
-$isRtx30Plus = $gpuName -match "RTX (30|40|50|A|PRO)"
+$isRtx40Plus = $gpuName -match "RTX (40|50|PRO|4000|5000|6000)"
 Write-Check "NVIDIA GPU" $nvidiaSmi $gpuName
-Write-Check "RTX 30+ target" $isRtx30Plus $gpuName
+Write-Check "RTX 40+ target" $isRtx40Plus $gpuName
 
 if (-not $isWindows11) {
   exit 1

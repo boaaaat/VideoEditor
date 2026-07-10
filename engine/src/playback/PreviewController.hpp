@@ -233,6 +233,14 @@ class PreviewController {
       return;
     }
 
+    if (!engineFramePreviewEnabled()) {
+      frameDataUrl_.clear();
+      frameDecodeWarning_.clear();
+      decodeMode_ = "webview/gpu";
+      renderMode_ = "fallback";
+      return;
+    }
+
     const auto targetPlayheadUs = quantizeFrameTime(state_.playheadUs);
     if (targetPlayheadUs == lastDecodedPlayheadUs_ && state_.mediaPath == lastDecodedMediaPath_ && !frameDataUrl_.empty()) {
       return;
@@ -296,6 +304,11 @@ class PreviewController {
     } catch (...) {
       return decodeFrameAttempt(ffmpegPath, mediaPath, playheadUs, false);
     }
+  }
+
+  static bool engineFramePreviewEnabled() {
+    const auto* value = std::getenv("AI_VIDEO_ENABLE_ENGINE_FRAME_PREVIEW");
+    return value != nullptr && std::string(value) == "1";
   }
 
   [[nodiscard]] std::vector<unsigned char> decodeFrameAttempt(const std::string& ffmpegPath, const std::string& mediaPath, std::int64_t playheadUs, bool useHardwareDecode) const {

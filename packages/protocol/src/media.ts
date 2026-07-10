@@ -99,6 +99,11 @@ export interface ExportStatus {
   outputPath?: string;
   state: "idle" | "running" | "completed" | "cancelled" | "error";
   progress: number;
+  encodingFps?: number;
+  speed?: number;
+  elapsedSeconds?: number;
+  etaSeconds?: number;
+  processedFrames?: number;
   resolution?: ExportResolution;
   width?: number;
   height?: number;

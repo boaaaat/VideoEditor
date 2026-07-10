@@ -277,34 +277,16 @@ pub async fn media_generate_proxy(path: String, project_path: String) -> Result<
                 .map_err(|error| format!("failed to clear stale proxy temp file: {error}"))?;
         }
 
-        let output = Command::new(ffmpeg)
-            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-            .arg(&media_path)
-            .args([
-                "-map",
-                "0:v:0",
-                "-map",
-                "0:a?",
-                "-vf",
-                "scale=-2:min(720\\,ih),format=yuv420p",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "28",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-movflags",
-                "+faststart",
-            ])
-            .arg(&temp_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .output()
-            .map_err(|error| format!("failed to run ffmpeg proxy command: {error}"))?;
+        let hardware_output = run_proxy_command(&ffmpeg, &media_path, &temp_path, true)?;
+        let (output, accelerator) = if hardware_output.status.success() {
+            (hardware_output, "NVDEC/NVENC")
+        } else {
+            let _ = fs::remove_file(&temp_path);
+            (
+                run_proxy_command(&ffmpeg, &media_path, &temp_path, false)?,
+                "software fallback",
+            )
+        };
 
         if !output.status.success() {
             let _ = fs::remove_file(&temp_path);
@@ -327,7 +309,8 @@ pub async fn media_generate_proxy(path: String, project_path: String) -> Result<
 
         Ok(json!({
             "status": "ready",
-            "path": proxy_path
+            "path": proxy_path,
+            "accelerator": accelerator
         }))
     })
     .await
@@ -521,6 +504,54 @@ fn proxy_path_for(path: &str, project_path: &str) -> PathBuf {
         .join("proxies")
         .join(proxy_file_name)
         .with_extension("proxy.mp4")
+}
+
+fn run_proxy_command(
+    ffmpeg: &Path,
+    media_path: &Path,
+    output_path: &Path,
+    hardware: bool,
+) -> Result<std::process::Output, String> {
+    let mut command = Command::new(ffmpeg);
+    command.args(["-hide_banner", "-loglevel", "error", "-y"]);
+    if hardware {
+        command.args([
+            "-hwaccel",
+            "cuda",
+            "-hwaccel_output_format",
+            "cuda",
+            "-extra_hw_frames",
+            "8",
+        ]);
+    }
+    command.arg("-i").arg(media_path).args([
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-vf",
+        if hardware {
+            "scale_cuda=-2:min(720\\,ih):format=nv12"
+        } else {
+            "scale=-2:min(720\\,ih),format=yuv420p"
+        },
+        "-c:v",
+        if hardware { "h264_nvenc" } else { "libx264" },
+    ]);
+    if hardware {
+        command.args([
+            "-preset", "p1", "-tune", "ll", "-rc", "vbr", "-cq", "28", "-b:v", "0",
+        ]);
+    } else {
+        command.args(["-preset", "veryfast", "-crf", "28"]);
+    }
+    command
+        .args(["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"])
+        .arg(output_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("failed to run ffmpeg proxy command: {error}"))
 }
 
 fn percent_decode_path(path: &str) -> String {

@@ -1922,6 +1922,7 @@ export function EditTab({
           <div className="preview-player">
             <PreviewSurface
               previewUrl={previewUrl}
+              projectPath={projectPath}
               videoAsset={activeVideoAsset}
               videoClip={activeVideoClip}
               audioItems={activeAudioItems}
@@ -2644,6 +2645,7 @@ const TimelineSurface = memo(function TimelineSurface({
 
 function PreviewSurface({
   previewUrl,
+  projectPath,
   videoAsset,
   videoClip,
   audioItems,
@@ -2656,6 +2658,7 @@ function PreviewSurface({
   previewSpeedPercent
 }: {
   previewUrl?: string;
+  projectPath?: string;
   videoAsset?: MediaAsset;
   videoClip?: TimelineClip;
   audioItems: Array<{ clip: TimelineClip; asset: MediaAsset }>;
@@ -2676,11 +2679,13 @@ function PreviewSurface({
   const nativeSeekKeyRef = useRef("");
   const [videoSrc, setVideoSrc] = useState("");
   const [frameSrc, setFrameSrc] = useState("");
+  const [videoPlaybackFailed, setVideoPlaybackFailed] = useState(false);
   const [stats, setStats] = useState<PreviewState | null>(null);
   const separateAudioPreviewActive = audioItems.length > 0;
-  const settledPlayheadUs = useDebouncedValue(playheadUs, playing ? 120 : 45);
+  const settledPlayheadUs = useDebouncedValue(playheadUs, playing ? 120 : 30);
   const previewCommandPlayheadUs = playing ? playbackStartPlayheadRef.current : settledPlayheadUs;
-  const mediaElementSyncPlayheadUs = playing ? settledPlayheadUs : playheadUs;
+  const mediaElementSyncPlayheadUs = settledPlayheadUs;
+  const enginePreviewActive = stats?.renderMode === "native-d3d" || stats?.renderMode === "engine-frame";
 
   useEffect(() => {
     if (!playing) {
@@ -2738,10 +2743,21 @@ function PreviewSurface({
     let cancelled = false;
     if (!videoAsset) {
       setVideoSrc("");
+      setVideoPlaybackFailed(false);
       return;
     }
+    setVideoPlaybackFailed(false);
 
-    void getMediaSourceUrl(videoAsset.path).then((url) => {
+    void (async () => {
+      let sourcePath = videoAsset.path;
+      if (previewQuality === "Proxy" && projectPath) {
+        const cacheStatus = await getMediaCacheStatus(videoAsset, projectPath);
+        if (cacheStatus.proxy === "ready" && cacheStatus.proxyPath) {
+          sourcePath = cacheStatus.proxyPath;
+        }
+      }
+      return getMediaSourceUrl(sourcePath);
+    })().then((url) => {
       if (!cancelled) {
         setVideoSrc(url);
       }
@@ -2750,20 +2766,28 @@ function PreviewSurface({
     return () => {
       cancelled = true;
     };
-  }, [videoAsset]);
+  }, [previewQuality, projectPath, videoAsset]);
 
   const previewFrameTimeUs = videoAsset && videoClip ? quantizePreviewFrameTime(getClipMediaTimeUs(videoClip, settledPlayheadUs)) : 0;
 
   useEffect(() => {
     const sequence = ++frameRequestSequenceRef.current;
     let cancelled = false;
-    if (!videoAsset || !videoClip || playing) {
+    if (!videoAsset || !videoClip || playing || !videoPlaybackFailed) {
       setFrameSrc("");
+      return;
+    }
+
+    const cacheKey = `${videoAsset.path}:${previewFrameTimeUs}`;
+    const cachedFrame = previewFrameCache.get(cacheKey);
+    if (cachedFrame) {
+      setFrameSrc(cachedFrame);
       return;
     }
 
     void getMediaPreviewFrameDataUrl(videoAsset, previewFrameTimeUs).then((url) => {
       if (!cancelled && sequence === frameRequestSequenceRef.current && url) {
+        previewFrameCache.set(cacheKey, url);
         setFrameSrc(url);
       }
     });
@@ -2771,9 +2795,12 @@ function PreviewSurface({
     return () => {
       cancelled = true;
     };
-  }, [playing, previewFrameTimeUs, videoAsset, videoClip]);
+  }, [playing, previewFrameTimeUs, videoAsset, videoClip, videoPlaybackFailed]);
 
   useEffect(() => {
+    if (!enginePreviewActive) {
+      return;
+    }
     const nativeMediaActive = !separateAudioPreviewActive;
     const params = {
       mediaId: nativeMediaActive ? videoAsset?.id ?? audioItems[0]?.asset.id ?? "" : "",
@@ -2796,14 +2823,17 @@ function PreviewSurface({
     }
     nativeStateKeyRef.current = key;
     void setNativePreviewState(params).then(setStats).catch(() => undefined);
-  }, [audioItems, previewCommandPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, previewQuality, previewScale, projectSettings.colorMode, projectSettings.fps, separateAudioPreviewActive, videoAsset, videoClip]);
+  }, [audioItems, enginePreviewActive, previewCommandPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, previewQuality, previewScale, projectSettings.colorMode, projectSettings.fps, separateAudioPreviewActive, videoAsset, videoClip]);
 
   useEffect(() => {
+    if (!enginePreviewActive) {
+      return;
+    }
     void (playing && !separateAudioPreviewActive ? playNativePreview() : pauseNativePreview()).then(setStats).catch(() => undefined);
-  }, [playing, separateAudioPreviewActive]);
+  }, [enginePreviewActive, playing, separateAudioPreviewActive]);
 
   useEffect(() => {
-    if (playing) {
+    if (playing || !enginePreviewActive) {
       return;
     }
 
@@ -2818,7 +2848,7 @@ function PreviewSurface({
         setStats(nextStats);
       }
     }).catch(() => undefined);
-  }, [playing, settledPlayheadUs]);
+  }, [enginePreviewActive, playing, settledPlayheadUs]);
 
   useEffect(() => {
     syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent);
@@ -2853,7 +2883,17 @@ function PreviewSurface({
     <div ref={frameRef} className={frameClassName}>
       {nativePreviewActive ? <div className="native-preview-surface" style={previewScaleStyle} /> : null}
       {!nativePreviewActive && !engineFrameActive && videoAsset && videoClip && videoSrc ? (
-        <video ref={videoRef} src={videoSrc} muted={false} playsInline style={visualPreviewStyle} onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent)} />
+        <video
+          ref={videoRef}
+          src={videoSrc}
+          muted={false}
+          playsInline
+          preload="auto"
+          style={visualPreviewStyle}
+          onCanPlay={() => setVideoPlaybackFailed(false)}
+          onError={() => setVideoPlaybackFailed(true)}
+          onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent)}
+        />
       ) : null}
       {hiddenVideoCarrierActive && videoAsset && videoClip && videoSrc ? (
         <video
@@ -2869,7 +2909,7 @@ function PreviewSurface({
         />
       ) : null}
       {!nativePreviewActive && engineFrameActive ? <img className="preview-frame-image" src={stats?.frameDataUrl ?? ""} alt="" style={visualPreviewStyle} /> : null}
-      {!nativePreviewActive && !engineFrameActive && frameSrc && (!playing || !videoSrc) ? <img className="preview-frame-image" src={frameSrc} alt="" style={visualPreviewStyle} /> : null}
+      {!nativePreviewActive && !engineFrameActive && videoPlaybackFailed && frameSrc ? <img className="preview-frame-image" src={frameSrc} alt="" style={visualPreviewStyle} /> : null}
       {!nativePreviewActive && audioItems.length > 0 ? (
         <>
           {audioItems.map((item) => (
@@ -2984,6 +3024,7 @@ function useDebouncedValue(value: number, delayMs: number) {
 
 const mediaThumbnailCache = new Map<string, string>();
 const mediaWaveformCache = new Map<string, string>();
+const previewFrameCache = new Map<string, string>();
 
 function MediaThumbnail({ asset }: { asset: MediaAsset }) {
   const frameRef = useRef<HTMLSpanElement>(null);

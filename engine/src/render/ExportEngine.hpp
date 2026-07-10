@@ -101,6 +101,7 @@ class ExportEngine {
     std::filesystem::remove(progressPath, ignored);
     job.ffmpegCommand = buildFfmpegCommand(job, ffmpeg.path, progressPath.string(), request.overwrite);
     job.logs.push_back("Export started");
+    job.logs.push_back("GPU pipeline: NVDEC decode, CUDA scale, " + job.codec + " encode");
     job.logs.push_back("Render duration: " + formatSeconds(job.durationUs));
     if (hasRenderableTimeline(job)) {
       job.logs.push_back("Rendering timeline media clips: " + std::to_string(countRenderableVideoClips(job)) + " video, " + std::to_string(countRenderableAudioClips(job)) + " audio");
@@ -265,6 +266,8 @@ class ExportEngine {
     std::vector<std::string> args = {
         ffmpegPath.empty() ? "ffmpeg" : ffmpegPath,
         "-hide_banner",
+        "-loglevel",
+        "error",
         overwrite ? "-y" : "-n",
         "-f",
         "lavfi",
@@ -288,6 +291,7 @@ class ExportEngine {
         "-b:v",
         std::to_string(job.bitrateMbps) + "M",
     });
+    appendNvencOptions(job, args);
 
     if (job.colorMode == "HDR") {
       args.insert(args.end(), {"-pix_fmt", "p010le", "-color_primaries", "bt2020", "-colorspace", "bt2020nc", "-color_trc", "smpte2084"});
@@ -302,7 +306,7 @@ class ExportEngine {
     }
 
     if (!progressPath.empty()) {
-      args.insert(args.end(), {"-progress", progressPath, "-nostats"});
+      args.insert(args.end(), {"-stats_period", "0.2", "-progress", progressPath, "-nostats"});
     }
 
     args.push_back(job.outputPath);
@@ -315,7 +319,11 @@ class ExportEngine {
     std::vector<std::string> args = {
         ffmpegPath.empty() ? "ffmpeg" : ffmpegPath,
         "-hide_banner",
+        "-loglevel",
+        "error",
         overwrite ? "-y" : "-n",
+        "-filter_complex_threads",
+        "0",
     };
     std::vector<std::string> filters;
     std::vector<std::string> concatInputs;
@@ -331,8 +339,23 @@ class ExportEngine {
         inputIndex += 1;
       } else {
         const auto* media = findMedia(job.timeline.media, segment.clip->mediaId);
-        args.insert(args.end(), {"-i", media ? media->path : std::string{}});
-        filters.push_back(videoSegmentFilter(inputIndex, segmentIndex, *segment.clip, job, segment.sourceInUs, segment.sourceDurationUs, segment.durationUs));
+        args.insert(args.end(), {
+                                    "-hwaccel",
+                                    "cuda",
+                                    "-hwaccel_device",
+                                    "0",
+                                    "-hwaccel_output_format",
+                                    "cuda",
+                                    "-extra_hw_frames",
+                                    "16",
+                                    "-ss",
+                                    formatSeconds(segment.sourceInUs),
+                                    "-t",
+                                    formatSeconds(segment.sourceDurationUs),
+                                    "-i",
+                                    media ? media->path : std::string{},
+                                });
+        filters.push_back(videoSegmentFilter(inputIndex, segmentIndex, *segment.clip, job, 0, segment.sourceDurationUs, segment.durationUs));
         inputIndex += 1;
       }
 
@@ -363,6 +386,7 @@ class ExportEngine {
         "-b:v",
         std::to_string(job.bitrateMbps) + "M",
     });
+    appendNvencOptions(job, args);
 
     if (job.colorMode == "HDR") {
       args.insert(args.end(), {"-pix_fmt", "p010le", "-color_primaries", "bt2020", "-colorspace", "bt2020nc", "-color_trc", "smpte2084"});
@@ -377,7 +401,7 @@ class ExportEngine {
     }
 
     if (!progressPath.empty()) {
-      args.insert(args.end(), {"-progress", progressPath, "-nostats"});
+      args.insert(args.end(), {"-stats_period", "0.2", "-progress", progressPath, "-nostats"});
     }
 
     args.push_back(job.outputPath);
@@ -409,7 +433,14 @@ class ExportEngine {
       const auto durationUs = clipDisplayDurationUs(*clip);
       const auto delayMs = std::max<std::int64_t>(0, clip->startUs / 1000);
       const auto label = "aud" + std::to_string(index);
-      args.insert(args.end(), {"-i", media->path});
+      args.insert(args.end(), {
+                                  "-ss",
+                                  formatSeconds(clip->inUs),
+                                  "-t",
+                                  formatSeconds(sourceDurationUs),
+                                  "-i",
+                                  media->path,
+                              });
       filters.push_back("[" + std::to_string(inputIndex) + ":a:" + std::to_string(std::max(0, clip->audioStreamIndex)) + "]" + audioFilterChain(*clip, sourceDurationUs, durationUs, delayMs, label));
       audioInputs.push_back("[" + label + "]");
       inputIndex += 1;
@@ -443,16 +474,21 @@ class ExportEngine {
         "[" + std::to_string(inputIndex) + ":v]trim=start=" + formatSeconds(sourceInUs) + ":duration=" + formatSeconds(sourceDurationUs),
         "setpts=(PTS-STARTPTS)/" + formatDouble(speed),
         "fps=" + std::to_string(job.fps),
-        "scale=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":force_original_aspect_ratio=decrease",
+        "scale_cuda=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":force_original_aspect_ratio=decrease:force_divisible_by=2",
+        "hwdownload",
+        "format=nv12",
         "pad=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":(ow-iw)/2:(oh-ih)/2",
         "setsar=1",
-        "format=rgba",
     };
 
     appendColorFilters(clip, filters);
     appendEffectFilters(clip, filters);
 
-    if (clip.transformEnabled) {
+    const auto hasTransform = clip.transformEnabled &&
+                              (std::abs(clip.scale - 1.0) > 0.001 || std::abs(clip.positionX) > 0.001 ||
+                               std::abs(clip.positionY) > 0.001 || std::abs(clip.rotation) > 0.001 ||
+                               std::abs(clip.opacity - 1.0) > 0.001);
+    if (hasTransform) {
       const auto scale = std::clamp(clip.scale, 0.1, 4.0);
       const auto opacity = std::clamp(clip.opacity, 0.0, 1.0);
       if (std::abs(scale - 1.0) > 0.001) {
@@ -533,7 +569,7 @@ class ExportEngine {
       std::int64_t delayMs,
       const std::string& outputLabel) {
     std::vector<std::string> filters = {
-        "atrim=start=" + formatSeconds(clip.inUs) + ":duration=" + formatSeconds(sourceDurationUs),
+        "atrim=start=0:duration=" + formatSeconds(sourceDurationUs),
         "asetpts=PTS-STARTPTS",
         "aresample=48000",
     };
@@ -660,6 +696,10 @@ class ExportEngine {
 
     DWORD waitResult = WAIT_TIMEOUT;
     while ((waitResult = WaitForSingleObject(processInfo.hProcess, 200)) == WAIT_TIMEOUT) {
+      {
+        std::lock_guard lock(mutex_);
+        updateProgressFromFile();
+      }
       if (cancelRequested_) {
         TerminateProcess(processInfo.hProcess, 1);
       }
@@ -692,6 +732,9 @@ class ExportEngine {
 
     std::string line;
     std::int64_t outTimeUs = 0;
+    std::int64_t processedFrames = activeJob_->processedFrames;
+    double encodingFps = activeJob_->encodingFps;
+    double speed = activeJob_->speed;
     std::string progressStatus;
     while (std::getline(stream, line)) {
       const auto separator = line.find('=');
@@ -700,19 +743,41 @@ class ExportEngine {
       }
       const auto key = line.substr(0, separator);
       const auto value = line.substr(separator + 1);
-      if (key == "out_time_us") {
+      if (key == "out_time_us" || key == "out_time_ms") {
         try {
           outTimeUs = std::stoll(value);
         } catch (...) {
           outTimeUs = 0;
+        }
+      } else if (key == "frame") {
+        try {
+          processedFrames = std::stoll(value);
+        } catch (...) {
+        }
+      } else if (key == "fps") {
+        try {
+          encodingFps = std::stod(value);
+        } catch (...) {
+        }
+      } else if (key == "speed") {
+        try {
+          speed = std::stod(value);
+        } catch (...) {
         }
       } else if (key == "progress") {
         progressStatus = value;
       }
     }
 
+    activeJob_->processedFrames = processedFrames;
+    activeJob_->encodingFps = std::max(0.0, encodingFps);
+    activeJob_->speed = std::max(0.0, speed);
+    activeJob_->elapsedSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - activeJob_->startedAt).count();
+
     if (outTimeUs > 0 && activeJob_->durationUs > 0) {
       activeJob_->progress = std::clamp(static_cast<double>(outTimeUs) / static_cast<double>(activeJob_->durationUs), 0.0, 0.99);
+      const auto remainingUs = std::max<std::int64_t>(0, activeJob_->durationUs - outTimeUs);
+      activeJob_->etaSeconds = activeJob_->speed > 0.0 ? remainingUs / 1'000'000.0 / activeJob_->speed : 0.0;
       const auto percent = static_cast<int>(std::floor(activeJob_->progress * 100.0));
       if (percent >= lastLoggedProgressPercent_ + 10 || percent == 0) {
         lastLoggedProgressPercent_ = percent;
@@ -1010,15 +1075,35 @@ class ExportEngine {
 
   [[nodiscard]] static std::string presetForQuality(const std::string& quality) {
     if (quality == "trash" || quality == "low") {
-      return "p3";
+      return "p1";
     }
     if (quality == "high") {
-      return "p6";
+      return "p5";
     }
     if (quality == "pro_max") {
-      return "p7";
+      return "p6";
     }
-    return "p5";
+    return "p3";
+  }
+
+  static void appendNvencOptions(const ExportJob& job, std::vector<std::string>& args) {
+    args.insert(args.end(), {
+                                "-tune",
+                                "hq",
+                                "-rc",
+                                "vbr",
+                                "-spatial_aq",
+                                "1",
+                                "-g",
+                                std::to_string(std::max(1, job.fps * 2)),
+                                "-threads",
+                                "0",
+                            });
+    if (job.quality == "high") {
+      args.insert(args.end(), {"-multipass", "qres"});
+    } else if (job.quality == "pro_max") {
+      args.insert(args.end(), {"-multipass", "fullres", "-rc-lookahead", "20"});
+    }
   }
 
   [[nodiscard]] static std::string join(const std::vector<std::string>& values, const std::string& separator) {

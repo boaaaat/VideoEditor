@@ -15,7 +15,7 @@ The v0.1 goal is a clean manual editor that can grow into an AI-ready profession
 
 ## Windows Setup
 
-Run these commands from PowerShell. The app targets Windows 11 and an RTX 30-series or newer NVIDIA GPU.
+Run these commands from PowerShell. The app targets Windows 11 and an RTX 40-series or newer NVIDIA GPU.
 
 ### 1. Install Base Tools
 
@@ -108,7 +108,7 @@ Expected checks:
 - vcpkg
 - FFmpeg/FFprobe
 - NVIDIA GPU
-- RTX 30+ target
+- RTX 40-series or newer target
 
 ### 7. Configure and Build the Engine
 

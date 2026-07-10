@@ -10,6 +10,7 @@ struct GpuStatus {
   bool available = false;
   std::string name;
   bool rtx30SeriesOrNewer = false;
+  bool rtx40SeriesOrNewer = false;
   bool nvencAvailable = false;
   bool h264NvencAvailable = false;
   bool hevcNvencAvailable = false;
@@ -20,6 +21,7 @@ struct GpuStatus {
     nlohmann::json json = {
         {"available", available},
         {"rtx30SeriesOrNewer", rtx30SeriesOrNewer},
+        {"rtx40SeriesOrNewer", rtx40SeriesOrNewer},
         {"nvencAvailable", nvencAvailable},
         {"h264NvencAvailable", h264NvencAvailable},
         {"hevcNvencAvailable", hevcNvencAvailable},
@@ -43,12 +45,12 @@ class GpuDetector {
   [[nodiscard]] GpuStatus detect() const {
     const auto gpuName = queryNvidiaName();
     if (gpuName.empty()) {
-      return {false, "", false, false, false, false, false, "nvidia-smi did not return an NVIDIA GPU"};
+      return {false, "", false, false, false, false, false, false, "nvidia-smi did not return an NVIDIA GPU"};
     }
 
-    const bool supported = contains(gpuName, "RTX 30") || contains(gpuName, "RTX 40") ||
-                           contains(gpuName, "RTX 50") || contains(gpuName, "RTX A") ||
-                           contains(gpuName, "RTX PRO");
+    const bool supported = contains(gpuName, "RTX 40") || contains(gpuName, "RTX 50") ||
+                           contains(gpuName, "RTX PRO") || contains(gpuName, "RTX 4000") ||
+                           contains(gpuName, "RTX 5000") || contains(gpuName, "RTX 6000");
     const bool av1Supported = contains(gpuName, "RTX 40") || contains(gpuName, "RTX 50") ||
                               contains(gpuName, "RTX PRO");
 
@@ -59,8 +61,9 @@ class GpuDetector {
         supported,
         supported,
         supported,
+        supported,
         av1Supported,
-        supported ? "" : "GPU detected, but RTX 30-series or newer was not confirmed",
+        supported ? "" : "GPU detected, but RTX 40-series or newer was not confirmed",
     };
   }
 

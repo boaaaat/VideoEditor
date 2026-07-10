@@ -29,3 +29,6 @@ if (-not (Test-Path $cachePath)) {
 }
 
 cmake --build $buildDir --config $Configuration --target ai-video-engine
+if ($LASTEXITCODE -ne 0) {
+  exit $LASTEXITCODE
+}

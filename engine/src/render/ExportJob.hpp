@@ -104,6 +104,11 @@ struct ExportJob {
   std::string outputPath;
   std::string state = "running";
   double progress = 0.0;
+  double encodingFps = 0.0;
+  double speed = 0.0;
+  double elapsedSeconds = 0.0;
+  double etaSeconds = 0.0;
+  std::int64_t processedFrames = 0;
   std::chrono::steady_clock::time_point startedAt = std::chrono::steady_clock::now();
   std::chrono::steady_clock::time_point finishedAt = {};
   std::string resolution = "1080p";
@@ -131,6 +136,11 @@ struct ExportJob {
         {"outputPath", outputPath},
         {"state", state},
         {"progress", progress},
+        {"encodingFps", encodingFps},
+        {"speed", speed},
+        {"elapsedSeconds", elapsedSeconds},
+        {"etaSeconds", etaSeconds},
+        {"processedFrames", processedFrames},
         {"resolution", resolution},
         {"width", width},
         {"height", height},
