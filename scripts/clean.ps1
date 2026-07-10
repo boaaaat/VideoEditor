@@ -5,6 +5,7 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $targets = @(
   (Join-Path $repoRoot "engine/build"),
   (Join-Path $repoRoot "apps/desktop/dist"),
+  (Join-Path $repoRoot "apps/desktop/src-tauri/resources"),
   (Join-Path $repoRoot "apps/desktop/src-tauri/target")
 )
 

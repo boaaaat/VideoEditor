@@ -4,9 +4,9 @@ use crate::AppState;
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -165,7 +165,10 @@ pub fn media_waveform_data_url(
 }
 
 #[tauri::command]
-pub async fn media_audio_preview_source(path: String, stream_index: usize) -> Result<String, String> {
+pub async fn media_audio_preview_source(
+    path: String,
+    stream_index: usize,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let ffmpeg = find_ffmpeg_executable()
             .ok_or_else(|| "could not find ffmpeg in tools/ffmpeg/bin or PATH".to_string())?;
@@ -175,10 +178,16 @@ pub async fn media_audio_preview_source(path: String, stream_index: usize) -> Re
             return Err("media file does not exist".to_string());
         }
 
-        let cache_dir = env::temp_dir().join("ai-video-editor").join("audio-preview");
+        let cache_dir = env::temp_dir()
+            .join("ai-video-editor")
+            .join("audio-preview");
         fs::create_dir_all(&cache_dir)
             .map_err(|error| format!("failed to create audio preview cache folder: {error}"))?;
-        let output_path = cache_dir.join(format!("{}-a{}.wav", stable_path_hash(&source_path), stream_index));
+        let output_path = cache_dir.join(format!(
+            "{}-a{}.wav",
+            stable_path_hash(&source_path),
+            stream_index
+        ));
         if output_path.is_file() {
             return Ok(output_path.to_string_lossy().to_string());
         }

@@ -14,16 +14,26 @@ pub struct EngineSidecar {
 
 impl EngineSidecar {
     pub fn start() -> Result<Self, String> {
-        let repo_root =
-            repo_root().ok_or_else(|| "could not resolve repository root".to_string())?;
         let exe = find_engine_executable().ok_or_else(|| {
-            "could not find ai-video-engine.exe; run pnpm engine:build first".to_string()
+            "could not find the bundled ai-video-engine.exe; reinstall the app or run pnpm dev from a complete checkout"
+                .to_string()
         })?;
-        let ffmpeg_dir = repo_root.join("tools/ffmpeg/bin");
+        let engine_dir = exe
+            .parent()
+            .map(PathBuf::from)
+            .ok_or_else(|| "engine executable has no parent directory".to_string())?;
+        let source_root = repo_root().filter(|path| path.is_dir());
+        let working_dir = source_root.as_ref().unwrap_or(&engine_dir);
+        let source_ffmpeg_dir = source_root
+            .as_ref()
+            .map(|path| path.join("tools/ffmpeg/bin"));
+        let ffmpeg_dir = source_ffmpeg_dir
+            .filter(|path| path.is_dir())
+            .unwrap_or_else(|| engine_dir.join("tools/ffmpeg/bin"));
 
         let mut child = Command::new(&exe)
             .arg("--stdio")
-            .current_dir(&repo_root)
+            .current_dir(working_dir)
             .env("AI_VIDEO_FFMPEG_DIR", &ffmpeg_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -94,6 +104,13 @@ impl EngineSidecar {
         Ok(response.get("result").cloned().unwrap_or(Value::Null))
     }
 
+    pub fn is_running(&mut self) -> Result<bool, String> {
+        self.child
+            .try_wait()
+            .map(|status| status.is_none())
+            .map_err(|error| format!("failed to inspect engine sidecar: {error}"))
+    }
+
     pub fn stop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -108,20 +125,37 @@ fn find_engine_executable() -> Option<PathBuf> {
         }
     }
 
-    let repo_root = repo_root()?;
+    engine_executable_candidates(repo_root(), env::current_exe().ok())
+        .into_iter()
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .map(|meta| meta.is_file())
+                .unwrap_or(false)
+        })
+}
 
-    let candidates = [
-        repo_root.join("engine/build/Release/ai-video-engine.exe"),
-        repo_root.join("engine/build/Debug/ai-video-engine.exe"),
-        repo_root.join("engine/build/ai-video-engine.exe"),
-        repo_root.join("engine/out/ai-video-engine.exe"),
-    ];
+fn engine_executable_candidates(
+    source_root: Option<PathBuf>,
+    desktop_executable: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
 
-    candidates.into_iter().find(|candidate| {
-        fs::metadata(candidate)
-            .map(|meta| meta.is_file())
-            .unwrap_or(false)
-    })
+    if let Some(desktop_dir) = desktop_executable.and_then(|path| path.parent().map(PathBuf::from))
+    {
+        candidates.push(desktop_dir.join("ai-video-engine.exe"));
+        candidates.push(desktop_dir.join("resources/ai-video-engine.exe"));
+    }
+
+    if let Some(source_root) = source_root {
+        candidates.extend([
+            source_root.join("engine/build/Release/ai-video-engine.exe"),
+            source_root.join("engine/build/Debug/ai-video-engine.exe"),
+            source_root.join("engine/build/ai-video-engine.exe"),
+            source_root.join("engine/out/ai-video-engine.exe"),
+        ]);
+    }
+
+    candidates
 }
 
 fn repo_root() -> Option<PathBuf> {
@@ -130,4 +164,47 @@ fn repo_root() -> Option<PathBuf> {
         .parent()?
         .parent()
         .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::engine_executable_candidates;
+    use std::path::PathBuf;
+
+    #[test]
+    fn packaged_engine_locations_are_checked_before_checkout_builds() {
+        let candidates = engine_executable_candidates(
+            Some(PathBuf::from(r"C:\source\VideoEditor")),
+            Some(PathBuf::from(
+                r"C:\Program Files\AI Video Editor\AI Video Editor.exe",
+            )),
+        );
+
+        assert_eq!(
+            candidates[0],
+            PathBuf::from(r"C:\Program Files\AI Video Editor\ai-video-engine.exe")
+        );
+        assert_eq!(
+            candidates[1],
+            PathBuf::from(r"C:\Program Files\AI Video Editor\resources\ai-video-engine.exe")
+        );
+        assert_eq!(
+            candidates[2],
+            PathBuf::from(r"C:\source\VideoEditor\engine\build\Release\ai-video-engine.exe")
+        );
+    }
+
+    #[test]
+    fn packaged_engine_locations_work_without_a_checkout() {
+        let candidates = engine_executable_candidates(
+            None,
+            Some(PathBuf::from(r"C:\Apps\Editor\AI Video Editor.exe")),
+        );
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates[1],
+            PathBuf::from(r"C:\Apps\Editor\resources\ai-video-engine.exe")
+        );
+    }
 }

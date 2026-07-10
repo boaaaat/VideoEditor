@@ -5,5 +5,6 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $repoRoot
 
 corepack pnpm --filter @ai-video-editor/protocol typecheck
-& "$PSScriptRoot/build-engine.ps1"
+& "$PSScriptRoot/build-engine.ps1" -Configuration Release
+& "$PSScriptRoot/stage-engine.ps1" -Configuration Release
 corepack pnpm --filter @ai-video-editor/desktop tauri build

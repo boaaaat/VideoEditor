@@ -33,6 +33,9 @@
     "active": true,
     "targets": ["msi", "nsis"],
     "icon": ["icons/icon.ico"],
-    "resources": []
+    "resources": {
+      "resources/ai-video-engine.exe": "ai-video-engine.exe",
+      "resources/sqlite3.dll": "sqlite3.dll"
+    }
   }
 }

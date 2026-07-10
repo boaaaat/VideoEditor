@@ -11,7 +11,9 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
+#include <iomanip>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
@@ -1529,7 +1531,22 @@ class EditorSession {
   }
 
   static std::string nowStamp() {
-    return std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+    const auto now = std::chrono::system_clock::now();
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch());
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(milliseconds);
+    const auto fractionalMilliseconds = milliseconds - seconds;
+    const auto time = std::chrono::system_clock::to_time_t(now);
+    std::tm utc{};
+#ifdef _WIN32
+    gmtime_s(&utc, &time);
+#else
+    gmtime_r(&time, &utc);
+#endif
+
+    std::ostringstream stream;
+    stream << std::put_time(&utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setw(3) << std::setfill('0')
+           << fractionalMilliseconds.count() << 'Z';
+    return stream.str();
   }
 
   static nlohmann::json parseJson(const std::string& value, const nlohmann::json& fallback) {

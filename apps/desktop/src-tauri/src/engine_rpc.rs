@@ -13,6 +13,12 @@ pub fn send_engine_request(
         .lock()
         .map_err(|_| "engine sidecar lock poisoned".to_string())?;
 
+    if let Some(sidecar) = sidecar_guard.as_mut() {
+        if !sidecar.is_running()? {
+            *sidecar_guard = None;
+        }
+    }
+
     if sidecar_guard.is_none() {
         *sidecar_guard = Some(EngineSidecar::start()?);
     }

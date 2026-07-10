@@ -7,6 +7,7 @@
 #include <cassert>
 #include <filesystem>
 #include <iostream>
+#include <regex>
 #include <stdexcept>
 
 #undef assert
@@ -535,6 +536,9 @@ int runTests() {
         {"method", "project.create"},
         {"params", {{"name", "Project DB Test"}, {"path", projectRoot.string()}}},
     });
+    assert(std::regex_match(
+        createdProject.at("savedAt").get<std::string>(),
+        std::regex(R"(^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$)")));
     assert(createdProject.at("projectSettings").at("width") == 1920);
     createdProjectTrackCount = createdProject.at("timeline").at("tracks").size();
 
