@@ -1411,7 +1411,7 @@ class EditorSession {
         {"height", 1080},
         {"fps", 30},
         {"colorMode", "SDR"},
-        {"bitrateMbps", 16},
+        {"bitrateMbps", 9},
         {"defaultCodec", "h264_nvenc"},
         {"defaultContainer", "mp4"},
         {"audioEnabled", true},

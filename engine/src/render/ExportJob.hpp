@@ -79,6 +79,46 @@ struct ExportRequestTimeline {
   std::vector<ExportTimelineClip> clips;
 };
 
+struct ExportEncoderOptions {
+  bool enabled = false;
+  std::string preset = "p5";
+  std::string tune = "hq";
+  int cq = 20;
+  int maxBitrateMbps = 32;
+  int lookaheadDepth = 16;
+  int lookaheadLevel = 2;
+  std::string multipass = "qres";
+  bool spatialAq = true;
+  bool temporalAq = true;
+  int aqStrength = 8;
+  int bFrames = 3;
+  std::string bRefMode = "middle";
+  int referenceFrames = 4;
+  bool highBitDepth = true;
+  std::string splitEncodeMode = "disabled";
+
+  [[nodiscard]] nlohmann::json toJson() const {
+    return {
+        {"enabled", enabled},
+        {"preset", preset},
+        {"tune", tune},
+        {"cq", cq},
+        {"maxBitrateMbps", maxBitrateMbps},
+        {"lookaheadDepth", lookaheadDepth},
+        {"lookaheadLevel", lookaheadLevel},
+        {"multipass", multipass},
+        {"spatialAq", spatialAq},
+        {"temporalAq", temporalAq},
+        {"aqStrength", aqStrength},
+        {"bFrames", bFrames},
+        {"bRefMode", bRefMode},
+        {"referenceFrames", referenceFrames},
+        {"highBitDepth", highBitDepth},
+        {"splitEncodeMode", splitEncodeMode},
+    };
+  }
+};
+
 struct ExportRequest {
   std::string outputPath;
   std::string resolution = "1080p";
@@ -96,6 +136,7 @@ struct ExportRequest {
   double masterGainDb = 0.0;
   bool normalizeAudio = false;
   bool cleanupAudio = false;
+  ExportEncoderOptions encoderOptions;
   ExportRequestTimeline timeline;
 };
 
@@ -125,6 +166,7 @@ struct ExportJob {
   double masterGainDb = 0.0;
   bool normalizeAudio = false;
   bool cleanupAudio = false;
+  ExportEncoderOptions encoderOptions;
   std::string ffmpegCommand;
   std::vector<std::string> logs;
   bool cancelled = false;
@@ -155,6 +197,7 @@ struct ExportJob {
         {"masterGainDb", masterGainDb},
         {"normalizeAudio", normalizeAudio},
         {"cleanupAudio", cleanupAudio},
+        {"encoderOptions", encoderOptions.toJson()},
         {"ffmpegCommand", ffmpegCommand},
         {"logs", logs},
         {"cancelled", cancelled},

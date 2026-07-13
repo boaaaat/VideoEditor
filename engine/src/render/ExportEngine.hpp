@@ -65,6 +65,7 @@ class ExportEngine {
     job.masterGainDb = request.masterGainDb;
     job.normalizeAudio = request.normalizeAudio;
     job.cleanupAudio = request.cleanupAudio;
+    job.encoderOptions = request.encoderOptions;
     job.timeline = request.timeline;
     job.ffmpegCommand = buildFfmpegCommand(job);
     return job;
@@ -99,9 +100,18 @@ class ExportEngine {
     const auto progressPath = progressPathFor(job.id);
     std::error_code ignored;
     std::filesystem::remove(progressPath, ignored);
-    job.ffmpegCommand = buildFfmpegCommand(job, ffmpeg.path, progressPath.string(), request.overwrite);
+    job.ffmpegCommand = buildFfmpegCommand(job, ffmpeg.path, progressPath.string(), request.overwrite, true);
+    const auto compatibilityCommand = hasRenderableTimeline(job)
+                                          ? buildFfmpegCommand(job, ffmpeg.path, progressPath.string(), request.overwrite, false)
+                                          : std::string{};
     job.logs.push_back("Export started");
     job.logs.push_back("GPU pipeline: NVDEC decode, CUDA scale, " + job.codec + " encode");
+    if (job.encoderOptions.enabled) {
+      job.logs.push_back("Custom encoder: " + job.encoderOptions.preset + ", CQ " + std::to_string(job.encoderOptions.cq) +
+                         ", peak " + std::to_string(job.encoderOptions.maxBitrateMbps) + " Mbps");
+    } else {
+      job.logs.push_back("Quality tier: " + job.quality);
+    }
     job.logs.push_back("Render duration: " + formatSeconds(job.durationUs));
     if (hasRenderableTimeline(job)) {
       job.logs.push_back("Rendering timeline media clips: " + std::to_string(countRenderableVideoClips(job)) + " video, " + std::to_string(countRenderableAudioClips(job)) + " audio");
@@ -116,8 +126,8 @@ class ExportEngine {
       activeProgressPath_ = progressPath;
       cancelRequested_ = false;
       lastLoggedProgressPercent_ = -1;
-      worker_ = std::thread([this, jobId = job.id, command = job.ffmpegCommand, outputPath = job.outputPath]() {
-        runExportProcess(jobId, command, outputPath);
+      worker_ = std::thread([this, jobId = job.id, command = job.ffmpegCommand, compatibilityCommand, outputPath = job.outputPath]() {
+        runExportProcess(jobId, command, compatibilityCommand, outputPath);
       });
     }
 
@@ -172,6 +182,25 @@ class ExportEngine {
     request.masterGainDb = params.value("masterGainDb", 0.0);
     request.normalizeAudio = params.value("normalizeAudio", false);
     request.cleanupAudio = params.value("cleanupAudio", false);
+    if (params.contains("encoderOptions") && params.at("encoderOptions").is_object()) {
+      const auto& options = params.at("encoderOptions");
+      request.encoderOptions.enabled = options.value("enabled", false);
+      request.encoderOptions.preset = options.value("preset", std::string{"p5"});
+      request.encoderOptions.tune = options.value("tune", std::string{"hq"});
+      request.encoderOptions.cq = options.value("cq", 20);
+      request.encoderOptions.maxBitrateMbps = options.value("maxBitrateMbps", 32);
+      request.encoderOptions.lookaheadDepth = options.value("lookaheadDepth", 16);
+      request.encoderOptions.lookaheadLevel = options.value("lookaheadLevel", 2);
+      request.encoderOptions.multipass = options.value("multipass", std::string{"qres"});
+      request.encoderOptions.spatialAq = options.value("spatialAq", true);
+      request.encoderOptions.temporalAq = options.value("temporalAq", true);
+      request.encoderOptions.aqStrength = options.value("aqStrength", 8);
+      request.encoderOptions.bFrames = options.value("bFrames", 3);
+      request.encoderOptions.bRefMode = options.value("bRefMode", std::string{"middle"});
+      request.encoderOptions.referenceFrames = options.value("referenceFrames", 4);
+      request.encoderOptions.highBitDepth = options.value("highBitDepth", true);
+      request.encoderOptions.splitEncodeMode = options.value("splitEncodeMode", std::string{"disabled"});
+    }
     request.timeline = timelineFromJson(params);
     const auto videoDurationUs = visibleVideoDurationUs(request.timeline);
     if (videoDurationUs > 0 && (request.durationUs <= 0 || request.durationUs > videoDurationUs)) {
@@ -226,6 +255,40 @@ class ExportEngine {
       errors.push_back("HDR export requires H.265 or AV1");
     }
 
+    if (request.encoderOptions.enabled) {
+      const auto& options = request.encoderOptions;
+      if (options.preset != "p1" && options.preset != "p2" && options.preset != "p3" && options.preset != "p4" &&
+          options.preset != "p5" && options.preset != "p6" && options.preset != "p7") {
+        errors.push_back("custom NVENC preset must be p1 through p7");
+      }
+      if (options.tune != "hq" && options.tune != "uhq") {
+        errors.push_back("custom NVENC tune must be hq or uhq");
+      }
+      const auto maxCq = request.codec == "av1_nvenc" ? 63 : 51;
+      if (options.cq < 0 || options.cq > maxCq) {
+        errors.push_back("custom CQ is outside the codec's supported range");
+      }
+      if (options.maxBitrateMbps < 1 || options.maxBitrateMbps > 2000) {
+        errors.push_back("custom peak bitrate must be between 1 and 2000 Mbps");
+      }
+      if (options.lookaheadDepth < 0 || options.lookaheadDepth > 32 || options.lookaheadLevel < 0 || options.lookaheadLevel > 3) {
+        errors.push_back("custom lookahead settings are outside the supported range");
+      }
+      if (options.multipass != "disabled" && options.multipass != "qres" && options.multipass != "fullres") {
+        errors.push_back("custom multipass mode is invalid");
+      }
+      if (options.aqStrength < 1 || options.aqStrength > 15 || options.bFrames < 0 || options.bFrames > 5 ||
+          options.referenceFrames < 1 || options.referenceFrames > 16) {
+        errors.push_back("custom AQ or reference-frame settings are outside the supported range");
+      }
+      if (options.bRefMode != "disabled" && options.bRefMode != "each" && options.bRefMode != "middle") {
+        errors.push_back("custom B-frame reference mode is invalid");
+      }
+      if (options.splitEncodeMode != "auto" && options.splitEncodeMode != "disabled") {
+        errors.push_back("custom split encode mode is invalid");
+      }
+    }
+
     const auto extension = lower(std::filesystem::path(request.outputPath).extension().string());
     if (!request.outputPath.empty() && (extension.empty() || extension != "." + request.container)) {
       errors.push_back("output file extension must match selected container");
@@ -253,13 +316,18 @@ class ExportEngine {
   }
 
   [[nodiscard]] static std::string buildFfmpegCommand(const ExportJob& job) {
-    return buildFfmpegCommand(job, "ffmpeg", "", true);
+    return buildFfmpegCommand(job, "ffmpeg", "", true, true);
   }
 
  private:
-  [[nodiscard]] static std::string buildFfmpegCommand(const ExportJob& job, const std::string& ffmpegPath, const std::string& progressPath, bool overwrite) {
+  [[nodiscard]] static std::string buildFfmpegCommand(
+      const ExportJob& job,
+      const std::string& ffmpegPath,
+      const std::string& progressPath,
+      bool overwrite,
+      bool useCudaDecode) {
     if (hasRenderableTimeline(job)) {
-      return buildTimelineFfmpegCommand(job, ffmpegPath, progressPath, overwrite);
+      return buildTimelineFfmpegCommand(job, ffmpegPath, progressPath, overwrite, useCudaDecode);
     }
 
     const auto durationSeconds = formatSeconds(job.durationUs);
@@ -287,9 +355,7 @@ class ExportEngine {
         "-c:v",
         job.codec,
         "-preset",
-        presetForQuality(job.quality),
-        "-b:v",
-        std::to_string(job.bitrateMbps) + "M",
+        presetForJob(job),
     });
     appendNvencOptions(job, args);
 
@@ -313,7 +379,12 @@ class ExportEngine {
     return joinQuoted(args);
   }
 
-  [[nodiscard]] static std::string buildTimelineFfmpegCommand(const ExportJob& job, const std::string& ffmpegPath, const std::string& progressPath, bool overwrite) {
+  [[nodiscard]] static std::string buildTimelineFfmpegCommand(
+      const ExportJob& job,
+      const std::string& ffmpegPath,
+      const std::string& progressPath,
+      bool overwrite,
+      bool useCudaDecode) {
     const auto segments = buildTimelineSegments(job);
     const auto audioClips = collectAudioClips(job);
     std::vector<std::string> args = {
@@ -325,6 +396,11 @@ class ExportEngine {
         "-filter_complex_threads",
         "0",
     };
+    if (useCudaDecode) {
+      // Stop on the first hardware decode error so compatibility decoding can
+      // begin immediately instead of waiting for FFmpeg to reach end-of-file.
+      args.push_back("-xerror");
+    }
     std::vector<std::string> filters;
     std::vector<std::string> concatInputs;
     int inputIndex = 0;
@@ -339,15 +415,24 @@ class ExportEngine {
         inputIndex += 1;
       } else {
         const auto* media = findMedia(job.timeline.media, segment.clip->mediaId);
+        if (useCudaDecode) {
+          args.insert(args.end(), {
+                                      "-hwaccel",
+                                      "cuda",
+                                      "-hwaccel_device",
+                                      "0",
+                                      "-hwaccel_output_format",
+                                      "cuda",
+                                      "-extra_hw_frames",
+                                      "16",
+                                  });
+        } else {
+          // Compatibility decoding is the recovery path for unsupported or
+          // damaged source frames. Keep the usable frames instead of failing
+          // an otherwise complete export at end-of-file.
+          args.insert(args.end(), {"-fflags", "+discardcorrupt", "-err_detect", "ignore_err"});
+        }
         args.insert(args.end(), {
-                                    "-hwaccel",
-                                    "cuda",
-                                    "-hwaccel_device",
-                                    "0",
-                                    "-hwaccel_output_format",
-                                    "cuda",
-                                    "-extra_hw_frames",
-                                    "16",
                                     "-ss",
                                     formatSeconds(segment.sourceInUs),
                                     "-t",
@@ -355,7 +440,8 @@ class ExportEngine {
                                     "-i",
                                     media ? media->path : std::string{},
                                 });
-        filters.push_back(videoSegmentFilter(inputIndex, segmentIndex, *segment.clip, job, 0, segment.sourceDurationUs, segment.durationUs));
+        filters.push_back(videoSegmentFilter(
+            inputIndex, segmentIndex, *segment.clip, job, 0, segment.sourceDurationUs, segment.durationUs, useCudaDecode));
         inputIndex += 1;
       }
 
@@ -382,9 +468,7 @@ class ExportEngine {
         "-c:v",
         job.codec,
         "-preset",
-        presetForQuality(job.quality),
-        "-b:v",
-        std::to_string(job.bitrateMbps) + "M",
+        presetForJob(job),
     });
     appendNvencOptions(job, args);
 
@@ -468,18 +552,27 @@ class ExportEngine {
       const ExportJob& job,
       std::int64_t sourceInUs,
       std::int64_t sourceDurationUs,
-      std::int64_t durationUs) {
+      std::int64_t durationUs,
+      bool useCudaDecode) {
     const auto speed = normalizedSpeedFactor(clip);
     std::vector<std::string> filters = {
         "[" + std::to_string(inputIndex) + ":v]trim=start=" + formatSeconds(sourceInUs) + ":duration=" + formatSeconds(sourceDurationUs),
         "setpts=(PTS-STARTPTS)/" + formatDouble(speed),
         "fps=" + std::to_string(job.fps),
-        "scale_cuda=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":force_original_aspect_ratio=decrease:force_divisible_by=2",
-        "hwdownload",
-        "format=nv12",
-        "pad=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":(ow-iw)/2:(oh-ih)/2",
-        "setsar=1",
     };
+    if (useCudaDecode) {
+      filters.insert(filters.end(), {
+                                        "scale_cuda=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":force_original_aspect_ratio=decrease:force_divisible_by=2",
+                                        "hwdownload",
+                                        "format=nv12",
+                                    });
+    } else {
+      filters.push_back("scale=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":force_original_aspect_ratio=decrease:force_divisible_by=2");
+    }
+    filters.insert(filters.end(), {
+                                      "pad=" + std::to_string(job.width) + ":" + std::to_string(job.height) + ":(ow-iw)/2:(oh-ih)/2",
+                                      "setsar=1",
+                                  });
 
     appendColorFilters(clip, filters);
     appendEffectFilters(clip, filters);
@@ -652,8 +745,34 @@ class ExportEngine {
     return std::filesystem::temp_directory_path() / (jobId + ".progress");
   }
 
-  void runExportProcess(const std::string& jobId, const std::string& command, const std::string& outputPath) {
-    const auto exitCode = runCommandCancellable(command);
+  void runExportProcess(
+      const std::string& jobId,
+      const std::string& command,
+      const std::string& compatibilityCommand,
+      const std::string& outputPath) {
+    auto exitCode = runCommandCancellable(command);
+
+    if (exitCode != 0 && exitCode != -22 && !compatibilityCommand.empty() && !cancelRequested_) {
+      {
+        std::lock_guard lock(mutex_);
+        if (!activeJob_ || activeJob_->id != jobId || activeJob_->cancelled) {
+          return;
+        }
+        activeJob_->logs.push_back("Hardware pipeline failed; retrying with compatibility decoding");
+        activeJob_->progress = 0.0;
+        activeJob_->processedFrames = 0;
+        activeJob_->encodingFps = 0.0;
+        activeJob_->speed = 0.0;
+        activeJob_->etaSeconds = 0.0;
+        lastLoggedProgressPercent_ = -1;
+      }
+
+      std::error_code ignored;
+      std::filesystem::remove(outputPath, ignored);
+      std::filesystem::remove(activeProgressPath_, ignored);
+      exitCode = runCommandCancellable(compatibilityCommand);
+    }
+
     std::lock_guard lock(mutex_);
     if (!activeJob_ || activeJob_->id != jobId) {
       return;
@@ -673,6 +792,13 @@ class ExportEngine {
       activeJob_->logs.push_back("Export completed: " + activeJob_->outputPath);
     } else {
       activeJob_->state = "error";
+      if (exitCode == 69) {
+        activeJob_->logs.push_back("FFmpeg could not decode one or more source clips");
+      } else if (exitCode == -22) {
+        activeJob_->logs.push_back("FFmpeg rejected the encoder configuration");
+      } else if (exitCode == -542398533) {
+        activeJob_->logs.push_back("FFmpeg reported an external decoder or NVENC failure");
+      }
       activeJob_->logs.push_back("FFmpeg export failed with exit code " + std::to_string(exitCode));
     }
     activeJob_->finishedAt = std::chrono::steady_clock::now();
@@ -1049,18 +1175,18 @@ class ExportEngine {
 
   [[nodiscard]] static double qualityMultiplier(const std::string& quality) {
     if (quality == "trash") {
-      return 0.25;
+      return 0.12;
     }
     if (quality == "low") {
-      return 0.5;
+      return 0.28;
     }
     if (quality == "high") {
-      return 1.6;
+      return 0.85;
     }
     if (quality == "pro_max") {
-      return 2.4;
+      return 1.15;
     }
-    return 1.0;
+    return 0.55;
   }
 
   [[nodiscard]] static double codecEfficiencyMultiplier(const std::string& codec) {
@@ -1074,35 +1200,212 @@ class ExportEngine {
   }
 
   [[nodiscard]] static std::string presetForQuality(const std::string& quality) {
-    if (quality == "trash" || quality == "low") {
-      return "p1";
+    if (quality == "trash") {
+      return "p4";
     }
-    if (quality == "high") {
+    if (quality == "low" || quality == "medium") {
       return "p5";
     }
-    if (quality == "pro_max") {
+    if (quality == "high") {
       return "p6";
     }
-    return "p3";
+    if (quality == "pro_max") {
+      return "p7";
+    }
+    return "p5";
+  }
+
+  [[nodiscard]] static std::string presetForJob(const ExportJob& job) {
+    return job.encoderOptions.enabled ? job.encoderOptions.preset : presetForQuality(job.quality);
+  }
+
+  [[nodiscard]] static int targetQualityFor(const ExportJob& job) {
+    if (job.codec == "av1_nvenc") {
+      if (job.quality == "trash") {
+        return 52;
+      }
+      if (job.quality == "low") {
+        return 42;
+      }
+      if (job.quality == "high") {
+        return 28;
+      }
+      if (job.quality == "pro_max") {
+        return 24;
+      }
+      return 34;
+    }
+    if (job.codec == "hevc_nvenc") {
+      if (job.quality == "trash") {
+        return 44;
+      }
+      if (job.quality == "low") {
+        return 35;
+      }
+      if (job.quality == "high") {
+        return 23;
+      }
+      if (job.quality == "pro_max") {
+        return 19;
+      }
+      return 28;
+    }
+    if (job.quality == "trash") {
+      return 43;
+    }
+    if (job.quality == "low") {
+      return 34;
+    }
+    if (job.quality == "high") {
+      return 23;
+    }
+    if (job.quality == "pro_max") {
+      return 20;
+    }
+    return 28;
+  }
+
+  [[nodiscard]] static int lookaheadDepthFor(const std::string& quality) {
+    if (quality == "trash") {
+      return 0;
+    }
+    if (quality == "low") {
+      return 12;
+    }
+    if (quality == "high") {
+      return 20;
+    }
+    if (quality == "pro_max") {
+      return 24;
+    }
+    return 16;
+  }
+
+  [[nodiscard]] static double peakBitrateMultiplierFor(const std::string& quality) {
+    if (quality == "trash") {
+      return 1.0;
+    }
+    if (quality == "low") {
+      return 1.25;
+    }
+    if (quality == "medium") {
+      return 1.5;
+    }
+    if (quality == "high") {
+      return 1.75;
+    }
+    if (quality == "pro_max") {
+      return 2.0;
+    }
+    return 1.5;
   }
 
   static void appendNvencOptions(const ExportJob& job, std::vector<std::string>& args) {
+    const auto& custom = job.encoderOptions;
+    const auto lookaheadDepth = custom.enabled ? custom.lookaheadDepth : lookaheadDepthFor(job.quality);
+    const auto maxBitrateMbps = custom.enabled
+                                    ? custom.maxBitrateMbps
+                                    : std::max(2, static_cast<int>(std::ceil(job.bitrateMbps * peakBitrateMultiplierFor(job.quality))));
+    const auto bufferSizeMbps = std::max(4, maxBitrateMbps * 2);
+    const bool ultraHighQuality = job.codec != "h264_nvenc" && custom.enabled && custom.tune == "uhq";
+    const auto cq = custom.enabled ? custom.cq : targetQualityFor(job);
+    const auto spatialAq = !custom.enabled || custom.spatialAq;
+    const auto temporalAq = custom.enabled ? custom.temporalAq : job.quality != "trash";
+    const auto aqStrength = custom.enabled ? custom.aqStrength : (job.quality == "trash" ? 6 : (job.quality == "low" ? 7 : 8));
+    const auto bFrames = custom.enabled ? custom.bFrames : 3;
+    const auto bRefMode = custom.enabled ? custom.bRefMode : std::string{"middle"};
+    const auto referenceFrames = custom.enabled ? custom.referenceFrames : 4;
+
     args.insert(args.end(), {
                                 "-tune",
-                                "hq",
+                                ultraHighQuality ? "uhq" : "hq",
                                 "-rc",
                                 "vbr",
-                                "-spatial_aq",
-                                "1",
+                                "-b:v",
+                                "0",
+                                "-cq",
+                                std::to_string(cq),
+                                "-maxrate",
+                                std::to_string(maxBitrateMbps) + "M",
+                                "-bufsize",
+                                std::to_string(bufferSizeMbps) + "M",
+                                "-spatial-aq",
+                                spatialAq ? "1" : "0",
+                                "-temporal-aq",
+                                temporalAq ? "1" : "0",
+                                "-aq-strength",
+                                std::to_string(aqStrength),
                                 "-g",
                                 std::to_string(std::max(1, job.fps * 2)),
                                 "-threads",
                                 "0",
                             });
-    if (job.quality == "high") {
-      args.insert(args.end(), {"-multipass", "qres"});
-    } else if (job.quality == "pro_max") {
-      args.insert(args.end(), {"-multipass", "fullres", "-rc-lookahead", "20"});
+
+    if (lookaheadDepth > 0 && !ultraHighQuality) {
+      args.insert(args.end(), {
+                                  "-rc-lookahead",
+                                  std::to_string(lookaheadDepth),
+                                  "-lookahead_level",
+                                  std::to_string(custom.enabled ? custom.lookaheadLevel
+                                                                : (job.quality == "pro_max" ? 3 : 2)),
+                              });
+    }
+
+    const auto multipass = custom.enabled
+                               ? custom.multipass
+                               : (job.quality == "trash" ? std::string{"disabled"}
+                                  : job.quality == "pro_max" ? std::string{"fullres"}
+                                                              : std::string{"qres"});
+    if (multipass != "disabled") {
+      args.insert(args.end(), {"-multipass", multipass});
+    }
+
+    if (job.codec == "h264_nvenc") {
+      args.insert(args.end(), {"-profile", "high", "-coder", "cabac"});
+      if (custom.enabled) {
+        args.insert(args.end(), {
+                                    "-bf",
+                                    std::to_string(bFrames),
+                                    "-b_ref_mode",
+                                    bFrames > 0 ? bRefMode : "disabled",
+                                    "-refs",
+                                    std::to_string(referenceFrames),
+                                });
+      }
+    } else {
+      // HEVC and AV1 gain coding efficiency when NVENC internally promotes
+      // 8-bit input to a 10-bit encode. Disabling split encoding also avoids
+      // trading compression quality for multi-engine throughput at 4K+.
+      const auto highBitDepth = custom.enabled ? custom.highBitDepth : job.colorMode == "HDR";
+      const auto splitEncodeMode = custom.enabled ? custom.splitEncodeMode
+                                                  : (job.quality == "pro_max" ? std::string{"disabled"} : std::string{"auto"});
+      args.insert(args.end(), {
+                                  "-highbitdepth",
+                                  highBitDepth ? "1" : "0",
+                                  "-split_encode_mode",
+                                  splitEncodeMode,
+                              });
+      if (job.codec == "hevc_nvenc" && custom.enabled) {
+        args.insert(args.end(), {
+                                    "-bf",
+                                    std::to_string(bFrames),
+                                    "-b_ref_mode",
+                                    bFrames > 0 ? bRefMode : "disabled",
+                                    "-refs",
+                                    std::to_string(referenceFrames),
+                                });
+      } else if (custom.enabled && !ultraHighQuality && bFrames > 0 && lookaheadDepth == 0 && multipass == "disabled") {
+        // AV1 hierarchical B references require lookahead and multipass to be
+        // disabled. Otherwise the selected preset owns the reference layout.
+        args.insert(args.end(), {
+                                    "-bf",
+                                    std::to_string(bFrames),
+                                    "-b_ref_mode",
+                                    bRefMode,
+                                    "-refs",
+                                    std::to_string(referenceFrames),
+                                });
+      }
     }
   }
 

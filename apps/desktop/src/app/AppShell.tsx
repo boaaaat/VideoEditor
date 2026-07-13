@@ -1307,7 +1307,7 @@ function getProjectSettingsChanges(current: ProjectSettings, next: ProjectSettin
     ["Master gain", `${current.masterGainDb ?? 0} dB`, `${next.masterGainDb ?? 0} dB`],
     ["Normalize audio", current.normalizeAudio ? "Enabled" : "Disabled", next.normalizeAudio ? "Enabled" : "Disabled"],
     ["Audio cleanup", current.cleanupAudio ? "Enabled" : "Disabled", next.cleanupAudio ? "Enabled" : "Disabled"],
-    ["Medium bitrate", `${current.bitrateMbps} Mbps`, `${next.bitrateMbps} Mbps`]
+    ["Medium target bitrate", `${current.bitrateMbps} Mbps`, `${next.bitrateMbps} Mbps`]
   ];
 
   return rows

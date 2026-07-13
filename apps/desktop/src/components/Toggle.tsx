@@ -4,13 +4,13 @@ interface ToggleProps extends Omit<InputHTMLAttributes<HTMLInputElement>, "type"
   label: string;
 }
 
-export function Toggle({ label, checked, onChange }: ToggleProps) {
+export function Toggle({ label, checked, onChange, ...props }: ToggleProps) {
   const inputProps = onChange ? { checked, onChange } : { defaultChecked: checked };
 
   return (
     <label className="toggle-row">
       <span>{label}</span>
-      <input type="checkbox" {...inputProps} />
+      <input type="checkbox" {...inputProps} {...props} />
     </label>
   );
 }

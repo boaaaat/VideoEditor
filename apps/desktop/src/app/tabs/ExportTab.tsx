@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Ban, Download, FolderOpen, RefreshCw } from "lucide-react";
-import type { ExportCodec, ExportContainer, ExportQuality, ExportStatus, GpuStatus, MediaMetadata, ProjectSettings, Timeline } from "@ai-video-editor/protocol";
+import { Ban, Download, FolderOpen, RefreshCw, SlidersHorizontal } from "lucide-react";
+import type { ExportCodec, ExportContainer, ExportEncoderOptions, ExportQuality, ExportStatus, GpuStatus, MediaMetadata, ProjectSettings, Timeline } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Toggle } from "../../components/Toggle";
@@ -22,13 +22,44 @@ import {
 import { defaultProjectSettings, seedProjectSettingsFromMetadata } from "../../features/settings";
 import type { MediaAsset } from "../../features/media/mediaTypes";
 
-type ExportPresetId = "custom" | "web_1080p" | "archive_4k" | "preview_fast";
+type ExportPresetId = "quality_tier" | "custom" | "web_1080p" | "archive_4k" | "preview_fast";
 
 const exportPresetLabels: Record<ExportPresetId, string> = {
-  custom: "Custom",
+  quality_tier: "Quality tier",
+  custom: "Custom encoder",
   web_1080p: "Web 1080p",
   archive_4k: "Archive 4K",
-  preview_fast: "Preview Fast"
+  preview_fast: "Compact Preview"
+};
+
+interface RenderPagePreferences {
+  preset: ExportPresetId;
+  codec: ExportCodec;
+  container: ExportContainer;
+  quality: ExportQuality;
+  audioEnabled: boolean;
+  outputPath: string;
+  encoderOptions: ExportEncoderOptions;
+}
+
+const renderPreferencesStorageKey = "ai-video-editor.render-preferences.v1";
+const defaultEncoderOptions: ExportEncoderOptions = {
+  enabled: true,
+  preset: "p5",
+  tune: "hq",
+  cq: 28,
+  maxBitrateMbps: 14,
+  lookaheadDepth: 16,
+  lookaheadLevel: 2,
+  multipass: "qres",
+  spatialAq: true,
+  temporalAq: true,
+  aqStrength: 8,
+  bFrames: 3,
+  bRefMode: "middle",
+  referenceFrames: 4,
+  highBitDepth: true,
+  splitEncodeMode: "disabled"
 };
 
 interface ExportTabProps {
@@ -43,16 +74,24 @@ interface ExportTabProps {
 }
 
 export function ExportTab({ projectSettings, onProjectSettingsChange, firstMediaMetadata, mediaAssets, timeline, timelineDurationUs, gpuStatus, setStatusMessage }: ExportTabProps) {
-  const [codec, setCodec] = useState<ExportCodec>(projectSettings.defaultCodec);
-  const [container, setContainer] = useState<ExportContainer>(projectSettings.defaultContainer);
-  const [quality, setQuality] = useState<ExportQuality>("medium");
-  const [audioEnabled, setAudioEnabled] = useState(projectSettings.audioEnabled);
-  const [preset, setPreset] = useState<ExportPresetId>("custom");
-  const [outputPath, setOutputPath] = useState("");
+  const savedPreferencesRef = useRef(loadRenderPagePreferences());
+  const savedPreferences = savedPreferencesRef.current;
+  const [codec, setCodec] = useState<ExportCodec>(savedPreferences?.codec ?? projectSettings.defaultCodec);
+  const [container, setContainer] = useState<ExportContainer>(savedPreferences?.container ?? projectSettings.defaultContainer);
+  const [quality, setQuality] = useState<ExportQuality>(savedPreferences?.quality ?? "medium");
+  const [audioEnabled, setAudioEnabled] = useState(savedPreferences?.audioEnabled ?? projectSettings.audioEnabled);
+  const [preset, setPreset] = useState<ExportPresetId>(savedPreferences?.preset ?? "quality_tier");
+  const [outputPath, setOutputPath] = useState(savedPreferences?.outputPath ?? "");
+  const [encoderOptions, setEncoderOptions] = useState<ExportEncoderOptions>(
+    savedPreferences?.encoderOptions ?? encoderOptionsForProfile(codec, quality, projectSettings)
+  );
   const [exportStatus, setExportStatus] = useState<ExportStatus>({ jobId: null, state: "idle", progress: 0, logs: [] });
   const loggedExportLinesRef = useRef(0);
 
   const bitrateMbps = useMemo(() => calculateAutoBitrate(projectSettings, quality, codec), [codec, projectSettings, quality]);
+  const peakBitrateMbps = preset === "custom"
+    ? encoderOptions.maxBitrateMbps
+    : Math.ceil(bitrateMbps * peakBitrateMultiplier(quality));
   const hasAudio = mediaAssets.some((asset) => asset.kind === "audio" || asset.metadata?.hasAudio);
   const exportDurationUs = useMemo(() => getVisibleVideoDurationUs(timeline, mediaAssets), [mediaAssets, timeline]);
   const validationErrors = validateExportSettings({
@@ -69,16 +108,16 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
   });
   const av1Supported = Boolean(gpuStatus?.av1NvencAvailable);
   const exportRunning = exportStatus.state === "running";
+  const manualLookaheadAvailable = codec === "h264_nvenc" || encoderOptions.tune !== "uhq";
+  const manualBFramesAvailable = codec !== "av1_nvenc" || (manualLookaheadAvailable && encoderOptions.lookaheadDepth === 0 && encoderOptions.multipass === "disabled");
 
   useEffect(() => {
     setCodec((current) => (current === "av1_nvenc" && !av1Supported ? projectSettings.defaultCodec : current));
   }, [av1Supported, projectSettings.defaultCodec]);
 
   useEffect(() => {
-    setCodec(projectSettings.defaultCodec);
-    setContainer(projectSettings.defaultContainer);
-    setAudioEnabled(projectSettings.audioEnabled);
-  }, [projectSettings.audioEnabled, projectSettings.defaultCodec, projectSettings.defaultContainer]);
+    saveRenderPagePreferences({ preset, codec, container, quality, audioEnabled, outputPath, encoderOptions });
+  }, [audioEnabled, codec, container, encoderOptions, outputPath, preset, quality]);
 
   useEffect(() => {
     if (exportStatus.state !== "running") {
@@ -125,9 +164,28 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
     });
   }
 
+  function updateEncoderOptions(next: Partial<ExportEncoderOptions>) {
+    setEncoderOptions((current) => ({ ...current, ...next, enabled: true }));
+  }
+
+  function saveCustomSettings() {
+    saveRenderPagePreferences({ preset, codec, container, quality, audioEnabled, outputPath, encoderOptions });
+    setStatusMessage("Custom render settings saved", { source: "export" });
+  }
+
+  function resetCustomSettings() {
+    setEncoderOptions(encoderOptionsForProfile(codec, quality, projectSettings));
+    setStatusMessage(`Custom encoder reset to ${exportQualityLabels[quality]}`, { source: "export" });
+  }
+
   function applyExportPreset(nextPreset: ExportPresetId) {
     setPreset(nextPreset);
     if (nextPreset === "custom") {
+      setEncoderOptions(encoderOptionsForProfile(codec, quality, projectSettings));
+      setStatusMessage(`Custom encoder initialized from ${exportQualityLabels[quality]}`, { source: "export" });
+      return;
+    }
+    if (nextPreset === "quality_tier") {
       return;
     }
 
@@ -157,7 +215,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
     setQuality("low");
     setAudioEnabled(false);
     updateSettings({ resolution: "1080p", width: 1920, height: 1080, defaultCodec: "h264_nvenc", defaultContainer: "mp4", audioEnabled: false });
-    setStatusMessage("Applied Preview Fast export preset", { source: "export" });
+    setStatusMessage("Applied Compact Preview export preset", { source: "export" });
   }
 
   function resetProjectSettings() {
@@ -210,6 +268,14 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
       container,
       quality,
       bitrateMbps,
+      encoderOptions: preset === "custom" ? {
+        ...encoderOptions,
+        enabled: true,
+        tune: codec === "h264_nvenc" ? "hq" : encoderOptions.tune,
+        cq: Math.min(codec === "av1_nvenc" ? 63 : 51, encoderOptions.cq),
+        highBitDepth: codec !== "h264_nvenc" && encoderOptions.highBitDepth,
+        splitEncodeMode: codec === "h264_nvenc" ? "auto" : encoderOptions.splitEncodeMode
+      } : undefined,
       audioEnabled,
       masterGainDb: projectSettings.masterGainDb ?? 0,
       normalizeAudio: projectSettings.normalizeAudio,
@@ -331,8 +397,8 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
             </select>
           </label>
           <label>
-            Medium bitrate
-            <input value={`${projectSettings.bitrateMbps} Mbps`} readOnly />
+            Medium peak ceiling
+            <input value={`${Math.ceil(calculateAutoBitrate(projectSettings, "medium", projectSettings.defaultCodec) * peakBitrateMultiplier("medium"))} Mbps`} readOnly />
           </label>
         </div>
         <div className="export-actions">
@@ -345,7 +411,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
       <Panel title="Export">
         <div className="form-grid">
           <label>
-            Preset
+            Export mode
             <select value={preset} onChange={(event) => applyExportPreset(event.target.value as ExportPresetId)}>
               {(Object.keys(exportPresetLabels) as ExportPresetId[]).map((value) => (
                 <option key={value} value={value}>{exportPresetLabels[value]}</option>
@@ -355,7 +421,6 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
           <label>
             File type
             <select value={container} onChange={(event) => {
-              setPreset("custom");
               setContainer(event.target.value as ExportContainer);
             }}>
               {exportContainers.map((value) => (
@@ -366,8 +431,13 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
           <label>
             Codec
             <select value={codec} onChange={(event) => {
-              setPreset("custom");
-              setCodec(event.target.value as ExportCodec);
+              const nextCodec = event.target.value as ExportCodec;
+              setCodec(nextCodec);
+              if (preset === "custom") {
+                setEncoderOptions(encoderOptionsForProfile(nextCodec, quality, projectSettings));
+              } else {
+                setPreset("quality_tier");
+              }
             }}>
               {exportCodecs.map((value) => (
                 <option key={value} value={value} disabled={value === "av1_nvenc" && !av1Supported}>
@@ -377,10 +447,15 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
             </select>
           </label>
           <label>
-            Quality
+            {preset === "custom" ? "Base quality tier" : "Quality tier"}
             <select value={quality} onChange={(event) => {
-              setPreset("custom");
-              setQuality(event.target.value as ExportQuality);
+              const nextQuality = event.target.value as ExportQuality;
+              setQuality(nextQuality);
+              if (preset === "custom") {
+                setEncoderOptions(encoderOptionsForProfile(codec, nextQuality, projectSettings));
+              } else {
+                setPreset("quality_tier");
+              }
             }}>
               {exportQualities.map((value) => (
                 <option key={value} value={value}>{exportQualityLabels[value]}</option>
@@ -388,8 +463,8 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
             </select>
           </label>
           <label>
-            Auto bitrate
-            <input value={`${bitrateMbps} Mbps`} readOnly />
+            Peak bitrate ceiling
+            <input value={`${peakBitrateMbps} Mbps`} readOnly />
           </label>
           <label>
             Export duration
@@ -405,10 +480,106 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
             </span>
           </label>
           <Toggle label="Export audio" checked={audioEnabled} onChange={(event) => {
-            setPreset("custom");
             setAudioEnabled(event.target.checked);
           }} />
+          <div className="form-grid-wide custom-mode-entry">
+            <span>{preset === "custom" ? "Advanced encoder controls are open below." : "Need direct control over NVENC compression and quality?"}</span>
+            <Button
+              icon={<SlidersHorizontal size={16} />}
+              variant={preset === "custom" ? "primary" : "secondary"}
+              onClick={() => applyExportPreset(preset === "custom" ? "quality_tier" : "custom")}
+            >
+              {preset === "custom" ? "Use quality tiers" : "Open Custom Encoder"}
+            </Button>
+          </div>
         </div>
+        {preset === "custom" ? (
+          <div className="custom-export-options">
+            <div className="custom-export-heading">
+              <div>
+                <strong>Custom encoder controls</strong>
+                <span>Lower CQ means higher quality and larger files.</span>
+              </div>
+              <div className="export-actions">
+                <Button onClick={resetCustomSettings}>Reset to {exportQualityLabels[quality]}</Button>
+                <Button variant="primary" onClick={saveCustomSettings}>Save custom</Button>
+              </div>
+            </div>
+            <div className="form-grid custom-export-grid">
+              <label>
+                NVENC preset
+                <select value={encoderOptions.preset} onChange={(event) => updateEncoderOptions({ preset: event.target.value as ExportEncoderOptions["preset"] })}>
+                  {(["p1", "p2", "p3", "p4", "p5", "p6", "p7"] as const).map((value) => (
+                    <option key={value} value={value}>{value.toUpperCase()}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Tuning
+                <select value={codec === "h264_nvenc" ? "hq" : encoderOptions.tune} onChange={(event) => updateEncoderOptions({ tune: event.target.value as ExportEncoderOptions["tune"] })}>
+                  <option value="hq">High quality</option>
+                  <option value="uhq" disabled={codec === "h264_nvenc"}>Ultra high quality</option>
+                </select>
+              </label>
+              <label>
+                Constant quality (CQ)
+                <input type="number" min={0} max={codec === "av1_nvenc" ? 63 : 51} value={encoderOptions.cq} onChange={(event) => updateEncoderOptions({ cq: clampInteger(event.target.valueAsNumber, 0, codec === "av1_nvenc" ? 63 : 51) })} />
+              </label>
+              <label>
+                Peak bitrate (Mbps)
+                <input type="number" min={1} max={2000} value={encoderOptions.maxBitrateMbps} onChange={(event) => updateEncoderOptions({ maxBitrateMbps: clampInteger(event.target.valueAsNumber, 1, 2000) })} />
+              </label>
+              <label>
+                Lookahead frames
+                <input title={manualLookaheadAvailable ? undefined : "UHQ manages lookahead internally."} type="number" min={0} max={32} value={encoderOptions.lookaheadDepth} disabled={!manualLookaheadAvailable} onChange={(event) => updateEncoderOptions({ lookaheadDepth: clampInteger(event.target.valueAsNumber, 0, 32) })} />
+              </label>
+              <label>
+                Lookahead level
+                <select title={manualLookaheadAvailable ? undefined : "UHQ manages lookahead level internally."} value={encoderOptions.lookaheadLevel} disabled={!manualLookaheadAvailable} onChange={(event) => updateEncoderOptions({ lookaheadLevel: Number(event.target.value) as ExportEncoderOptions["lookaheadLevel"] })}>
+                  {[0, 1, 2, 3].map((value) => <option key={value} value={value}>{value}</option>)}
+                </select>
+              </label>
+              <label>
+                Multipass
+                <select value={encoderOptions.multipass} onChange={(event) => updateEncoderOptions({ multipass: event.target.value as ExportEncoderOptions["multipass"] })}>
+                  <option value="disabled">Disabled</option>
+                  <option value="qres">Quarter resolution</option>
+                  <option value="fullres">Full resolution</option>
+                </select>
+              </label>
+              <label>
+                AQ strength
+                <input type="number" min={1} max={15} value={encoderOptions.aqStrength} onChange={(event) => updateEncoderOptions({ aqStrength: clampInteger(event.target.valueAsNumber, 1, 15) })} />
+              </label>
+              <label>
+                B-frames
+                <input title={manualBFramesAvailable ? undefined : "AV1 presets manage B-frames while lookahead or multipass is enabled."} type="number" min={0} max={5} value={encoderOptions.bFrames} disabled={!manualBFramesAvailable} onChange={(event) => updateEncoderOptions({ bFrames: clampInteger(event.target.valueAsNumber, 0, 5) })} />
+              </label>
+              <label>
+                B-frame references
+                <select title={manualBFramesAvailable ? undefined : "AV1 presets manage B-frame references while lookahead or multipass is enabled."} value={encoderOptions.bRefMode} disabled={!manualBFramesAvailable || encoderOptions.bFrames === 0} onChange={(event) => updateEncoderOptions({ bRefMode: event.target.value as ExportEncoderOptions["bRefMode"] })}>
+                  <option value="disabled">Disabled</option>
+                  <option value="middle">Middle</option>
+                  <option value="each">Each</option>
+                </select>
+              </label>
+              <label>
+                Reference frames
+                <input title={manualBFramesAvailable ? undefined : "AV1 presets manage reference frames while lookahead or multipass is enabled."} type="number" min={1} max={16} value={encoderOptions.referenceFrames} disabled={!manualBFramesAvailable} onChange={(event) => updateEncoderOptions({ referenceFrames: clampInteger(event.target.valueAsNumber, 1, 16) })} />
+              </label>
+              <label>
+                Split encoding
+                <select value={codec === "h264_nvenc" ? "auto" : encoderOptions.splitEncodeMode} disabled={codec === "h264_nvenc"} onChange={(event) => updateEncoderOptions({ splitEncodeMode: event.target.value as ExportEncoderOptions["splitEncodeMode"] })}>
+                  <option value="auto">Automatic</option>
+                  <option value="disabled">Disabled (best compression)</option>
+                </select>
+              </label>
+              <Toggle label="Spatial AQ" checked={encoderOptions.spatialAq} onChange={(event) => updateEncoderOptions({ spatialAq: event.target.checked })} />
+              <Toggle label="Temporal AQ" checked={encoderOptions.temporalAq} onChange={(event) => updateEncoderOptions({ temporalAq: event.target.checked })} />
+              <Toggle label="10-bit encode" checked={codec !== "h264_nvenc" && encoderOptions.highBitDepth} disabled={codec === "h264_nvenc"} onChange={(event) => updateEncoderOptions({ highBitDepth: event.target.checked })} />
+            </div>
+          </div>
+        ) : null}
         {!av1Supported ? <p className="form-warning">AV1 NVENC unsupported on this GPU.</p> : null}
         {validationErrors.length > 0 ? <p className="form-warning">{validationErrors[0]}</p> : null}
         <div className="export-actions">
@@ -431,7 +602,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
         </div>
         {exportRunning || exportStatus.state === "completed" ? (
           <div className="export-status-line">
-            <span>{exportStatus.speed && exportStatus.speed > 0 ? `${exportStatus.speed.toFixed(2)}x` : "Starting GPU pipeline…"}</span>
+            <span>{exportStatus.speed && exportStatus.speed > 0 ? `${exportStatus.speed.toFixed(2)}x` : "Initializing render…"}</span>
             <span>
               {exportStatus.encodingFps && exportStatus.encodingFps > 0 ? `${Math.round(exportStatus.encodingFps)} fps` : ""}
               {exportRunning && exportStatus.etaSeconds && exportStatus.etaSeconds > 0 ? ` · ${formatStatusDuration(exportStatus.etaSeconds)} remaining` : ""}
@@ -467,6 +638,114 @@ function normalizeEvenSize(value: number) {
 
   const rounded = Math.max(2, Math.round(value));
   return rounded % 2 === 0 ? rounded : rounded + 1;
+}
+
+function clampInteger(value: number, min: number, max: number) {
+  return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : min;
+}
+
+function peakBitrateMultiplier(quality: ExportQuality) {
+  if (quality === "trash") {
+    return 1;
+  }
+  if (quality === "low") {
+    return 1.25;
+  }
+  if (quality === "medium") {
+    return 1.5;
+  }
+  if (quality === "high") {
+    return 1.75;
+  }
+  return 2;
+}
+
+function encoderOptionsForProfile(codec: ExportCodec, quality: ExportQuality, settings: ProjectSettings): ExportEncoderOptions {
+  const profile = {
+    trash: { preset: "p4", cq: { h264_nvenc: 43, hevc_nvenc: 44, av1_nvenc: 52 }, lookaheadDepth: 0, multipass: "disabled", aqStrength: 6, temporalAq: false, bFrames: 0, referenceFrames: 1 },
+    low: { preset: "p5", cq: { h264_nvenc: 34, hevc_nvenc: 35, av1_nvenc: 42 }, lookaheadDepth: 12, multipass: "qres", aqStrength: 7, temporalAq: true, bFrames: 2, referenceFrames: 3 },
+    medium: { preset: "p5", cq: { h264_nvenc: 28, hevc_nvenc: 28, av1_nvenc: 34 }, lookaheadDepth: 16, multipass: "qres", aqStrength: 8, temporalAq: true, bFrames: 3, referenceFrames: 4 },
+    high: { preset: "p6", cq: { h264_nvenc: 23, hevc_nvenc: 23, av1_nvenc: 28 }, lookaheadDepth: 20, multipass: "qres", aqStrength: 8, temporalAq: true, bFrames: 3, referenceFrames: 4 },
+    pro_max: { preset: "p7", cq: { h264_nvenc: 20, hevc_nvenc: 19, av1_nvenc: 24 }, lookaheadDepth: 24, multipass: "fullres", aqStrength: 8, temporalAq: true, bFrames: 3, referenceFrames: 4 }
+  } as const;
+  const selected = profile[quality];
+  const baseBitrateMbps = calculateAutoBitrate(settings, quality, codec);
+  return {
+    enabled: true,
+    preset: selected.preset,
+    tune: "hq",
+    cq: selected.cq[codec],
+    maxBitrateMbps: Math.max(2, Math.ceil(baseBitrateMbps * peakBitrateMultiplier(quality))),
+    lookaheadDepth: selected.lookaheadDepth,
+    lookaheadLevel: quality === "pro_max" ? 3 : 2,
+    multipass: selected.multipass,
+    spatialAq: true,
+    temporalAq: selected.temporalAq,
+    aqStrength: selected.aqStrength,
+    bFrames: selected.bFrames,
+    bRefMode: selected.bFrames > 0 ? "middle" : "disabled",
+    referenceFrames: selected.referenceFrames,
+    highBitDepth: codec !== "h264_nvenc" && settings.colorMode === "HDR",
+    splitEncodeMode: quality === "pro_max" ? "disabled" : "auto"
+  };
+}
+
+function loadRenderPagePreferences(): RenderPagePreferences | null {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(renderPreferencesStorageKey) ?? "null") as Partial<RenderPagePreferences> | null;
+    if (!parsed) {
+      return null;
+    }
+    const preset = parsed.preset && Object.hasOwn(exportPresetLabels, parsed.preset) ? parsed.preset : "quality_tier";
+    const codec = parsed.codec && exportCodecs.includes(parsed.codec) ? parsed.codec : "h264_nvenc";
+    const container = parsed.container && exportContainers.includes(parsed.container) ? parsed.container : "mp4";
+    const quality = parsed.quality && exportQualities.includes(parsed.quality) ? parsed.quality : "medium";
+    return {
+      preset,
+      codec,
+      container,
+      quality,
+      audioEnabled: parsed.audioEnabled ?? true,
+      outputPath: typeof parsed.outputPath === "string" ? parsed.outputPath : "",
+      encoderOptions: normalizeEncoderOptions(parsed.encoderOptions)
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeEncoderOptions(value: Partial<ExportEncoderOptions> | undefined): ExportEncoderOptions {
+  const presetValues: ExportEncoderOptions["preset"][] = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"];
+  const tuneValues: ExportEncoderOptions["tune"][] = ["hq", "uhq"];
+  const multipassValues: ExportEncoderOptions["multipass"][] = ["disabled", "qres", "fullres"];
+  const bRefValues: ExportEncoderOptions["bRefMode"][] = ["disabled", "each", "middle"];
+  const splitValues: ExportEncoderOptions["splitEncodeMode"][] = ["auto", "disabled"];
+  return {
+    enabled: true,
+    preset: value?.preset && presetValues.includes(value.preset) ? value.preset : defaultEncoderOptions.preset,
+    tune: value?.tune && tuneValues.includes(value.tune) ? value.tune : defaultEncoderOptions.tune,
+    cq: clampInteger(value?.cq ?? defaultEncoderOptions.cq, 0, 63),
+    maxBitrateMbps: clampInteger(value?.maxBitrateMbps ?? defaultEncoderOptions.maxBitrateMbps, 1, 2000),
+    lookaheadDepth: clampInteger(value?.lookaheadDepth ?? defaultEncoderOptions.lookaheadDepth, 0, 32),
+    lookaheadLevel: clampInteger(value?.lookaheadLevel ?? defaultEncoderOptions.lookaheadLevel, 0, 3) as ExportEncoderOptions["lookaheadLevel"],
+    multipass: value?.multipass && multipassValues.includes(value.multipass) ? value.multipass : defaultEncoderOptions.multipass,
+    spatialAq: value?.spatialAq ?? defaultEncoderOptions.spatialAq,
+    temporalAq: value?.temporalAq ?? defaultEncoderOptions.temporalAq,
+    aqStrength: clampInteger(value?.aqStrength ?? defaultEncoderOptions.aqStrength, 1, 15),
+    bFrames: clampInteger(value?.bFrames ?? defaultEncoderOptions.bFrames, 0, 5),
+    bRefMode: value?.bRefMode && bRefValues.includes(value.bRefMode) ? value.bRefMode : defaultEncoderOptions.bRefMode,
+    referenceFrames: clampInteger(value?.referenceFrames ?? defaultEncoderOptions.referenceFrames, 1, 16),
+    highBitDepth: value?.highBitDepth ?? defaultEncoderOptions.highBitDepth,
+    splitEncodeMode: value?.splitEncodeMode && splitValues.includes(value.splitEncodeMode) ? value.splitEncodeMode : defaultEncoderOptions.splitEncodeMode
+  };
+}
+
+function saveRenderPagePreferences(preferences: RenderPagePreferences) {
+  try {
+    localStorage.setItem(renderPreferencesStorageKey, JSON.stringify(preferences));
+  } catch {
+    // Persistence is best-effort when storage is unavailable.
+  }
 }
 
 function getVisibleVideoDurationUs(timeline: Timeline, mediaAssets: MediaAsset[]) {

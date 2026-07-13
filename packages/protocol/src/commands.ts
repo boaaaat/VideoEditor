@@ -1,5 +1,5 @@
 import type { AudioAdjustment, ClipEffect, ClipTransform, ColorAdjustment } from "./timeline";
-import type { ColorMode, ExportCodec, ExportContainer, ExportFps, ExportQuality, ExportResolution } from "./media";
+import type { ColorMode, ExportCodec, ExportContainer, ExportEncoderOptions, ExportFps, ExportQuality, ExportResolution } from "./media";
 
 export type CommandType =
   | "import_media"
@@ -155,6 +155,7 @@ export interface ExportTimelineCommand {
   container: ExportContainer;
   quality: ExportQuality;
   bitrateMbps: number;
+  encoderOptions?: ExportEncoderOptions;
   audioEnabled: boolean;
   masterGainDb?: number;
   normalizeAudio?: boolean;

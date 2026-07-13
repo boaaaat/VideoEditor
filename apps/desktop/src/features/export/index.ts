@@ -7,11 +7,11 @@ export const exportCodecs: ExportCodec[] = ["h264_nvenc", "hevc_nvenc", "av1_nve
 export const exportQualities: ExportQuality[] = ["trash", "low", "medium", "high", "pro_max"];
 
 export const exportQualityLabels: Record<ExportQuality, string> = {
-  trash: "Trash",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  pro_max: "Pro Max"
+  trash: "Trash (barely passable)",
+  low: "Low (small)",
+  medium: "Medium (balanced)",
+  high: "High (clean)",
+  pro_max: "Pro Max (delivery)"
 };
 
 export const exportCodecLabels: Record<ExportCodec, string> = {
@@ -133,16 +133,16 @@ function resolutionSize(resolution: ExportResolution) {
 function qualityMultiplier(quality: ExportQuality) {
   switch (quality) {
     case "trash":
-      return 0.25;
+      return 0.12;
     case "low":
-      return 0.5;
+      return 0.28;
     case "high":
-      return 1.6;
+      return 0.85;
     case "pro_max":
-      return 2.4;
+      return 1.15;
     case "medium":
     default:
-      return 1;
+      return 0.55;
   }
 }
 

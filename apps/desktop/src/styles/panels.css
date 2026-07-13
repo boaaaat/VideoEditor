@@ -906,6 +906,46 @@
   grid-column: 1 / -1;
 }
 
+.custom-export-options {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.custom-mode-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  background: #1b1b19;
+}
+
+.custom-export-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.custom-export-heading > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.custom-export-heading span {
+  color: var(--muted);
+}
+
+.custom-export-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .export-status-line {
   display: flex;
   justify-content: space-between;
@@ -1151,6 +1191,20 @@
 }
 
 @media (max-width: 700px) {
+  .custom-export-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .custom-export-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .custom-mode-entry {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .logs-drawer {
     height: min(560px, 78vh);
   }

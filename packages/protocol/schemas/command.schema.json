@@ -89,6 +89,29 @@
           "container": { "enum": ["mp4", "mkv"] },
           "quality": { "enum": ["trash", "low", "medium", "high", "pro_max"] },
           "bitrateMbps": { "type": "number", "minimum": 1 },
+          "encoderOptions": {
+            "type": "object",
+            "required": ["enabled", "preset", "tune", "cq", "maxBitrateMbps", "lookaheadDepth", "lookaheadLevel", "multipass", "spatialAq", "temporalAq", "aqStrength", "bFrames", "bRefMode", "referenceFrames", "highBitDepth", "splitEncodeMode"],
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "preset": { "enum": ["p1", "p2", "p3", "p4", "p5", "p6", "p7"] },
+              "tune": { "enum": ["hq", "uhq"] },
+              "cq": { "type": "number", "minimum": 0, "maximum": 63 },
+              "maxBitrateMbps": { "type": "number", "minimum": 1, "maximum": 2000 },
+              "lookaheadDepth": { "type": "integer", "minimum": 0, "maximum": 32 },
+              "lookaheadLevel": { "type": "integer", "minimum": 0, "maximum": 3 },
+              "multipass": { "enum": ["disabled", "qres", "fullres"] },
+              "spatialAq": { "type": "boolean" },
+              "temporalAq": { "type": "boolean" },
+              "aqStrength": { "type": "integer", "minimum": 1, "maximum": 15 },
+              "bFrames": { "type": "integer", "minimum": 0, "maximum": 5 },
+              "bRefMode": { "enum": ["disabled", "each", "middle"] },
+              "referenceFrames": { "type": "integer", "minimum": 1, "maximum": 16 },
+              "highBitDepth": { "type": "boolean" },
+              "splitEncodeMode": { "enum": ["auto", "disabled"] }
+            },
+            "additionalProperties": false
+          },
           "audioEnabled": { "type": "boolean" },
           "colorMode": { "enum": ["SDR", "HDR"] }
         }

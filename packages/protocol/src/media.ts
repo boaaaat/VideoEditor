@@ -4,6 +4,30 @@ export type ExportCodec = "h264_nvenc" | "hevc_nvenc" | "av1_nvenc";
 export type ExportContainer = "mp4" | "mkv";
 export type ExportResolution = "source" | "custom" | "1080p" | "1440p" | "4k";
 export type ExportFps = 24 | 25 | 30 | 50 | 60;
+export type ExportNvencPreset = "p1" | "p2" | "p3" | "p4" | "p5" | "p6" | "p7";
+export type ExportNvencTune = "hq" | "uhq";
+export type ExportMultipass = "disabled" | "qres" | "fullres";
+export type ExportBRefMode = "disabled" | "each" | "middle";
+export type ExportSplitEncodeMode = "auto" | "disabled";
+
+export interface ExportEncoderOptions {
+  enabled: boolean;
+  preset: ExportNvencPreset;
+  tune: ExportNvencTune;
+  cq: number;
+  maxBitrateMbps: number;
+  lookaheadDepth: number;
+  lookaheadLevel: 0 | 1 | 2 | 3;
+  multipass: ExportMultipass;
+  spatialAq: boolean;
+  temporalAq: boolean;
+  aqStrength: number;
+  bFrames: number;
+  bRefMode: ExportBRefMode;
+  referenceFrames: number;
+  highBitDepth: boolean;
+  splitEncodeMode: ExportSplitEncodeMode;
+}
 
 export interface MediaMetadata {
   path: string;
@@ -113,6 +137,7 @@ export interface ExportStatus {
   container?: ExportContainer;
   quality?: ExportQuality;
   bitrateMbps?: number;
+  encoderOptions?: ExportEncoderOptions;
   audioEnabled?: boolean;
   colorMode?: ColorMode;
   ffmpegCommand?: string;
