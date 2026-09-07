@@ -14,10 +14,11 @@ import {
 import type { AiEditProposal, EngineStatus, MediaMetadata, ProjectSettings, Timeline } from "@ai-video-editor/protocol";
 import { Tabs, type TabItem } from "../components/Tabs";
 import { Modal } from "../components/Modal";
+import { SettingsPanel } from "../components/SettingsPanel";
 import { Button } from "../components/Button";
 import { LogsDrawer, logsToText } from "../components/LogsDrawer";
-import { engineRpc, getEngineStatus, redoCommand, undoCommand, type CommandExecutionEventDetail } from "../features/commands/commandClient";
-import { isTypingTarget, loadShortcutMap, matchesShortcut, resetShortcutMap, saveShortcutMap, shortcutFor, type ShortcutMap } from "../features/commands/shortcuts";
+import { engineRpc, executeCommand, getEngineStatus, isEngineEditing, redoCommand, undoCommand, type CommandExecutionEventDetail } from "../features/commands/commandClient";
+import { isEditorShortcutBlocked, loadShortcutMap, matchesShortcut, resetShortcutMap, saveShortcutMap, shortcutFor, type ShortcutMap } from "../features/commands/shortcuts";
 import { appendProjectLog, createAppLogEntry, type AppLogEntry, type AppLogSource, type LogStatusOptions } from "../features/logging/appLog";
 import { importMediaFiles, type ImportMediaResult } from "../features/media/importMedia";
 import type { MediaAsset } from "../features/media/mediaTypes";
@@ -31,7 +32,7 @@ import {
   type ActiveProject,
   type ProjectSnapshot
 } from "../features/projects/projectActions";
-import { defaultProjectSettings, seedProjectSettingsFromMetadata } from "../features/settings";
+import { defaultProjectSettings, seedProjectSettingsFromMetadata, loadEditorPreferences, saveEditorPreferences } from "../features/settings";
 import { starterTimeline } from "../features/timeline/mockTimeline";
 import { TopBar } from "./topbar/TopBar";
 import { HomeTab } from "./tabs/HomeTab";
@@ -43,11 +44,12 @@ import { PluginsTab } from "./tabs/PluginsTab";
 import { ExportTab } from "./tabs/ExportTab";
 import { FutureAiTab } from "./tabs/FutureAiTab";
 import { ShortcutsTab } from "./tabs/ShortcutsTab";
+import { handleAgentRequest, isAgentApplying, type AgentRequest } from "../features/ai/agentSession";
+import type { PluginRunResult } from "../features/plugins/runtime";
 
 export type WorkspaceTab = "home" | "edit" | "audio" | "color" | "effects" | "shortcuts" | "plugins" | "export" | "future-ai";
 
 const maxAppLogEntries = 1000;
-const autosaveDelayMs = 4500;
 const workspaceTabs: TabItem<WorkspaceTab>[] = [
   { id: "home", label: "Home", icon: <Home size={16} /> },
   { id: "edit", label: "Edit", icon: <Clapperboard size={16} /> },
@@ -57,7 +59,7 @@ const workspaceTabs: TabItem<WorkspaceTab>[] = [
   { id: "shortcuts", label: "Shortcuts", icon: <Keyboard size={16} /> },
   { id: "plugins", label: "Plugins", icon: <Puzzle size={16} /> },
   { id: "export", label: "Export", icon: <Download size={16} /> },
-  { id: "future-ai", label: "Future AI", icon: <Bot size={16} /> }
+  { id: "future-ai", label: "AI & Agents", icon: <Bot size={16} /> }
 ];
 
 interface ProjectSettingsChange {
@@ -89,6 +91,8 @@ export function AppShell() {
   const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [editorPreferences, setEditorPreferences] = useState(loadEditorPreferences);
+  const settingsApplyingRef = useRef(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [commandIndex, setCommandIndex] = useState(0);
@@ -101,13 +105,70 @@ export function AppShell() {
   const [undoCount, setUndoCount] = useState(0);
   const [redoCount, setRedoCount] = useState(0);
   const [statusMessage, setLatestStatusMessage] = useState("Ready");
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [openingProject, setOpeningProject] = useState(false);
   const [appLogs, setAppLogs] = useState<AppLogEntry[]>(() => [createAppLogEntry("Ready", { source: "app" })]);
   const projectRef = useRef(project);
+  const rememberProjectRef = useRef(true);
   const logPersistenceWarningShownRef = useRef(false);
   const lastSavedStateRef = useRef(serializeProjectState(defaultProjectSettings, [], starterTimeline, []));
   const loadingProjectRef = useRef(false);
   const lastMissingMediaKeyRef = useRef("");
   const hasActiveProject = Boolean(project.path);
+  const agentHandlerRef = useRef<(request: AgentRequest) => Promise<unknown>>(async () => undefined);
+  agentHandlerRef.current = async (request) => {
+    const result = await handleAgentRequest(request, {
+      snapshot: createProjectSnapshot(projectRef.current, new Date().toISOString()),
+      playheadUs, playing,
+      unavailable: loadingProjectRef.current || savingProject || Boolean(document.querySelector("[aria-modal='true'], [role='menu']")),
+      applySnapshot: (snapshot, switchedProject, rememberProject = true) => {
+        restoreCommandState(snapshot);
+        if (switchedProject) {
+          rememberProjectRef.current = rememberProject;
+          projectRef.current = snapshot.project;
+          setProject(snapshot.project);
+          if (rememberProject) setRecentProjects(saveRecentProject(snapshot.project));
+          setPlayheadUs(0);
+          setActiveTab("edit");
+        }
+      },
+      applyHistory: (history) => { setUndoCount(history.undoCount); setRedoCount(history.redoCount); },
+      setPlayback: (timeUs, nextPlaying, showPreview) => {
+        if (showPreview) setActiveTab("edit");
+        if (timeUs !== undefined) setPlayheadUs(Math.min(timeline.durationUs, timeUs));
+        if (nextPlaying !== undefined) setPlaying(nextPlaying);
+      }
+    }, setAgentBusy);
+    if (request.method === "plugin.run") {
+      const plugin = result as PluginRunResult;
+      for (const log of plugin.logs) recordLog(`${request.params.pluginId}: ${log.message}`, { level: log.level, source: "plugin" }, false);
+      recordLog(plugin.summary, { source: "plugin", details: { pluginId: request.params.pluginId, proposalId: plugin.proposal?.id } });
+    }
+    if (!["editor.state", "timeline.state", "media.index", "command.history", "export.status", "ai.proposals", "plugin.list", "plugin.inspect"].includes(request.method)) {
+      recordLog(`Agent: ${request.method}`, { source: "ai", details: { method: request.method } }, true);
+    }
+    return result;
+  };
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+    let disposed = false;
+    let cleanup: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(async ({ listen }) => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const unlisten = await listen<AgentRequest>("agent:request", (event) => {
+        void agentHandlerRef.current(event.payload)
+          .then((result) => invoke("agent_bridge_respond", { requestId: event.payload.requestId, response: { result } }))
+          .catch((error) => {
+            const message = error instanceof Error ? error.message : String(error);
+            recordLog(`Agent request failed: ${message}`, { level: "error", source: "ai" });
+            return invoke("agent_bridge_respond", { requestId: event.payload.requestId, response: { error: message } });
+          });
+      });
+      if (disposed) unlisten(); else { cleanup = unlisten; await invoke("agent_bridge_ready"); }
+    });
+    return () => { disposed = true; cleanup?.(); };
+  }, []);
 
   useEffect(() => {
     projectRef.current = project;
@@ -137,17 +198,17 @@ export function AppShell() {
   }, [projectDirty]);
 
   useEffect(() => {
-    if (!projectDirty || savingProject) {
+    if (!projectDirty || savingProject || agentBusy || openingProject) {
       return;
     }
 
     setAutosaveState("pending");
     const timeout = window.setTimeout(() => {
       void saveProject("autosave");
-    }, autosaveDelayMs);
+    }, editorPreferences.autosaveDelayMs);
 
     return () => window.clearTimeout(timeout);
-  }, [aiProposals, mediaAssets, projectDirty, projectSettings, savingProject, timeline]);
+  }, [aiProposals, mediaAssets, projectDirty, projectSettings, savingProject, timeline, agentBusy, openingProject, editorPreferences.autosaveDelayMs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -286,7 +347,7 @@ export function AppShell() {
 
   useEffect(() => {
     async function onKeyDown(event: KeyboardEvent) {
-      if (isTypingTarget(event.target)) {
+      if (isEditorShortcutBlocked(event)) {
         return;
       }
 
@@ -369,86 +430,45 @@ export function AppShell() {
     }
   }
 
-  async function applyProject(nextProject: ActiveProject) {
+  async function applyProject(nextProject: ActiveProject, createNew = false) {
     if (!nextProject.path) {
       logStatus("Choose or create a project folder before editing", { level: "warning", source: "project", details: { project: nextProject } });
       setActiveTab("home");
       return;
     }
 
+    if (loadingProjectRef.current || savingProject || isAgentApplying() || isEngineEditing()) {
+      logStatus("Finish the current operation before opening another project", { level: "warning", source: "project" });
+      return;
+    }
     loadingProjectRef.current = true;
+    setOpeningProject(true);
+    setPlaying(false);
     const openedProject = { ...nextProject, lastOpenedAt: new Date().toISOString() };
-    setProject(openedProject);
-    setRecentProjects(saveRecentProject(openedProject));
-    setSettingsProposal(null);
-    setMissingMediaPaths([]);
-    setAutosaveState("idle");
-    logPersistenceWarningShownRef.current = false;
-    projectRef.current = openedProject;
-
     try {
-      const snapshot = await loadProjectSnapshot(openedProject);
-      if (snapshot) {
-        restoreProjectSnapshot(snapshot, openedProject);
-        await syncEngineProjectState(
-          snapshot.projectSettings ?? defaultProjectSettings,
-          snapshot.mediaAssets ?? [],
-          snapshot.timeline ?? starterTimeline,
-          snapshot.aiProposals ?? [],
-          "project restore"
-        );
-        logStatus(`Project restored: ${openedProject.name}`, {
-          level: "success",
-          source: "project",
-          details: { path: openedProject.path, savedAt: snapshot.savedAt, mediaCount: snapshot.mediaAssets.length }
-        });
-      } else {
-        const savedAt = new Date().toISOString();
-        const blankProject = { ...openedProject, lastSavedAt: savedAt };
-        projectRef.current = blankProject;
-        setProject(blankProject);
-        setRecentProjects(saveRecentProject(blankProject));
-        setMediaAssets([]);
-        setTimeline(starterTimeline);
-        setAiProposals([]);
-        setProjectSettings(defaultProjectSettings);
-        const blankHash = serializeProjectState(defaultProjectSettings, [], starterTimeline, []);
-        lastSavedStateRef.current = blankHash;
-        resetCommandHistory(blankProject, defaultProjectSettings, [], starterTimeline, []);
-        setLastSavedAt(savedAt);
-        setProjectDirty(false);
-        const blankSnapshot: ProjectSnapshot = {
-          version: 1,
-          savedAt,
-          project: blankProject,
-          projectSettings: defaultProjectSettings,
-          mediaAssets: [],
-          timeline: starterTimeline,
-          aiProposals: []
-        };
-        void saveProjectSnapshot(blankProject, blankSnapshot).catch((error) => {
-          logStatus(error instanceof Error ? error.message : "Initial project snapshot save failed", { level: "error", source: "project" });
-        });
-        await syncEngineProjectState(defaultProjectSettings, [], starterTimeline, [], "blank project open");
-        logStatus(`Project open: ${openedProject.name}`, {
-          source: "project",
-          details: { path: openedProject.path, manifestPath: openedProject.manifestPath, restored: false }
-        });
-      }
+      // Never let an in-flight snapshot from the old UI overwrite the destination project.
+      const previousProject = projectRef.current;
+      if (previousProject.path) await saveProjectSnapshot(previousProject, createProjectSnapshot(previousProject, new Date().toISOString()));
+      const snapshot = createNew
+        ? await engineRpc<ProjectSnapshot>("project.create", { name: openedProject.name, path: openedProject.path })
+        : await loadProjectSnapshot(openedProject, (message) => logStatus(message, { level: "warning", source: "project" }));
+      if (!snapshot) throw new Error("The project has no saved state.");
+      restoreProjectSnapshot(snapshot, openedProject);
+      setSettingsProposal(null);
+      setMissingMediaPaths([]);
+      setPlayheadUs(0);
+      logPersistenceWarningShownRef.current = false;
+      logStatus(`Project ${createNew ? "created" : "restored"}: ${openedProject.name}`, {
+        level: "success", source: "project",
+        details: { path: openedProject.path, savedAt: snapshot.savedAt, mediaCount: snapshot.mediaAssets.length }
+      });
       openWorkspaceTab("edit");
     } catch (error) {
-      setMediaAssets([]);
-      setTimeline(starterTimeline);
-      setAiProposals([]);
-      setProjectSettings(defaultProjectSettings);
-      lastSavedStateRef.current = serializeProjectState(defaultProjectSettings, [], starterTimeline, []);
-      resetCommandHistory(openedProject, defaultProjectSettings, [], starterTimeline, []);
-      setProjectDirty(false);
-      await syncEngineProjectState(defaultProjectSettings, [], starterTimeline, [], "project restore failure");
       logStatus(error instanceof Error ? error.message : "Project restore failed", { level: "error", source: "project", details: { project: openedProject } });
     } finally {
       window.setTimeout(() => {
         loadingProjectRef.current = false;
+        setOpeningProject(false);
       }, 0);
     }
   }
@@ -464,9 +484,9 @@ export function AppShell() {
       return;
     }
 
-    const existingPaths = new Set(mediaAssets.map((asset) => asset.path));
-    const newAssets = result.media.filter((asset) => !existingPaths.has(asset.path));
-    const nextMediaAssets = [...mediaAssets, ...newAssets];
+    const importedById = new Map(result.media.map((asset) => [asset.id, asset]));
+    const existingIds = new Set(mediaAssets.map((asset) => asset.id));
+    const nextMediaAssets = [...mediaAssets.map((asset) => importedById.get(asset.id) ?? asset), ...result.media.filter((asset) => !existingIds.has(asset.id))];
     const nextTimeline = timeline;
 
     setMediaAssets(nextMediaAssets);
@@ -492,7 +512,7 @@ export function AppShell() {
       return;
     }
 
-    setProjectSettings(settingsProposal.nextSettings);
+    void updateProjectSettings(settingsProposal.nextSettings);
     setSettingsProposal(null);
     logStatus(`Project settings updated from ${settingsProposal.assetName}`, {
       source: "project",
@@ -555,42 +575,38 @@ export function AppShell() {
     });
   }
 
-  function relinkMediaAsset(assetId: string, relinkedAsset: MediaAsset) {
+  async function relinkMediaAsset(assetId: string, path: string) {
     const previousAsset = mediaAssets.find((asset) => asset.id === assetId);
     const previousPath = previousAsset?.path ?? "";
-    const nextMediaAssets = mediaAssets.map((asset) => {
-      if (asset.id !== assetId) {
-        return asset;
-      }
-      return { ...relinkedAsset, id: asset.id, name: asset.name };
-    });
-    setMediaAssets(nextMediaAssets);
-    setMissingMediaPaths((existing) => existing.filter((path) => path !== previousPath && path !== relinkedAsset.path));
-    void saveProjectStateSnapshot(projectSettings, nextMediaAssets, timeline, aiProposals, "media relink");
-    logStatus(`Relinked media: ${previousAsset?.name ?? relinkedAsset.name}`, {
+    setPlaying(false);
+    const result = await executeCommand({type:"relink_media",mediaId:assetId,path});
+    if (!result.ok) throw new Error(result.error ?? "Relink failed");
+    restoreCommandState(result.data);
+    setMissingMediaPaths((existing) => existing.filter((item) => item !== previousPath && item !== path));
+    setProjectDirty(true);
+    logStatus(`Relinked media: ${previousAsset?.name ?? assetId}`, {
       level: "success",
       source: "media",
-      details: { mediaId: assetId, previousPath, nextPath: relinkedAsset.path, metadata: relinkedAsset.metadata ?? null }
+      details: { mediaId: assetId, previousPath, nextPath: path }
     });
   }
 
   async function refreshEngineState(reason = "manual") {
     try {
-      const [mediaIndex, nextTimeline, proposalIndex] = await Promise.all([
-        engineRpc<{ media: MediaAsset[] }>("media.index"),
-        engineRpc<Timeline>("timeline.state"),
-        engineRpc<{ proposals: AiEditProposal[] }>("ai.proposals")
+      const [snapshot, history] = await Promise.all([
+        engineRpc<ProjectSnapshot>("project.state"),
+        engineRpc<{ undoCount: number; redoCount: number }>("command.history")
       ]);
-      setMediaAssets(mediaIndex.media ?? []);
-      setTimeline(nextTimeline);
-      setAiProposals(proposalIndex.proposals ?? []);
+      restoreCommandState(snapshot);
+      setUndoCount(history.undoCount);
+      setRedoCount(history.redoCount);
       recordLog("Engine state refreshed", {
         source: "engine",
         details: {
           reason,
-          mediaCount: mediaIndex.media?.length ?? 0,
-          trackCount: nextTimeline.tracks.length,
-          proposalCount: proposalIndex.proposals?.length ?? 0
+          mediaCount: snapshot.mediaAssets.length,
+          trackCount: snapshot.timeline.tracks.length,
+          proposalCount: snapshot.aiProposals.length
         }
       }, false);
     } catch (error) {
@@ -640,8 +656,10 @@ export function AppShell() {
       await refreshEngineState("ai proposal applied");
       logStatus("AI proposal applied to timeline", { level: "success", source: "ai", details: { proposalId } });
       openWorkspaceTab("edit");
+      return true;
     } catch (error) {
       logStatus(error instanceof Error ? error.message : "AI proposal apply failed", { level: "error", source: "ai", details: { proposalId } });
+      return false;
     }
   }
 
@@ -713,6 +731,7 @@ export function AppShell() {
   }
 
   async function saveProject(reason: "manual" | "autosave") {
+    if (isAgentApplying() || loadingProjectRef.current || savingProject || isEngineEditing()) return;
     const activeProject = projectRef.current;
     if (!activeProject.path) {
       if (reason === "manual") {
@@ -736,7 +755,7 @@ export function AppShell() {
       const savedProject = { ...activeProject, lastSavedAt: savedAt };
       projectRef.current = savedProject;
       setProject(savedProject);
-      setRecentProjects(saveRecentProject(savedProject));
+      if (rememberProjectRef.current) setRecentProjects(saveRecentProject(savedProject));
       lastSavedStateRef.current = serializeProjectState(projectSettings, mediaAssets, timeline, aiProposals);
       setProjectDirty(false);
       setLastSavedAt(savedAt);
@@ -765,6 +784,7 @@ export function AppShell() {
     nextProposals: AiEditProposal[],
     reason: string
   ) {
+    if (isAgentApplying() || loadingProjectRef.current) return;
     const activeProject = projectRef.current;
     if (!activeProject.path) {
       logStatus("Create or open a project before saving changes", { level: "warning", source: "project", details: { reason } });
@@ -788,7 +808,7 @@ export function AppShell() {
       const savedProject = { ...activeProject, lastSavedAt: savedAt };
       projectRef.current = savedProject;
       setProject(savedProject);
-      setRecentProjects(saveRecentProject(savedProject));
+      if (rememberProjectRef.current) setRecentProjects(saveRecentProject(savedProject));
       lastSavedStateRef.current = serializeProjectState(nextSettings, nextMediaAssets, nextTimeline, nextProposals);
       setProjectDirty(false);
       setLastSavedAt(savedAt);
@@ -817,6 +837,7 @@ export function AppShell() {
   }
 
   function restoreProjectSnapshot(snapshot: ProjectSnapshot, fallbackProject: ActiveProject) {
+    rememberProjectRef.current = true;
     const restoredProject = {
       ...fallbackProject,
       name: snapshot.project.name || fallbackProject.name,
@@ -857,6 +878,15 @@ export function AppShell() {
   ) {
     setUndoCount(0);
     setRedoCount(0);
+  }
+
+  async function updateProjectSettings(settings: ProjectSettings) {
+    const patch = Object.fromEntries(Object.entries(settings).filter(([key, value]) => value !== projectSettings[key as keyof ProjectSettings]));
+    if (!Object.keys(patch).length) return true;
+    const result = await executeCommand({ type: "update_project_settings", settings: patch });
+    if (result.ok) restoreCommandState(result.data);
+    else logStatus(result.error ?? "Project settings update failed", { level: "error", source: "project" });
+    return result.ok;
   }
 
   function restoreCommandState(data: unknown) {
@@ -913,7 +943,7 @@ export function AppShell() {
   }
 
   function openWorkspaceTab(nextTab: WorkspaceTab) {
-    if (!projectRef.current.path && nextTab !== "home") {
+    if (!projectRef.current.path && ["edit", "audio", "color", "effects", "export"].includes(nextTab)) {
       setActiveTab("home");
       logStatus("Create or open a project before opening editor workspaces", { level: "warning", source: "project", details: { tab: nextTab } });
       return;
@@ -1013,6 +1043,7 @@ export function AppShell() {
             onProjectOpen={applyProject}
             onRecentProjectsChange={setRecentProjects}
             onProjectDeleted={handleProjectDeleted}
+            onOpenPlugins={() => openWorkspaceTab("plugins")}
             setStatusMessage={makeStatusLogger("project")}
           />
         );
@@ -1059,7 +1090,7 @@ export function AppShell() {
             previewVolumePercent={previewVolumePercent}
             previewSpeedPercent={previewSpeedPercent}
             onProjectSettingsChange={(settings) => {
-              setProjectSettings(settings);
+              void updateProjectSettings(settings);
               logStatus("Project audio settings changed", { source: "project", details: { settings } });
             }}
             setStatusMessage={makeStatusLogger("audio")}
@@ -1072,6 +1103,7 @@ export function AppShell() {
             setTimeline={setTimeline}
             mediaAssets={mediaAssets}
             projectSettings={projectSettings}
+              projectPath={project.path}
             playheadUs={playheadUs}
             setPlayheadUs={setPlayheadUs}
             playing={playing}
@@ -1088,6 +1120,7 @@ export function AppShell() {
             setTimeline={setTimeline}
             mediaAssets={mediaAssets}
             projectSettings={projectSettings}
+              projectPath={project.path}
             playheadUs={playheadUs}
             setPlayheadUs={setPlayheadUs}
             playing={playing}
@@ -1100,13 +1133,15 @@ export function AppShell() {
       case "shortcuts":
         return <ShortcutsTab shortcuts={shortcuts} onShortcutsChange={updateShortcuts} onResetShortcuts={resetShortcuts} />;
       case "plugins":
-        return <PluginsTab />;
+        return <PluginsTab snapshot={createProjectSnapshot(project, new Date().toISOString())} playheadUs={playheadUs} onPause={() => setPlaying(false)}
+          onProposal={(proposal) => setAiProposals((current) => [proposal, ...current.filter((item) => item.id !== proposal.id)])}
+          onApplyProposal={applyAiProposal} setStatusMessage={makeStatusLogger("plugin")} />;
       case "export":
         return (
           <ExportTab
             projectSettings={projectSettings}
             onProjectSettingsChange={(settings) => {
-              setProjectSettings(settings);
+              void updateProjectSettings(settings);
               logStatus("Project settings changed", { source: "project", details: { settings } });
             }}
             firstMediaMetadata={mediaAssets.find((asset) => asset.kind === "video" && asset.metadata)?.metadata}
@@ -1123,7 +1158,7 @@ export function AppShell() {
             mediaAssets={mediaAssets}
             proposals={aiProposals}
             onGenerateProposal={generateRoughCutProposal}
-            onApplyProposal={applyAiProposal}
+            onApplyProposal={async (id) => { await applyAiProposal(id); }}
             onRejectProposal={rejectAiProposal}
           />
         );
@@ -1133,7 +1168,7 @@ export function AppShell() {
   }, [activeTab, aiProposals, engineStatus, mediaAssets, missingMediaPaths, playing, playheadUs, previewSpeedPercent, previewVolumePercent, project.path, projectSettings, recentProjects, redoCount, shortcuts, timeline, undoCount]);
 
   return (
-    <main className="app-shell" aria-busy={savingProject || autosaveState === "saving"}>
+    <main className="app-shell" data-agent-busy={agentBusy || openingProject || undefined} aria-busy={agentBusy || openingProject || savingProject || autosaveState === "saving"}>
       <TopBar
         projectName={`${project.name}${projectDirty ? " *" : ""}`}
         hasProject={hasActiveProject}
@@ -1230,25 +1265,19 @@ export function AppShell() {
         </div>
       </Modal>
 
-      <Modal title="Settings" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
-        <div className="settings-grid">
-          <div>
-            <strong>Media import</strong>
-            <span>Link original files by default.</span>
-          </div>
-          <div>
-            <strong>Preview</strong>
-            <span>Use proxy playback when needed.</span>
-          </div>
-          <div>
-            <strong>Plugins</strong>
-            <span>C++ plugins require developer mode.</span>
-          </div>
-          <div>
-            <strong>Future AI</strong>
-            <span>AI changes require approval by default.</span>
-          </div>
-        </div>
+      <Modal title="Settings" open={settingsOpen} onClose={() => {if (!settingsApplyingRef.current) setSettingsOpen(false);}}>
+        {settingsOpen ? <SettingsPanel projectSettings={projectSettings} preferences={editorPreferences} hasProject={hasActiveProject}
+          onApply={async (settings, preferences) => {
+            settingsApplyingRef.current = true;
+            setPlaying(false);
+            try {
+              if (hasActiveProject && !await updateProjectSettings(settings)) throw new Error("Project settings could not be applied. Check the application log.");
+              saveEditorPreferences(preferences);
+              setEditorPreferences(preferences);
+              setSettingsOpen(false);
+              logStatus("Settings applied", {level:"success"});
+            } finally {settingsApplyingRef.current = false;}
+          }} onNavigate={(tab) => {setSettingsOpen(false);setActiveTab(tab);}} /> : null}
       </Modal>
 
       <Modal title="Update Project Settings" open={Boolean(settingsProposal)} onClose={() => setSettingsProposal(null)}>

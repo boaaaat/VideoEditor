@@ -24,9 +24,42 @@
   align-items: center;
   gap: 8px;
   min-height: 34px;
-  overflow-x: auto;
+  flex-wrap: wrap;
   padding-bottom: 2px;
 }
+
+.timeline-toolbar > * { flex-shrink: 0; }
+@media (max-width: 1150px) {
+  .timeline-toolbar { gap: 4px; }
+  .timeline-toolbar > .button { width: 32px; padding: 0; justify-content: center; gap: 0; }
+  .timeline-toolbar > .button > span:not(.button-icon) {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  .timeline-toolbar > .timeline-timecode { display: none; }
+}
+.timeline-marker { position: absolute; bottom: 0; padding: 0; width: 18px; height: 18px; background: transparent; border: 0; z-index: 5; cursor: pointer; }
+.title-track-row { display: grid; height: 42px; border-bottom: 1px solid var(--line); }
+.title-track-lane { position: relative; }
+.timeline-title { position: absolute; top: 5px; height: 30px; padding: 0 8px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: #635285; border: 1px solid #9b84c2; border-radius: 4px; cursor: pointer; }
+.marker-row { display: grid; grid-template-columns: auto minmax(100px, 1fr) 110px 48px auto; gap: 10px; align-items: end; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.marker-row label { display: grid; gap: 6px; font-size: 11px; color: var(--muted); }
+.marker-row input { min-width: 0; width: 100%; }
+.timecode-input {
+  width: 126px;
+  text-align: center;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-2);
+}
+.inspector-summary { display: grid; gap: 5px; overflow-wrap: anywhere; }
+.inspector-summary span, .clip-source-details { color: var(--muted); font-size: 12px; }
+.inspector-fields { min-width: 0; margin: 0; padding: 12px 0; border: 0; border-top: 1px solid var(--line); display: grid; gap: 10px; }
+.inspector-fields legend { padding: 0 8px 0 0; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.inspector-fields .number-field { display: grid; grid-template-columns: 1fr 90px; align-items: center; gap: 8px; }
+.number-field input { width: 100%; min-width: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.clip-source-details { overflow-wrap: anywhere; user-select: text; }
+.clip-source-details summary { cursor: pointer; }
+.inline-notice { padding: 10px; border-radius: 6px; background: rgba(215,180,104,0.08); color: var(--accent-2); }
 
 .timeline-toolbar .toggle-row {
   grid-template-columns: auto auto;
@@ -188,6 +221,45 @@
   box-shadow: inset 0 0 0 1px rgba(210, 91, 79, 0.48);
 }
 
+.timeline-gap {
+  position: absolute;
+  top: 10px;
+  z-index: 0;
+  height: 50px;
+  min-width: 0;
+  padding: 0 6px;
+  overflow: hidden;
+  border: 1px dashed transparent;
+  border-radius: 4px;
+  color: transparent;
+  background: transparent;
+  cursor: pointer;
+}
+
+.timeline-gap:hover,
+.timeline-gap:focus-visible {
+  border-color: rgba(241, 207, 120, 0.48);
+  color: var(--muted);
+  background: rgba(241, 207, 120, 0.08);
+  outline: none;
+}
+
+.timeline-gap.selected {
+  z-index: 1;
+  border-color: var(--accent-2);
+  color: #f1cf78;
+  background: rgba(241, 207, 120, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(241, 207, 120, 0.18);
+}
+
+.timeline-gap span {
+  display: block;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .timeline-snap-line {
   position: absolute;
   top: 4px;
@@ -328,3 +400,4 @@
   outline-offset: 1px;
   box-shadow: 0 0 0 1px rgba(241, 207, 120, 0.28);
 }
+.rendered-composition-frame { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; z-index: 5; pointer-events: none; }

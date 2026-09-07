@@ -27,6 +27,9 @@ struct ProjectSummary {
 class ProjectManager {
  public:
   ProjectSummary createProject(const std::filesystem::path& root, const std::string& name) const {
+    if (std::filesystem::exists(root / "project.aivproj") || std::filesystem::exists(root / "project.db")) {
+      throw std::runtime_error("a project already exists here; open it or choose a different folder");
+    }
     const ProjectManifest manifest{1, name, "project.db", "AI Video Editor v0.1"};
 
     std::filesystem::create_directories(root);

@@ -77,6 +77,10 @@ nlohmann::json EngineApp::handleRequest(const nlohmann::json& request) {
     return generateProposal(params);
   }
 
+  if (method == "ai.proposal.create") {
+    return session_.createProposal(params);
+  }
+
   if (method == "ai.proposal.apply") {
     return applyProposal(params);
   }
@@ -116,6 +120,8 @@ nlohmann::json EngineApp::handleRequest(const nlohmann::json& request) {
   if (method == "export.start") {
     return exportEngine_.start(params);
   }
+
+  if (method == "composition.frame_plan") return ExportEngine::compositionFramePlan(params);
 
   if (method == "export.cancel") {
     return exportEngine_.cancel();
@@ -164,6 +170,8 @@ nlohmann::json EngineApp::executeCommand(const nlohmann::json& params) {
     return session_.removeMedia(params);
   }
 
+  if (params.value("type", std::string{}) == "relink_media") return session_.relinkMedia(params, ffprobeService_);
+
   return session_.executeCommand(params);
 }
 
@@ -189,9 +197,7 @@ nlohmann::json EngineApp::createProject(const nlohmann::json& params) {
       {"path", project.root.string()},
       {"manifestPath", (project.root / "project.aivproj").string()},
   };
-  session_.openDatabase(project.root / project.manifest.database);
-  session_.setActiveProject(activeProject);
-  session_.saveProjectMetadata();
+  session_.openDatabase(project.root / project.manifest.database, activeProject);
   auto state = session_.projectStateJson();
   state["summary"] = project.toJson();
   return state;
@@ -209,25 +215,30 @@ nlohmann::json EngineApp::openProject(const nlohmann::json& params) {
 
   const auto root = std::filesystem::path(path);
   const auto resolvedManifestPath = manifestPath.empty() ? root / "project.aivproj" : std::filesystem::path(manifestPath);
+  if (!std::filesystem::is_regular_file(resolvedManifestPath)) throw std::runtime_error("project manifest not found: " + resolvedManifestPath.string());
   auto manifest = ProjectManifest{};
   if (std::filesystem::exists(resolvedManifestPath)) {
     manifest = ProjectManifest::readFrom(resolvedManifestPath);
   }
   const auto database = root / (manifest.database.empty() ? "project.db" : manifest.database);
+  if (!std::filesystem::is_regular_file(database)) throw std::runtime_error("project database not found: " + database.string());
   const auto projectName = params.value("name", manifest.name.empty() ? root.filename().string() : manifest.name);
-  session_.openDatabase(database);
-  session_.setActiveProject({
+  session_.openDatabase(database, {
       {"name", projectName.empty() ? root.filename().string() : projectName},
       {"path", root.string()},
       {"manifestPath", resolvedManifestPath.string()},
       {"lastOpenedAt", params.value("lastOpenedAt", std::string{})},
       {"lastSavedAt", params.value("lastSavedAt", std::string{})},
   });
-  session_.saveProjectMetadata();
   return session_.projectStateJson();
 }
 
 nlohmann::json EngineApp::saveProjectState(const nlohmann::json& params) {
+  const auto activePath = session_.projectStateJson().at("project").value("path", std::string{});
+  const auto snapshotPath = params.value("project", nlohmann::json::object()).value("path", std::string{});
+  if (!activePath.empty() && !snapshotPath.empty() && std::filesystem::weakly_canonical(activePath) != std::filesystem::weakly_canonical(snapshotPath)) {
+    throw std::runtime_error("snapshot belongs to a different project; reopen that project before saving");
+  }
   session_.replaceState(params, false);
   return session_.projectStateJson();
 }

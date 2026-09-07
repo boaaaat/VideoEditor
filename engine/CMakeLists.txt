@@ -50,6 +50,17 @@ target_link_libraries(ai-video-engine
 )
 
 if(BUILD_TESTING)
+  if(WIN32)
+    add_library(native-title-plugin SHARED ../examples/plugins/native-title/main.cpp)
+    target_include_directories(native-title-plugin PRIVATE ../packages/plugin-sdk/native)
+    target_link_libraries(native-title-plugin PRIVATE nlohmann_json::nlohmann_json)
+    set_target_properties(native-title-plugin PROPERTIES OUTPUT_NAME "native-title"
+      RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/plugins/native-title"
+      RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/plugins/native-title")
+    configure_file(../examples/plugins/native-title/plugin.json "${CMAKE_BINARY_DIR}/plugins/native-title/plugin.json" COPYONLY)
+    add_library(native-plugin-fault SHARED tests/native_plugin_fault.cpp)
+    target_include_directories(native-plugin-fault PRIVATE ../packages/plugin-sdk/native)
+  endif()
   add_executable(engine-core-tests
     tests/engine_core_tests.cpp
   )

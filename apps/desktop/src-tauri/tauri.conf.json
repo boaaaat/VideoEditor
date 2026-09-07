@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "local.ai-video-editor.desktop",
   "build": {
-    "beforeDevCommand": "corepack pnpm --filter @ai-video-editor/desktop dev",
-    "beforeBuildCommand": "corepack pnpm --filter @ai-video-editor/desktop build",
+    "beforeDevCommand": "corepack pnpm --filter @ai-video-editor/mcp build && corepack pnpm --filter @ai-video-editor/desktop dev",
+    "beforeBuildCommand": "corepack pnpm --filter @ai-video-editor/mcp build && corepack pnpm --filter @ai-video-editor/desktop build",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../dist"
   },
@@ -35,7 +35,8 @@
     "icon": ["icons/icon.ico"],
     "resources": {
       "resources/ai-video-engine.exe": "ai-video-engine.exe",
-      "resources/sqlite3.dll": "sqlite3.dll"
+      "resources/sqlite3.dll": "sqlite3.dll",
+      "resources/mcp/": "mcp/"
     }
   }
 }

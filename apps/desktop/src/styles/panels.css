@@ -429,6 +429,18 @@
     #050505;
 }
 
+.editor-settings { display: grid; gap: 16px; }
+.editor-settings fieldset { min-width: 0; margin: 0; padding: 14px; border: 1px solid var(--line); border-radius: 6px; }
+.editor-settings legend { padding: 0 6px; font-weight: 650; }
+.editor-settings p { color: var(--muted); font-size: .84rem; line-height: 1.5; margin: 4px 0 12px; }
+.editor-settings-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.editor-settings-fields label, .editor-settings-select { display: grid; gap: 6px; font-size: .85rem; }
+.editor-settings-fields input, .editor-settings-fields select { width: 100%; min-width: 0; }
+.editor-settings-check { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: .85rem; }
+.editor-settings-check input { width: auto; flex: none; }
+.editor-settings-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.editor-settings .editor-settings-error { color: #ff9289; margin: 0; }
+
 .preview-empty-copy {
   position: relative;
   z-index: 1;
@@ -636,6 +648,16 @@
   align-items: center;
 }
 
+.agent-access-panel { grid-column: 1 / -1; }
+.agent-access-panel .control-stack > .button { justify-self: start; }
+.control-stack > label { display: grid; gap: 6px; color: var(--muted); }
+.control-stack > label > input { width: 100%; }
+.agent-access-heading { display: flex; align-items: flex-start; gap: 14px; }
+.agent-access-heading p { color: var(--muted); margin: 5px 0 0; line-height: 1.5; }
+.connection-badge { margin-left: auto; border-radius: 20px; padding: 4px 12px; border: 1px solid var(--line); color: var(--muted); }
+.connection-badge.connected { color: var(--accent); border-color: var(--accent); }
+.agent-config { margin: 12px 0; padding: 14px; border-radius: 8px; background: var(--bg); overflow: auto; user-select: text; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+
 .preview-control-strip .slider-row {
   grid-template-columns: 62px minmax(58px, 1fr) 58px;
   gap: 7px;
@@ -649,11 +671,11 @@
 
 .color-effects-workspace {
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(300px, 1fr) auto;
   gap: 12px;
   height: 100%;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .color-effects-playback {
@@ -664,6 +686,7 @@
 }
 
 .color-effects-playback .panel-body {
+  height: 100%;
   min-height: 0;
   overflow: hidden;
 }
@@ -838,6 +861,7 @@
 
 .status-item {
   display: grid;
+  min-width: 0;
   gap: 4px;
   padding: 10px;
   border: 1px solid var(--line);
@@ -926,6 +950,11 @@
   background: #1b1b19;
 }
 
+.status-item small,
+.recent-list button small {
+  overflow-wrap: anywhere;
+}
+
 .custom-export-heading {
   display: flex;
   align-items: center;
@@ -957,13 +986,19 @@
   position: fixed;
   inset: 0;
   display: grid;
-  place-items: start center;
-  padding-top: 11vh;
+  place-items: center;
+  padding: 24px 12px;
+  z-index: 500;
   background: rgba(0, 0, 0, 0.52);
 }
 
 .modal {
+  display: grid;
+  grid-template-rows: 44px minmax(0, 1fr);
   width: min(620px, calc(100vw - 24px));
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -980,7 +1015,9 @@
 }
 
 .modal-body {
+  min-height: 0;
   padding: 12px;
+  overflow: auto;
 }
 
 .command-palette {
@@ -1293,3 +1330,34 @@
   gap: 7px;
   color: var(--muted);
 }
+.composition-preview { overflow: hidden; }
+.editor-controls-group { display: contents; border: 0; padding: 0; margin: 0; min-width: 0; }
+.plugin-workspace { display: grid; grid-template-columns: minmax(300px, 1.2fr) minmax(280px, 1fr); gap: 16px; padding: 18px; align-items: start; overflow: auto; height: 100%; }
+.plugin-toolbar { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.plugin-toolbar label { display: grid; gap: 6px; flex: 1; min-width: 140px; }
+.plugin-list { display: grid; gap: 8px; }
+.plugin-card { display: grid; gap: 6px; text-align: left; padding: 14px; width: 100%; border: 1px solid var(--line); border-radius: 8px; background: #20201e; }
+.plugin-card.selected { border-color: var(--accent); background: #252b22; }
+.plugin-card span, .plugin-card small { color: var(--muted); overflow-wrap: anywhere; }
+.plugin-card .plugin-error, .error-message { color: #f1a394; }
+.plugin-permissions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.plugin-permissions span { padding: 4px 7px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); font-size: 12px; }
+.editor-playback-preview > .composition-preview { width: 100%; height: 100%; min-height: 0; }
+.editor-playback-controls:has(> input[type="range"]) { grid-template-rows: auto auto auto minmax(96px, 1fr); }
+.composition-stage { position: absolute; left: 50%; top: 50%; transform-origin: center; overflow: hidden; background: #000; }
+.composition-video-layer { position: absolute; inset: 0; transform-origin: center; }
+.composition-video-layer video, .composition-video-layer img { position: absolute; inset: 0; width: 100%; height: 100%; min-height: 0; object-fit: contain; background: transparent; }
+.composition-warning { position: absolute; inset: 40%; color: #fff; font-size: 24px; }
+.composition-title { position: absolute; white-space: pre; font-family: Arial, sans-serif; line-height: normal; width: max-content; pointer-events: none; }
+.title-editor textarea { width: 100%; padding: 10px; resize: vertical; user-select: text; }
+.title-selector-row, .title-presets { display: flex; gap: 8px; }
+.title-selector-row select { flex: 1; min-width: 0; }
+.title-field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.title-field-grid label, .title-editor fieldset > label { display: grid; gap: 6px; }
+.subtitle-tools { border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.subtitle-tools > summary { cursor: pointer; font-weight: 600; }
+.subtitle-tools[open] > summary { margin-bottom: 12px; }
+.subtitle-sample { white-space: pre-wrap; max-height: 130px; overflow: auto; font: inherit; padding: 10px; background: var(--surface-2); border-radius: 6px; }
+.media-advanced-filters > summary { display: flex; gap: 6px; align-items: center; cursor: pointer; color: var(--muted); padding: 6px 0; }
+.media-advanced-filters[open] .media-filter-row.compact { grid-template-columns: 1fr; gap: 6px; }
+.media-clear-filters { background: transparent; border: 0; color: var(--accent); cursor: pointer; font-size: 12px; padding: 2px 4px; }

@@ -19,6 +19,7 @@ export function Tabs<T extends string>({ items, activeId, onChange }: TabsProps<
         <button
           key={item.id}
           className={item.id === activeId ? "tab tab-active" : "tab"}
+          aria-current={item.id === activeId ? "page" : undefined}
           onClick={() => onChange(item.id)}
           type="button"
         >

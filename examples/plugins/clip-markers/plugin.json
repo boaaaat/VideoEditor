@@ -1,0 +1,13 @@
+{
+  "id": "example.clip-markers",
+  "name": "Clip markers",
+  "version": "1.0.0",
+  "type": "typescript",
+  "entry": "main.js",
+  "description": "Add a named marker at the start of each visible video clip. Running it again updates the same markers.",
+  "permissions": ["timeline.read", "timeline.write", "media.read", "ui.command"],
+  "parameters": [
+    {"id": "prefix", "label": "Marker prefix", "type": "string", "default": "Scene"},
+    {"id": "include-hidden", "label": "Include hidden video tracks", "type": "boolean", "default": false}
+  ]
+}

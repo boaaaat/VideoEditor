@@ -1,6 +1,10 @@
-import type { AiEditProposal, CommandResult, EditorCommand, EngineStatus, ExportStatus, MediaMetadata, PreviewState, Timeline } from "@ai-video-editor/protocol";
+import type { AiEditProposal, CommandResult, EditorCommand, EngineStatus, ExportStatus, MediaMetadata, PreviewState, Timeline, TitleOverlay } from "@ai-video-editor/protocol";
 
 type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+
+function validateBrowserTitle(title: TitleOverlay) {
+  if (!title.text.trim() || title.text.includes("\0") || new TextEncoder().encode(title.text).length > 4000 || !Number.isSafeInteger(title.startUs) || !Number.isSafeInteger(title.durationUs) || !Number.isSafeInteger(title.startUs + title.durationUs) || title.startUs < 0 || title.durationUs <= 0 || !Number.isInteger(title.fontSize) || title.fontSize < 10 || title.fontSize > 300 || ![title.positionX,title.positionY].every((value) => Number.isFinite(value) && value >= 0 && value <= 100) || !/^#[0-9a-f]{6}$/i.test(title.color) || !["title", "caption"].includes(title.kind ?? "title")) throw new Error("Invalid title text, timing, or style");
+}
 
 export interface CommandExecutionEventDetail {
   phase: "start" | "finish" | "undo" | "redo" | "error";
@@ -99,7 +103,17 @@ async function getInvoke(): Promise<TauriInvoke | null> {
   return api.invoke as TauriInvoke;
 }
 
+let pendingEditorRequests = 0;
+export function isEngineEditing() { return pendingEditorRequests > 0; }
+
 export async function engineRpc<T>(method: string, params?: unknown): Promise<T> {
+  const editing = /^(command\.(execute|undo|redo)|project\.(open|create|reset|save_state)|ai\.proposal\.)/.test(method);
+  if (editing) pendingEditorRequests++;
+  try { return await rawEngineRpc<T>(method, params); }
+  finally { if (editing) pendingEditorRequests--; }
+}
+
+async function rawEngineRpc<T>(method: string, params?: unknown): Promise<T> {
   const invoke = await getInvoke();
 
   if (!invoke) {
@@ -110,12 +124,18 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
     if (method === "command.execute") {
       const command = params as EditorCommand;
       const beforeState = browserProjectSnapshot();
+      if (command.type === "update_project_settings") {
+        const state = (browserProjectState ?? {}) as Record<string, unknown>;
+        const settings = { ...state.projectSettings as object, ...command.settings };
+        browserProjectState = { ...state, projectSettings: settings };
+        if (settings.fps) browserTimeline = { ...browserTimeline, fps: settings.fps };
+      }
       const nextTimeline = applyBrowserTimelineCommand(browserTimeline, command);
       browserTimeline = nextTimeline;
       const afterState = browserProjectSnapshot();
       const commandId = `browser-${command.type}-${Date.now()}`;
       recordBrowserCommand(command, commandId, beforeState, afterState);
-      return { ok: true, commandId, commandType: command.type, data: { timeline: browserTimeline }, undoCount: browserUndoStack.length, redoCount: browserRedoStack.length } as T;
+      return { ok: true, commandId, commandType: command.type, data: command.type === "update_project_settings" ? browserProjectSnapshot() : { timeline: browserTimeline }, undoCount: browserUndoStack.length, redoCount: browserRedoStack.length } as T;
     }
 
     if (method === "command.undo") {
@@ -236,49 +256,10 @@ export async function engineRpc<T>(method: string, params?: unknown): Promise<T>
     }
 
     if (method === "export.start") {
-      const request = params as Partial<ExportStatus> & { durationUs?: number } | undefined;
-      browserExportStatus = {
-        ...browserExportStatus,
-        jobId: `browser-export-${Date.now()}`,
-        outputPath: request?.outputPath,
-        state: "running",
-        progress: 0.1,
-        width: request?.width,
-        height: request?.height,
-        fps: request?.fps,
-        durationUs: request?.durationUs,
-        codec: request?.codec,
-        container: request?.container,
-        quality: request?.quality,
-        bitrateMbps: request?.bitrateMbps,
-        audioEnabled: request?.audioEnabled,
-        colorMode: request?.colorMode,
-        logs: ["Browser preview accepted export settings; file rendering is available in the desktop app."]
-      };
+      browserExportStatus = { jobId: null, state: "error", progress: 0, logs: ["File rendering requires the desktop app."] };
       return browserExportStatus as T;
     }
-
-    if (method === "export.cancel") {
-      browserExportStatus = {
-        ...browserExportStatus,
-        state: "cancelled",
-        logs: ["Browser preview export cancelled."]
-      };
-      return browserExportStatus as T;
-    }
-
-    if (method === "export.status") {
-      if (browserExportStatus.state === "running") {
-        const nextProgress = Math.min(1, browserExportStatus.progress + 0.12);
-        browserExportStatus = {
-          ...browserExportStatus,
-          state: nextProgress >= 1 ? "completed" : "running",
-          progress: nextProgress,
-          logs: [...browserExportStatus.logs, nextProgress >= 1 ? "Export completed." : `Progress ${Math.round(nextProgress * 100)}%`]
-        };
-      }
-      return browserExportStatus as T;
-    }
+    if (method === "export.status" || method === "export.cancel") return browserExportStatus as T;
 
     return {} as T;
   }
@@ -416,7 +397,79 @@ function cloneJson<T>(value: T): T {
 }
 
 function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand): Timeline {
+  if (command.type === "execute_batch") {
+    if (!command.commands.length || command.commands.length > 500) throw new Error("A batch needs 1 to 500 editing commands");
+    return command.commands.reduce((current, item) => {
+      if (["execute_batch", "import_media", "relink_media", "remove_media", "export_timeline", "update_project_settings"].includes(item.type)) throw new Error("A batch only supports timeline editing commands");
+      return applyBrowserTimelineCommand(current, item);
+    }, timeline);
+  }
+  if ("clipId" in command && command.clipId && command.type !== "add_clip") {
+    const track = timeline.tracks.find((item) => item.clips.some((clip) => clip.id === command.clipId));
+    if (!track) throw new Error("Clip not found");
+    if (track.locked) throw new Error(`${track.name} is locked`);
+  }
+  if (["add_clip", "move_clip", "delete_track"].includes(command.type) && "trackId" in command) {
+    const track = timeline.tracks.find((item) => item.id === command.trackId);
+    if (!track) throw new Error("Track not found");
+    if (track.locked) throw new Error(`${track.name} is locked`);
+  }
+  if ("startUs" in command && command.startUs !== undefined && command.startUs < 0) throw new Error("Start cannot be negative");
+  if (command.type === "add_track" && command.trackId && timeline.tracks.some((track) => track.id === command.trackId)) throw new Error("Track ID already exists");
   switch (command.type) {
+    case "set_clip_source_range": {
+      const clip = timeline.tracks.flatMap((track) => track.clips).find((item) => item.id === command.clipId)!;
+      const media = (browserProjectState as { mediaAssets?: { id: string; metadata?: { durationUs?: number; isStillImage?: boolean } }[] } | null)?.mediaAssets?.find((item) => item.id === clip.mediaId);
+      if (command.inUs < 0 || command.outUs <= command.inUs || (!media?.metadata?.isStillImage && media?.metadata?.durationUs && command.outUs > media.metadata.durationUs)) throw new Error("Source range is outside media bounds");
+      return updateBrowserClip(timeline, clip.id, (current) => ({ ...(current.inUs !== command.inUs || current.outUs !== command.outUs ? resetBrowserFadeRanges(current) : current), inUs: command.inUs, outUs: command.outUs }));
+    }
+    case "crossfade_clips": {
+      const track = timeline.tracks.find((item) => item.clips.some((clip) => clip.id === command.firstClipId));
+      const first = track?.clips.find((clip) => clip.id === command.firstClipId);
+      const second = track?.clips.find((clip) => clip.id === command.secondClipId);
+      if (!track || track.kind !== "video" || track.locked || !first || !second || first.id === second.id || Math.abs(first.startUs + getBrowserClipDisplayDurationUs(first) - second.startUs) > 1 || command.durationUs <= 0 || command.durationUs >= Math.min(getBrowserClipDisplayDurationUs(first), getBrowserClipDisplayDurationUs(second))) throw new Error("Crossfade needs adjacent clips on an unlocked video track and a duration shorter than both clips");
+      let next = updateBrowserTrackClips(timeline, track.id, (clips) => clips.map((clip) => clip.id === first.id || clip.id === second.id ? resetBrowserFadeRanges(clip) : clip));
+      next = applyBrowserTimelineCommand(next, { type: "apply_transform", clipId: first.id, transform: { fadeOutUs: 0 } });
+      next = applyBrowserTimelineCommand(next, { type: "apply_audio_adjustment", clipId: first.id, adjustment: { fadeOutUs: command.durationUs } });
+      next = applyBrowserTimelineCommand(next, { type: "apply_transform", clipId: second.id, transform: { enabled: true, fadeInUs: command.durationUs } });
+      next = applyBrowserTimelineCommand(next, { type: "apply_audio_adjustment", clipId: second.id, adjustment: { fadeInUs: command.durationUs } });
+      return updateBrowserTrackClips(next, track.id, (clips) => clips.map((clip) => clip.startUs >= second.startUs ? { ...clip, startUs: clip.startUs - command.durationUs } : clip));
+    }
+    case "import_captions": {
+      if (!command.captions.length || command.captions.length > 5000 || !["append", "replace"].includes(command.mode ?? "append")) throw new Error("Import 1–5,000 captions with append or replace mode");
+      const captions: TitleOverlay[] = command.captions.map((cue) => ({ fontSize: 36, color: "#ffffff", positionX: 50, positionY: 92, background: true, ...command.style, ...cue, id: crypto.randomUUID(), kind: "caption" }));
+      for (const caption of captions) validateBrowserTitle(caption);
+      return { ...timeline, titles: [...(timeline.titles ?? []).filter((title) => command.mode !== "replace" || title.kind !== "caption"), ...captions].sort((a, b) => a.startUs - b.startUs) };
+    }
+    case "add_title":
+    case "update_title":
+    case "delete_title": {
+      const titles = timeline.titles ?? [];
+      const titleId = command.titleId ?? crypto.randomUUID();
+      const existing = titles.find((title) => title.id === titleId);
+      if (command.type === "add_title" && existing) throw new Error("Title ID already exists");
+      if (command.type !== "add_title" && !existing) throw new Error("Title not found");
+      const remaining = titles.filter((title) => title.id !== titleId);
+      if (command.type === "delete_title") return { ...timeline, titles: remaining };
+      const { type: _type, titleId: _id, history: _history, ...values } = command;
+      const next = { id: titleId, text: "Title", startUs: 0, durationUs: 3_000_000, fontSize: 48, color: "#ffffff", positionX: 50, positionY: 80, background: true, ...existing, ...values };
+      validateBrowserTitle(next);
+      return { ...timeline, titles: [...remaining, next].sort((a, b) => a.startUs - b.startUs) };
+    }
+    case "add_marker":
+    case "update_marker":
+    case "delete_marker": {
+      const markers = timeline.markers ?? [];
+      const markerId = command.markerId ?? crypto.randomUUID();
+      const existing = markers.find((marker) => marker.id === markerId);
+      if (command.type === "add_marker" && existing) throw new Error("Marker ID already exists");
+      if (command.type !== "add_marker" && !existing) throw new Error("Marker not found");
+      const remaining = markers.filter((marker) => marker.id !== markerId);
+      if (command.type === "delete_marker") return { ...timeline, markers: remaining };
+      const next = { id: markerId, timeUs: command.timeUs ?? existing?.timeUs ?? 0, name: command.name ?? existing?.name ?? "Marker", color: command.color ?? existing?.color ?? "#f5c76b" };
+      if (!Number.isSafeInteger(next.timeUs) || next.timeUs < 0 || !next.name || next.name.length > 200 || !/^#[0-9a-f]{6}$/i.test(next.color)) throw new Error("Invalid marker name, time, or color");
+      return { ...timeline, markers: [...remaining, next].sort((a, b) => a.timeUs - b.timeUs) };
+    }
     case "add_track": {
       const index = clampInteger(command.index ?? timeline.tracks.length, 0, timeline.tracks.length);
       const sameKindCount = timeline.tracks.filter((track) => track.kind === command.kind).length + 1;
@@ -466,10 +519,11 @@ function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand)
           inUs: command.inUs ?? 0,
           outUs: command.outUs ?? Math.max((command.inUs ?? 0) + 1_000_000, 8_000_000),
           speedPercent: normalizeBrowserSpeed(command.speedPercent),
-          color: { brightness: 0, contrast: 0, saturation: 1, temperature: 0, tint: 0 },
-          audio: { gainDb: 0, muted: false, fadeInUs: 0, fadeOutUs: 0, normalize: false, cleanup: false },
-          transform: { enabled: true, scale: 1, positionX: 0, positionY: 0, rotation: 0, opacity: 1 },
-          effects: []
+          color: command.color ?? { brightness: 0, contrast: 0, saturation: 1, temperature: 0, tint: 0 },
+          audio: command.audio ?? { gainDb: 0, muted: false, fadeInUs: 0, fadeOutUs: 0, normalize: false, cleanup: false },
+          transform: command.transform ?? { enabled: true, scale: 1, positionX: 0, positionY: 0, rotation: 0, opacity: 1 },
+          effects: command.effects ?? [],
+          lut: command.lut ?? undefined
         }
       ]);
     }
@@ -501,10 +555,24 @@ function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand)
       if (!clip || track?.locked) {
         return timeline;
       }
+      const sourceInUs = clip.inUs + Math.round((command.timeUs - clip.startUs) * normalizeBrowserSpeed(clip.speedPercent) / 100);
+      const state = browserProjectState as { mediaAssets?: Array<{ id: string; metadata?: { durationUs?: number; isStillImage?: boolean } }> } | null;
+      const metadata = state?.mediaAssets?.find((asset) => asset.id === clip.mediaId)?.metadata;
+      const durationUs = metadata?.isStillImage ? undefined : metadata?.durationUs;
+      if (command.timeUs < 0 || (command.edge === "start" ? sourceInUs < 0 || sourceInUs >= clip.outUs : command.timeUs <= clip.inUs || Boolean(durationUs && command.timeUs > durationUs))) {
+        throw new Error("Trim is outside the source range");
+      }
       return updateBrowserClip(timeline, command.clipId, (clip) =>
         command.edge === "start"
-          ? { ...clip, inUs: Math.max(0, clip.inUs + Math.max(0, command.timeUs - clip.startUs)), startUs: Math.max(0, command.timeUs) }
-          : { ...clip, outUs: Math.max(clip.inUs + 250_000, command.timeUs) }
+          ? {
+              ...(sourceInUs !== clip.inUs ? resetBrowserFadeRanges(clip) : clip),
+              inUs: Math.max(
+                0,
+                clip.inUs + Math.round((Math.max(0, command.timeUs) - clip.startUs) * (normalizeBrowserSpeed(clip.speedPercent) / 100))
+              ),
+              startUs: Math.max(0, command.timeUs)
+            }
+          : { ...(clip.outUs !== command.timeUs ? resetBrowserFadeRanges(clip) : clip), outUs: command.timeUs }
       );
     }
     case "split_clip": {
@@ -515,8 +583,13 @@ function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand)
         return timeline;
       }
       const splitInUs = clip.inUs + Math.round((command.playheadUs - clip.startUs) * (normalizeBrowserSpeed(clip.speedPercent) / 100));
-      const secondClip = { ...clip, id: `clip_${Date.now()}`, startUs: command.playheadUs, inUs: splitInUs };
-      return updateBrowserTrackClips(timeline, clip.trackId, (clips) => clips.flatMap((item) => (item.id === clip.id ? [{ ...item, outUs: splitInUs }, secondClip] : [item])));
+      if (splitInUs <= clip.inUs || splitInUs >= clip.outUs) return timeline;
+      const duration = getBrowserClipDisplayDurationUs(clip);
+      const delta = command.playheadUs - clip.startUs;
+      const retain = <T extends { fadeInUs?: number; fadeOutUs?: number; fadeOffsetUs?: number; fadeDurationUs?: number }>(value: T | undefined, offset: number): T | undefined => value && (value.fadeInUs || value.fadeOutUs || value.fadeDurationUs) ? { ...value, fadeDurationUs: value.fadeDurationUs || duration, fadeOffsetUs: (value.fadeOffsetUs ?? 0) + offset } : value;
+      const firstClip = { ...clip, outUs: splitInUs, audio: retain(clip.audio, 0), transform: retain(clip.transform, 0) };
+      const secondClip = { ...clip, id: crypto.randomUUID(), startUs: command.playheadUs, inUs: splitInUs, audio: retain(clip.audio, delta), transform: retain(clip.transform, delta) };
+      return updateBrowserTrackClips(timeline, clip.trackId, (clips) => clips.flatMap((item) => (item.id === clip.id ? [firstClip, secondClip] : [item])));
     }
     case "delete_clip": {
       const clip = timeline.tracks.flatMap((track) => track.clips).find((item) => item.id === command.clipId);
@@ -536,27 +609,34 @@ function applyBrowserTimelineCommand(timeline: Timeline, command: EditorCommand)
         return timeline;
       }
       const deletedDurationUs = getBrowserClipDisplayDurationUs(deletedClip);
-      return updateBrowserTrackClips(timeline, deletedClip.trackId, (clips) =>
-        clips
-          .filter((clip) => clip.id !== deletedClip.id)
-          .map((clip) => (clip.startUs > deletedClip.startUs ? { ...clip, startUs: Math.max(0, clip.startUs - deletedDurationUs) } : clip))
-      );
+      const deletedEndUs = deletedClip.startUs + deletedDurationUs;
+      const affectedTracks = timeline.tracks.filter((item) => command.trackMode === "all_tracks" || item.id === deletedClip.trackId);
+      if (affectedTracks.some((item) => item.locked && item.clips.some((clip) => clip.startUs >= deletedEndUs))) throw new Error("Ripple delete would move a locked track");
+      return { ...timeline, tracks: timeline.tracks.map((item) => affectedTracks.includes(item) ? { ...item, clips: item.clips.filter((clip) => clip.id !== deletedClip.id).map((clip) => clip.startUs >= deletedEndUs ? { ...clip, startUs: clip.startUs - deletedDurationUs } : clip) } : item) };
     }
     case "apply_color_adjustment":
       return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, color: { ...clip.color, ...command.adjustment } }));
     case "apply_lut":
       return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, lut: command.lutId ? { lutId: command.lutId, strength: command.strength } : undefined }));
     case "apply_audio_adjustment":
-      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, audio: { gainDb: 0, muted: false, fadeInUs: 0, fadeOutUs: 0, normalize: false, cleanup: false, ...clip.audio, ...command.adjustment } }));
+      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, audio: { gainDb: 0, muted: false, fadeInUs: 0, fadeOutUs: 0, normalize: false, cleanup: false, ...clip.audio, ...command.adjustment, ...browserFadeRange(clip.audio, command.adjustment) } }));
     case "apply_clip_speed":
-      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, speedPercent: normalizeBrowserSpeed(command.speedPercent) }));
+      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...(normalizeBrowserSpeed(command.speedPercent) !== normalizeBrowserSpeed(clip.speedPercent) ? resetBrowserFadeRanges(clip) : clip), speedPercent: normalizeBrowserSpeed(command.speedPercent) }));
     case "apply_transform":
-      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, transform: { enabled: true, scale: 1, positionX: 0, positionY: 0, rotation: 0, opacity: 1, ...clip.transform, ...command.transform } }));
+      return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, transform: { enabled: true, scale: 1, positionX: 0, positionY: 0, rotation: 0, opacity: 1, ...clip.transform, ...command.transform, ...browserFadeRange(clip.transform, command.transform) } }));
     case "apply_effect_stack":
       return updateBrowserClip(timeline, command.clipId, (clip) => ({ ...clip, effects: command.effects }));
     default:
       return timeline;
   }
+}
+
+function resetBrowserFadeRanges(clip: Timeline["tracks"][number]["clips"][number]) {
+  return { ...clip, audio: clip.audio ? { ...clip.audio, fadeOffsetUs: 0, fadeDurationUs: 0 } : undefined, transform: clip.transform ? { ...clip.transform, fadeOffsetUs: 0, fadeDurationUs: 0 } : undefined };
+}
+
+function browserFadeRange(before: {fadeInUs?: number; fadeOutUs?: number} | undefined, next: {fadeInUs?: number; fadeOutUs?: number}) {
+  return (next.fadeInUs !== undefined && next.fadeInUs !== (before?.fadeInUs ?? 0)) || (next.fadeOutUs !== undefined && next.fadeOutUs !== (before?.fadeOutUs ?? 0)) ? {fadeOffsetUs: 0, fadeDurationUs: 0} : {};
 }
 
 function updateBrowserTrackClips(timeline: Timeline, trackId: string, updater: (clips: Timeline["tracks"][number]["clips"]) => Timeline["tracks"][number]["clips"]): Timeline {

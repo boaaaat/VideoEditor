@@ -4,12 +4,14 @@ import type { AudioAdjustment, ProjectSettings, Timeline, TimelineClip } from "@
 import { defaultAudioAdjustment } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
+import { NumberField } from "../../components/NumberField";
 import { Slider } from "../../components/Slider";
 import { Toggle } from "../../components/Toggle";
+import { useAdjustmentHistory } from "../../features/commands/useAdjustmentHistory";
 import { executeCommand } from "../../features/commands/commandClient";
 import type { LogStatus } from "../../features/logging/appLog";
 import type { MediaAsset } from "../../features/media/mediaTypes";
-import { getMediaSourceUrl, getMediaWaveformDataUrl } from "../../features/media/mediaTypes";
+import { getMediaAudioPreviewSourceUrl, getMediaWaveformDataUrl } from "../../features/media/mediaTypes";
 
 interface AudioTabProps {
   timeline: Timeline;
@@ -51,10 +53,13 @@ export function AudioTab({
   const [selectedClipId, setSelectedClipId] = useState("");
   const selectedRow = audioClips.find((row) => row.clip.id === selectedClipId) ?? audioClips[0];
   const selectedClip = selectedRow?.clip;
+  const historyFor = useAdjustmentHistory();
+  const controlsDisabled = !selectedClip || Boolean(timeline.tracks.find((track) => track.id === selectedClip.trackId)?.locked);
   const selectedAsset = selectedRow?.asset;
   const clipAudio = normalizeAudioAdjustment(selectedClip?.audio);
   const [waveformSrc, setWaveformSrc] = useState("");
   const [audioSrc, setAudioSrc] = useState("");
+  const [waveformMessage, setWaveformMessage] = useState("Select an audio clip to see its waveform.");
 
   useEffect(() => {
     if (!selectedClipId && audioClips[0]) {
@@ -71,12 +76,14 @@ export function AudioTab({
       return;
     }
 
+    setWaveformMessage("Generating waveform…");
     const durationUs = Math.max(1, selectedClip.outUs - selectedClip.inUs);
     void getMediaWaveformDataUrl(selectedAsset, selectedClip.inUs, durationUs).then((url) => {
       if (!cancelled) {
-        setWaveformSrc(url);
+        setWaveformSrc(url ?? "");
+        if (!url) setWaveformMessage("Waveform unavailable for this source.");
       }
-    });
+    }).catch(() => { if (!cancelled) setWaveformMessage("Waveform unavailable for this source."); });
 
     return () => {
       cancelled = true;
@@ -89,15 +96,15 @@ export function AudioTab({
     if (!selectedAsset) {
       return;
     }
-    void getMediaSourceUrl(selectedAsset.path).then((url) => {
+    void getMediaAudioPreviewSourceUrl(selectedAsset, clipAudio.streamIndex ?? 0, clipAudio.normalize || Boolean(projectSettings.normalizeAudio), clipAudio.cleanup || Boolean(projectSettings.cleanupAudio)).then((url) => {
       if (!cancelled) {
         setAudioSrc(url);
       }
-    });
+    }).catch((error) => { if (!cancelled) { setPlaying(false); setStatusMessage(error instanceof Error ? error.message : "Audio preview failed", { level: "error", source: "audio" }); } });
     return () => {
       cancelled = true;
     };
-  }, [selectedAsset]);
+  }, [selectedAsset, clipAudio.streamIndex, clipAudio.normalize, clipAudio.cleanup, projectSettings.normalizeAudio, projectSettings.cleanupAudio]);
 
   useEffect(() => {
     const element = audioRef.current;
@@ -109,13 +116,19 @@ export function AudioTab({
       element.currentTime = mediaTimeSeconds;
     }
     element.playbackRate = effectivePlaybackRate(selectedClip, previewSpeedPercent);
-    element.volume = projectSettings.audioEnabled && !clipAudio.muted ? Math.min(1, dbToLinear((projectSettings.masterGainDb ?? 0) + clipAudio.gainDb) * (previewVolumePercent / 100)) : 0;
-    if (playing) {
+    const clipTime = Math.max(0, playheadUs - selectedClip.startUs) + (clipAudio.fadeOffsetUs ?? 0);
+    const clipDuration = getClipDisplayDurationUs(selectedClip);
+    const fadeDuration = clipAudio.fadeDurationUs || clipDuration;
+    const fadeIn = clipAudio.fadeInUs > 0 ? Math.min(1, clipTime / Math.min(clipAudio.fadeInUs, fadeDuration)) : 1;
+    const fadeOut = clipAudio.fadeOutUs > 0 ? Math.min(1, Math.max(0, fadeDuration - clipTime) / Math.min(clipAudio.fadeOutUs, fadeDuration)) : 1;
+    const trackMuted = timeline.tracks.find((track) => track.id === selectedClip.trackId)?.muted;
+    element.volume = projectSettings.audioEnabled && !clipAudio.muted && !trackMuted ? Math.min(1, dbToLinear((projectSettings.masterGainDb ?? 0) + clipAudio.gainDb) * (previewVolumePercent / 100) * fadeIn * fadeOut) : 0;
+    if (playing && playheadUs >= selectedClip.startUs && playheadUs < selectedClip.startUs + clipDuration) {
       void element.play().catch(() => setPlaying(false));
     } else {
       element.pause();
     }
-  }, [audioSrc, clipAudio.gainDb, clipAudio.muted, playheadUs, playing, previewSpeedPercent, previewVolumePercent, projectSettings.audioEnabled, projectSettings.masterGainDb, selectedClip, setPlaying]);
+  }, [audioSrc, clipAudio.gainDb, clipAudio.muted, clipAudio.fadeInUs, clipAudio.fadeOutUs, playheadUs, playing, previewSpeedPercent, previewVolumePercent, projectSettings.audioEnabled, projectSettings.masterGainDb, selectedClip, setPlaying, timeline.tracks]);
 
   useEffect(() => {
     const element = audioRef.current;
@@ -127,11 +140,14 @@ export function AudioTab({
         return;
       }
       const sourceOffsetUs = Math.max(0, Math.round(audioRef.current.currentTime * 1_000_000) - selectedClip.inUs);
-      setPlayheadUs(selectedClip.startUs + Math.round(sourceOffsetUs / getClipSpeedFactor(selectedClip)));
+      const endUs = selectedClip.startUs + getClipDisplayDurationUs(selectedClip);
+      const timeUs = selectedClip.startUs + Math.round(sourceOffsetUs / getClipSpeedFactor(selectedClip));
+      setPlayheadUs(Math.min(endUs, timeUs));
+      if (timeUs >= endUs) setPlaying(false);
     }
     element.addEventListener("timeupdate", onTimeUpdate);
     return () => element.removeEventListener("timeupdate", onTimeUpdate);
-  }, [playing, selectedClip, setPlayheadUs]);
+  }, [playing, selectedClip, setPlaying, setPlayheadUs]);
 
   function seekWaveform(event: ReactMouseEvent<HTMLDivElement>) {
     if (!selectedClip) {
@@ -150,7 +166,7 @@ export function AudioTab({
       return;
     }
 
-    void executeCommand({ type: "apply_audio_adjustment", clipId: selectedClip.id, adjustment: next, history: { mode: "replace", group: `audio:${selectedClip.id}` } }).then((result) => {
+    void executeCommand({ type: "apply_audio_adjustment", clipId: selectedClip.id, adjustment: next, history: historyFor(`audio:${selectedClip.id}:${Object.keys(next).join(",")}`) }).then((result) => {
       const nextTimeline = (result.data as { timeline?: Timeline } | undefined)?.timeline;
       if (result.ok && nextTimeline?.tracks) {
         setTimeline(nextTimeline);
@@ -193,44 +209,36 @@ export function AudioTab({
           <span>{selectedClip ? formatClipRange(selectedClip) : "Add audio-capable media to the timeline."}</span>
         </div>
         <div className="audio-playback-controls">
-          <Button icon={playing ? <Pause size={16} /> : <Play size={16} />} onClick={() => setPlaying((value) => !value)} disabled={!selectedClip || !audioSrc}>
+          <Button icon={playing ? <Pause size={16} /> : <Play size={16} />} onClick={() => { if (selectedClip && (playheadUs < selectedClip.startUs || playheadUs >= selectedClip.startUs + getClipDisplayDurationUs(selectedClip))) setPlayheadUs(selectedClip.startUs); setPlaying((value) => !value); }} disabled={!selectedClip || !audioSrc}>
             {playing ? "Pause" : "Play"}
           </Button>
           <span>{selectedClip ? formatSeconds(playheadUs) : "0.00s"}</span>
         </div>
         <div className="waveform-preview waveform-preview-large seekable" onClick={seekWaveform}>
-          {waveformSrc ? <img src={waveformSrc} alt="" /> : <FallbackWaveform />}
+          {waveformSrc ? <img src={waveformSrc} alt="Audio waveform" /> : <span className="muted-line">{waveformMessage}</span>}
           {selectedClip ? <span className="audio-waveform-playhead" style={{ left: `${Math.min(100, Math.max(0, ((playheadUs - selectedClip.startUs) / Math.max(1, getClipDisplayDurationUs(selectedClip))) * 100))}%` }} /> : null}
         </div>
         <audio ref={audioRef} src={audioSrc} preload="auto" />
       </Panel>
 
       <Panel title="Clip Processing">
+        <fieldset className="editor-controls-group" disabled={controlsDisabled}>
         <div className="control-stack">
           <Slider label="Gain" value={clipAudio.gainDb} min={-24} max={12} step={1} onChange={(event) => {
             const value = Number(event.target.value);
             updateSelectedClipAudio({ gainDb: value }, `Clip gain ${value} dB`);
           }} />
           <label>
-            Fade in
-            <input
-              type="number"
-              min={0}
-              step={0.1}
-              value={formatSecondsInput(clipAudio.fadeInUs)}
-              onChange={(event) => updateSelectedClipAudio({ fadeInUs: secondsToUs(event.target.valueAsNumber) }, "Clip fade in changed")}
-            />
+            Source audio stream
+            <select value={clipAudio.streamIndex ?? 0} onChange={(event) => updateSelectedClipAudio({ streamIndex: Number(event.target.value) }, "Audio stream changed")}>
+              {(selectedAsset?.metadata?.audioStreams?.length ? selectedAsset.metadata.audioStreams : [{ index: 0, title: "Audio 1", codec: "", channels: 0 }]).map((stream) => <option key={stream.index} value={stream.index}>{stream.title || `Audio ${stream.index + 1}`}{stream.channels ? ` · ${stream.channels} channels` : ""}</option>)}
+            </select>
           </label>
-          <label>
-            Fade out
-            <input
-              type="number"
-              min={0}
-              step={0.1}
-              value={formatSecondsInput(clipAudio.fadeOutUs)}
-              onChange={(event) => updateSelectedClipAudio({ fadeOutUs: secondsToUs(event.target.valueAsNumber) }, "Clip fade out changed")}
-            />
-          </label>
+          {clipAudio.fadeDurationUs ? <p className="muted">Fades continue through the original split. Changing a fade applies it to this segment.</p> : null}
+          <NumberField label="Fade in (seconds)" value={clipAudio.fadeInUs / 1_000_000} min={0} max={selectedClip ? getClipDisplayDurationUs(selectedClip) / 1_000_000 : 0} step={.1}
+            onCommit={(value) => updateSelectedClipAudio({ fadeInUs: Math.round(value * 1_000_000) }, "Clip fade in changed")} />
+          <NumberField label="Fade out (seconds)" value={clipAudio.fadeOutUs / 1_000_000} min={0} max={selectedClip ? getClipDisplayDurationUs(selectedClip) / 1_000_000 : 0} step={.1}
+            onCommit={(value) => updateSelectedClipAudio({ fadeOutUs: Math.round(value * 1_000_000) }, "Clip fade out changed")} />
           <Toggle label="Mute clip" checked={clipAudio.muted} onChange={(event) => updateSelectedClipAudio({ muted: event.target.checked }, event.target.checked ? "Clip muted" : "Clip unmuted")} />
           <Toggle label="Normalize clip" checked={clipAudio.normalize} onChange={(event) => updateSelectedClipAudio({ normalize: event.target.checked }, event.target.checked ? "Clip normalization on" : "Clip normalization off")} />
           <Toggle label="Cleanup clip" checked={clipAudio.cleanup} onChange={(event) => updateSelectedClipAudio({ cleanup: event.target.checked }, event.target.checked ? "Clip cleanup on" : "Clip cleanup off")} />
@@ -243,6 +251,8 @@ export function AudioTab({
             Reset
           </Button>
         </div>
+        </fieldset>
+        {selectedClip && controlsDisabled ? <span className="muted-line">Unlock this clip’s track to make adjustments.</span> : null}
       </Panel>
 
       <Panel title="Project Mix">
@@ -258,6 +268,7 @@ export function AudioTab({
       </Panel>
 
       <Panel title="Actions">
+        <fieldset className="editor-controls-group" disabled={controlsDisabled}>
         <div className="audio-action-grid">
           <Button icon={<Headphones size={16} />} onClick={() => updateSelectedClipAudio({ normalize: true }, "Clip normalization on")}>
             Normalize
@@ -269,18 +280,9 @@ export function AudioTab({
             Reset Clip
           </Button>
         </div>
+        </fieldset>
       </Panel>
     </div>
-  );
-}
-
-function FallbackWaveform() {
-  return (
-    <>
-      {Array.from({ length: 48 }).map((_, index) => (
-        <span key={index} style={{ height: `${18 + ((index * 17) % 48)}px` }} />
-      ))}
-    </>
   );
 }
 
@@ -311,21 +313,9 @@ function formatSeconds(valueUs: number) {
   return `${(valueUs / 1_000_000).toFixed(2)}s`;
 }
 
-function formatSecondsInput(valueUs: number) {
-  return Number((valueUs / 1_000_000).toFixed(1));
-}
-
-function secondsToUs(value: number) {
-  return Number.isFinite(value) && value > 0 ? Math.round(value * 1_000_000) : 0;
-}
-
-function normalizeClipSpeedPercent(value: unknown) {
-  const numeric = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(numeric) ? Math.min(400, Math.max(25, Math.round(numeric))) : 100;
-}
-
 function getClipSpeedFactor(clip: TimelineClip) {
-  return normalizeClipSpeedPercent(clip.speedPercent) / 100;
+  const speed = clip.speedPercent ?? 100;
+  return (Number.isFinite(speed) ? Math.min(400, Math.max(25, speed)) : 100) / 100;
 }
 
 function getClipDisplayDurationUs(clip: TimelineClip) {

@@ -1,5 +1,15 @@
 # AI Video Editor
 
+The editing workspace includes precise trimming, multiple video/audio tracks, picture-in-picture transforms, crossfades, titles and captions, markers, still images, and atomic undoable edits. AI agents can control the open desktop session through a standard MCP server. The editor automatically registers with the Codex app and remembers agent access across launches; see [MCP setup and tool contracts](docs/mcp.md).
+
+Import and export SRT/WebVTT captions from **Titles and captions**; see [subtitle interchange](docs/subtitles.md). The **Plugins** tab installs and runs JavaScript or trusted native packages with reviewable edit proposals; see the [plugin API and examples](docs/plugin-api.md).
+
+The paused monitor and MCP `timeline_frame` render the timeline through the export compositor, including layers, effects, color, fades, and text. Interactive playback currently uses a draft preview; exported video remains the check for final motion and audio.
+
+Imports validate source files before adding them. Missing media can be relinked without losing timeline edits, with one-step undo. MCP agents can use `media_check` and `media_relink` for the same recovery workflow, or import independent project copies. Splitting a clip preserves its audio/video fade progression, including cuts inside a fade.
+
+Open **Settings** for canvas dimensions, frame rate, project audio, default media copying, and autosave timing. Project changes are undoable; import and autosave preferences are saved on this computer. The copy preference applies to manual imports and file drops; MCP imports use their explicit `copyToProject` option.
+
 A Windows-first video editor prototype with a simple React/Tauri surface and a C++ editor engine sidecar underneath.
 
 The v0.1 goal is a clean manual editor that can grow into an AI-ready professional engine:

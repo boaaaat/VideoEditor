@@ -1,6 +1,7 @@
 #pragma once
 
 #include <nlohmann/json.hpp>
+#include "timeline/TitleOverlay.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -21,6 +22,7 @@ struct ExportMediaAsset {
   std::string path;
   std::string kind = "video";
   bool hasAudio = false;
+  bool isStillImage = false;
 };
 
 struct ExportClipEffect {
@@ -61,8 +63,14 @@ struct ExportTimelineClip {
   double positionY = 0.0;
   double rotation = 0.0;
   double opacity = 1.0;
+  std::int64_t videoFadeInUs = 0;
+  std::int64_t videoFadeOutUs = 0;
   std::vector<ExportClipEffect> effects;
   double speedPercent = 100.0;
+  std::int64_t audioFadeOffsetUs = 0;
+  std::int64_t audioFadeDurationUs = 0;
+  std::int64_t videoFadeOffsetUs = 0;
+  std::int64_t videoFadeDurationUs = 0;
 };
 
 struct ExportTimelineSegment {
@@ -75,6 +83,7 @@ struct ExportTimelineSegment {
 };
 
 struct ExportRequestTimeline {
+  std::vector<TitleOverlay> titles;
   std::vector<ExportMediaAsset> media;
   std::vector<ExportTimelineClip> clips;
 };
@@ -86,7 +95,7 @@ struct ExportEncoderOptions {
   int cq = 20;
   int maxBitrateMbps = 32;
   int lookaheadDepth = 16;
-  int lookaheadLevel = 2;
+  int lookaheadLevel = 0;
   std::string multipass = "qres";
   bool spatialAq = true;
   bool temporalAq = true;
@@ -120,6 +129,7 @@ struct ExportEncoderOptions {
 };
 
 struct ExportRequest {
+  std::int64_t rangeStartUs = 0;
   std::string outputPath;
   std::string resolution = "1080p";
   int width = 1920;
@@ -141,6 +151,8 @@ struct ExportRequest {
 };
 
 struct ExportJob {
+  std::string resourceDirectory;
+  std::int64_t rangeStartUs = 0;
   std::string id;
   std::string outputPath;
   std::string state = "running";
@@ -188,6 +200,8 @@ struct ExportJob {
         {"height", height},
         {"fps", fps},
         {"durationUs", durationUs},
+        {"rangeStartUs", rangeStartUs},
+        {"rangeEndUs", rangeStartUs + durationUs},
         {"codec", codec},
         {"container", container},
         {"quality", quality},

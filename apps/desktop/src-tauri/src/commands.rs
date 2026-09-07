@@ -29,6 +29,62 @@ pub fn preview_url() -> String {
 }
 
 #[tauri::command]
+pub fn save_subtitle_file(path: String, content: String, overwrite: bool) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    if !path
+        .extension()
+        .and_then(|v| v.to_str())
+        .is_some_and(|v| v.eq_ignore_ascii_case("srt") || v.eq_ignore_ascii_case("vtt"))
+    {
+        return Err("Subtitle output needs an .srt or .vtt extension".into());
+    }
+    if content.len() > 2 * 1024 * 1024 || content.contains('\0') {
+        return Err("Subtitle output must be UTF-8 text of at most 2 MB".into());
+    }
+    if !overwrite {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| format!("Cannot create subtitle file (overwrite is off): {e}"))?;
+        if let Err(error) = file
+            .write_all(content.as_bytes())
+            .and_then(|_| file.sync_all())
+        {
+            drop(file);
+            let _ = fs::remove_file(path);
+            return Err(error.to_string());
+        }
+        return Ok(());
+    }
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&temporary, content).map_err(|e| e.to_string())?;
+    let backup = path.with_extension(format!("{}.backup", uuid::Uuid::new_v4()));
+    let existed = path.exists();
+    if existed {
+        if !path.is_file() {
+            let _ = fs::remove_file(temporary);
+            return Err("Subtitle destination is not a file".into());
+        }
+        if let Err(error) = fs::rename(&path, &backup) {
+            let _ = fs::remove_file(temporary);
+            return Err(error.to_string());
+        }
+    }
+    if let Err(error) = fs::rename(&temporary, &path) {
+        if existed {
+            let _ = fs::rename(&backup, &path);
+        }
+        let _ = fs::remove_file(temporary);
+        return Err(error.to_string());
+    }
+    if existed {
+        let _ = fs::remove_file(backup);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn engine_status(state: State<'_, AppState>) -> Result<Value, String> {
     send_engine_request(state, "engine.status".to_string(), None)
 }
@@ -96,7 +152,7 @@ pub fn media_probe(path: String) -> Result<Value, String> {
     let ffprobe = find_ffprobe_executable()
         .ok_or_else(|| "could not find ffprobe in tools/ffmpeg/bin or PATH".to_string())?;
 
-    let output = Command::new(ffprobe)
+    let output = hidden_command(ffprobe)
         .args([
             "-v",
             "error",
@@ -168,6 +224,8 @@ pub fn media_waveform_data_url(
 pub async fn media_audio_preview_source(
     path: String,
     stream_index: usize,
+    normalize: Option<bool>,
+    cleanup: Option<bool>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let ffmpeg = find_ffmpeg_executable()
@@ -183,35 +241,59 @@ pub async fn media_audio_preview_source(
             .join("audio-preview");
         fs::create_dir_all(&cache_dir)
             .map_err(|error| format!("failed to create audio preview cache folder: {error}"))?;
+        let normalize = normalize.unwrap_or(false);
+        let cleanup = cleanup.unwrap_or(false);
+        let metadata = source.metadata().map_err(|error| error.to_string())?;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|time| time.as_nanos())
+            .unwrap_or(0);
         let output_path = cache_dir.join(format!(
-            "{}-a{}.wav",
+            "{}-{}-{}-a{}-n{}-c{}.wav",
             stable_path_hash(&source_path),
-            stream_index
+            metadata.len(),
+            modified,
+            stream_index,
+            normalize,
+            cleanup
         ));
         if output_path.is_file() {
             return Ok(output_path.to_string_lossy().to_string());
         }
 
-        let temp_path = output_path.with_extension("tmp.wav");
-        let output = Command::new(ffmpeg)
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-i",
-                &source_path,
-                "-map",
-                &format!("0:a:{stream_index}"),
-                "-vn",
-                "-ac",
-                "2",
-                "-ar",
-                "48000",
-                "-c:a",
-                "pcm_s16le",
-                temp_path.to_string_lossy().as_ref(),
-            ])
+        let temp_path = output_path.with_extension(format!("{}.tmp.wav", uuid::Uuid::new_v4()));
+        let mut command = hidden_command(ffmpeg);
+        command.args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            &source_path,
+            "-map",
+            &format!("0:a:{stream_index}"),
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-c:a",
+            "pcm_s16le",
+        ]);
+        let mut filters = Vec::new();
+        if cleanup {
+            filters.extend(["highpass=f=80", "afftdn=nf=-25"]);
+        }
+        if normalize {
+            filters.push("loudnorm=I=-16:TP=-1.5:LRA=11");
+        }
+        if !filters.is_empty() {
+            command.args(["-af", &filters.join(",")]);
+        }
+        let output = command
+            .arg(&temp_path)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -225,6 +307,10 @@ pub async fn media_audio_preview_source(
             ));
         }
 
+        if output_path.is_file() {
+            let _ = fs::remove_file(&temp_path);
+            return Ok(output_path.to_string_lossy().to_string());
+        }
         fs::rename(&temp_path, &output_path)
             .map_err(|error| format!("failed to finalize audio preview file: {error}"))?;
         Ok(output_path.to_string_lossy().to_string())
@@ -512,7 +598,7 @@ fn run_proxy_command(
     output_path: &Path,
     hardware: bool,
 ) -> Result<std::process::Output, String> {
-    let mut command = Command::new(ffmpeg);
+    let mut command = hidden_command(ffmpeg);
     command.args(["-hide_banner", "-loglevel", "error", "-y"]);
     if hardware {
         command.args([
@@ -647,7 +733,7 @@ fn run_ffmpeg_frame(
     scale_filter: &str,
     use_hwaccel: bool,
 ) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(ffmpeg);
+    let mut command = hidden_command(ffmpeg);
     command.args(["-hide_banner", "-loglevel", "error"]);
     if use_hwaccel {
         command.args(["-hwaccel", "cuda"]);
@@ -703,7 +789,7 @@ fn run_ffmpeg_waveform(
         "pipe:1".to_string(),
     ]);
 
-    let output = Command::new(ffmpeg)
+    let output = hidden_command(ffmpeg)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -817,6 +903,19 @@ fn parse_media_metadata(path: &str, root: &Value) -> Value {
             parse_duration_us(root.get("format").and_then(|format| format.get("duration")));
     }
 
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let still_image = matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "bmp" | "webp");
+    if still_image {
+        duration_us = 5_000_000;
+        fps = 30.0;
+        has_audio = false;
+        audio_streams.clear();
+    }
+
     json!({
         "path": path,
         "width": width,
@@ -828,6 +927,7 @@ fn parse_media_metadata(path: &str, root: &Value) -> Value {
         "colorTransfer": color_transfer,
         "hdr": hdr,
         "hasAudio": has_audio,
+        "isStillImage": still_image,
         "audioStreamCount": audio_streams.len(),
         "audioStreams": audio_streams
     })
@@ -864,7 +964,7 @@ fn parse_duration_us(value: Option<&Value>) -> i64 {
     }
 }
 
-fn find_ffmpeg_executable() -> Option<PathBuf> {
+pub(crate) fn find_ffmpeg_executable() -> Option<PathBuf> {
     find_ffmpeg_tool_executable("ffmpeg")
 }
 
@@ -902,7 +1002,7 @@ fn find_ffmpeg_tool_executable(tool_name: &str) -> Option<PathBuf> {
         .into_iter()
         .map(PathBuf::from)
         .find(|candidate| {
-            Command::new(candidate)
+            hidden_command(candidate)
                 .arg("-version")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -910,4 +1010,139 @@ fn find_ffmpeg_tool_executable(tool_name: &str) -> Option<PathBuf> {
                 .map(|status| status.success())
                 .unwrap_or(false)
         })
+}
+
+fn hidden_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
+}
+
+#[cfg(test)]
+mod preview_tests {
+    #[test]
+    fn subtitle_files_preserve_existing_content_unless_overwrite_is_requested() {
+        let directory =
+            std::env::temp_dir().join(format!("editor-subtitle-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("captions.srt").to_string_lossy().to_string();
+        super::save_subtitle_file(path.clone(), "Original captions".into(), false).unwrap();
+        assert!(super::save_subtitle_file(path.clone(), "Replacement".into(), false).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Original captions");
+        super::save_subtitle_file(path.clone(), "Replacement café".into(), true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Replacement café");
+        assert!(super::save_subtitle_file(
+            directory.join("project.db").to_string_lossy().to_string(),
+            "Not a subtitle".into(),
+            true
+        )
+        .is_err());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    use super::*;
+
+    #[test]
+    fn relinked_still_images_keep_extendable_metadata() {
+        let metadata = parse_media_metadata(
+            "green.PNG",
+            &json!({"streams": [{"codec_type": "video", "width": 640, "height": 360, "codec_name": "png"}]}),
+        );
+        assert_eq!(metadata["isStillImage"], true);
+        assert_eq!(metadata["durationUs"], 5_000_000);
+        assert_eq!(metadata["hasAudio"], false);
+    }
+
+    #[test]
+    fn processed_preview_audio_changes_signal_and_invalidates_cache() {
+        let ffmpeg =
+            find_ffmpeg_executable().expect("FFmpeg is required for the audio preview regression");
+        let fixture_dir =
+            env::temp_dir().join(format!("video-editor-audio-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&fixture_dir).unwrap();
+        let source = fixture_dir.join("quiet 10% & tone.wav");
+        let generate = |duration: &str| {
+            let output = hidden_command(&ffmpeg)
+                .args([
+                    "-v",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=60:sample_rate=48000",
+                    "-af",
+                    "volume=0.08",
+                    "-t",
+                    duration,
+                ])
+                .arg(&source)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        generate("2");
+        let preview = |normalize, cleanup| {
+            tauri::async_runtime::block_on(media_audio_preview_source(
+                source.to_string_lossy().to_string(),
+                0,
+                Some(normalize),
+                Some(cleanup),
+            ))
+            .unwrap()
+        };
+        let raw = preview(false, false);
+        let normalized = preview(true, false);
+        let cleaned = preview(false, true);
+        let rms = |path: &str| {
+            let output = hidden_command(&ffmpeg)
+                .args([
+                    "-v", "error", "-i", path, "-f", "f32le", "-ac", "1", "pipe:1",
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let samples: Vec<f64> = output
+                .stdout
+                .chunks_exact(4)
+                .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()) as f64)
+                .collect();
+            assert!(!samples.is_empty());
+            (samples.iter().map(|sample| sample * sample).sum::<f64>() / samples.len() as f64)
+                .sqrt()
+        };
+        assert!(
+            rms(&normalized) > rms(&raw) * 4.0,
+            "Normalization must audibly lift quiet input"
+        );
+        assert!(
+            rms(&cleaned) < rms(&raw) * 0.8,
+            "Cleanup must attenuate low-frequency rumble"
+        );
+        assert_eq!(preview(true, false), normalized);
+        generate("3");
+        let replaced = preview(true, false);
+        assert_ne!(
+            replaced, normalized,
+            "Replacing a source must invalidate its preview cache"
+        );
+        assert!(tauri::async_runtime::block_on(media_audio_preview_source(
+            source.to_string_lossy().to_string(),
+            99,
+            None,
+            None
+        ))
+        .is_err());
+        for path in [raw, normalized, cleaned, replaced] {
+            fs::remove_file(path).unwrap();
+        }
+        fs::remove_dir_all(fixture_dir).unwrap();
+    }
 }

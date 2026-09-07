@@ -5,3 +5,4 @@ export * from "./plugins";
 export * from "./project";
 export * from "./rpc";
 export * from "./timeline";
+export * from "./subtitles";

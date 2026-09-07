@@ -46,6 +46,11 @@ struct ProjectManifest {
     manifest.name = value.value("name", manifest.name);
     manifest.database = value.value("database", manifest.database);
     manifest.createdWith = value.value("createdWith", manifest.createdWith);
+    if (manifest.version != 1) throw std::runtime_error("unsupported project version: " + std::to_string(manifest.version));
+    const auto databasePath = std::filesystem::path(manifest.database);
+    if (databasePath.empty() || databasePath.is_absolute() || databasePath.has_parent_path()) {
+      throw std::runtime_error("project database must name a file in the project folder");
+    }
     return manifest;
   }
 };

@@ -4,6 +4,7 @@ import { defaultColorAdjustment, type ColorAdjustment, type ClipLut, type Projec
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Slider } from "../../components/Slider";
+import { useAdjustmentHistory } from "../../features/commands/useAdjustmentHistory";
 import { executeCommand } from "../../features/commands/commandClient";
 import type { LogStatus } from "../../features/logging/appLog";
 import type { MediaAsset } from "../../features/media/mediaTypes";
@@ -24,6 +25,7 @@ interface ColorTabProps {
   setTimeline: Dispatch<SetStateAction<Timeline>>;
   mediaAssets: MediaAsset[];
   projectSettings: ProjectSettings;
+  projectPath?: string;
   playheadUs: number;
   setPlayheadUs: Dispatch<SetStateAction<number>>;
   playing: boolean;
@@ -38,6 +40,7 @@ export function ColorTab({
   setTimeline,
   mediaAssets,
   projectSettings,
+  projectPath,
   playheadUs,
   setPlayheadUs,
   playing,
@@ -49,6 +52,8 @@ export function ColorTab({
   const videoClips = collectVideoClips(timeline);
   const [selectedClipId, setSelectedClipId] = useState("");
   const selectedClip = videoClips.find((clip) => clip.id === selectedClipId) ?? videoClips[0];
+  const historyFor = useAdjustmentHistory();
+  const controlsDisabled = !selectedClip || Boolean(timeline.tracks.find((track) => track.id === selectedClip.trackId)?.locked);
   const color = normalizeColor(selectedClip?.color);
   const lut = selectedClip?.lut;
 
@@ -73,7 +78,7 @@ export function ColorTab({
       return;
     }
 
-    void executeCommand({ type: "apply_color_adjustment", clipId: selectedClip.id, adjustment: next, history: { mode: "replace", group: `color:${selectedClip.id}` } }).then((result) => {
+    void executeCommand({ type: "apply_color_adjustment", clipId: selectedClip.id, adjustment: next, history: historyFor(`color:${selectedClip.id}:${Object.keys(next).join(",")}`) }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
         setStatusMessage(label, { details: { clipId: selectedClip.id, adjustment: next } });
@@ -91,7 +96,7 @@ export function ColorTab({
       return;
     }
 
-    void executeCommand({ type: "apply_lut", clipId: selectedClip.id, lutId: next?.lutId ?? null, strength: next?.strength ?? 1, history: { mode: "replace", group: `lut:${selectedClip.id}` } }).then((result) => {
+    void executeCommand({ type: "apply_lut", clipId: selectedClip.id, lutId: next?.lutId ?? null, strength: next?.strength ?? 1, history: historyFor(`lut:${selectedClip.id}:${label}`) }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
         setStatusMessage(label, { details: { clipId: selectedClip.id, lut: next } });
@@ -108,13 +113,10 @@ export function ColorTab({
       setStatusMessage("Select a video clip first", { level: "warning" });
       return;
     }
-    void executeCommand({ type: "apply_color_adjustment", clipId: selectedClip.id, adjustment: defaultColorAdjustment })
-      .then((result) => {
-        if (result.ok) {
-          return executeCommand({ type: "apply_lut", clipId: selectedClip.id, lutId: null, strength: 1 });
-        }
-        throw new Error(result.error ?? "Reset color failed");
-      })
+    void executeCommand({ type: "execute_batch", commands: [
+      { type: "apply_color_adjustment", clipId: selectedClip.id, adjustment: defaultColorAdjustment },
+      { type: "apply_lut", clipId: selectedClip.id, lutId: null, strength: 1 }
+    ] })
       .then((result) => {
         if (result.ok) {
           applyEngineTimeline(result.data);
@@ -135,6 +137,7 @@ export function ColorTab({
           timeline={timeline}
           mediaAssets={mediaAssets}
           projectSettings={projectSettings}
+          projectPath={projectPath}
           selectedClipId={selectedClip?.id ?? ""}
           onSelectedClipIdChange={setSelectedClipId}
           playheadUs={playheadUs}
@@ -163,13 +166,15 @@ export function ColorTab({
             >
               {videoClips.length === 0 ? <option value="">No video clips</option> : null}
               {videoClips.map((clip) => (
-                <option key={clip.id} value={clip.id}>{clip.id} - {formatSeconds(clip.startUs)}</option>
+                <option key={clip.id} value={clip.id}>{mediaAssets.find((asset) => asset.id === clip.mediaId)?.name ?? clip.id} — {formatSeconds(clip.startUs)}</option>
               ))}
             </select>
           </label>
+          {selectedClip && controlsDisabled ? <span className="muted-line">Unlock this clip’s track to make adjustments.</span> : null}
         </div>
       </Panel>
 
+      <fieldset className="editor-controls-group" disabled={controlsDisabled}>
       <Panel title="Basic Adjustment">
         <div className="control-stack">
           <Slider label="Brightness" value={Math.round(color.brightness)} min={-100} max={100} step={1} onChange={(event) => updateSelectedClipColor({ brightness: Number(event.target.value) }, "Clip brightness changed")} />
@@ -203,6 +208,7 @@ export function ColorTab({
           <Button icon={<RotateCcw size={16} />} onClick={resetColor}>Reset Color</Button>
         </div>
       </Panel>
+      </fieldset>
       </div>
     </div>
   );

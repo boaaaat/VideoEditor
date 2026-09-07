@@ -56,6 +56,7 @@ class ExportEngine {
     job.height = request.height;
     job.fps = request.fps;
     job.durationUs = request.durationUs;
+    job.rangeStartUs = request.rangeStartUs;
     job.codec = request.codec;
     job.container = request.container;
     job.quality = request.quality;
@@ -97,6 +98,11 @@ class ExportEngine {
     prepareDestination(request);
 
     auto job = createJob(request);
+    for (std::size_t index = 0; index < job.timeline.titles.size(); ++index) {
+      std::ofstream textFile(titleTextPath(job.id, index), std::ios::binary);
+      textFile << job.timeline.titles[index].text;
+      if (!textFile) throw std::runtime_error("could not prepare title text for export");
+    }
     const auto progressPath = progressPathFor(job.id);
     std::error_code ignored;
     std::filesystem::remove(progressPath, ignored);
@@ -113,6 +119,7 @@ class ExportEngine {
       job.logs.push_back("Quality tier: " + job.quality);
     }
     job.logs.push_back("Render duration: " + formatSeconds(job.durationUs));
+    if (job.rangeStartUs > 0) job.logs.push_back("Timeline range starts at " + formatSeconds(job.rangeStartUs));
     if (hasRenderableTimeline(job)) {
       job.logs.push_back("Rendering timeline media clips: " + std::to_string(countRenderableVideoClips(job)) + " video, " + std::to_string(countRenderableAudioClips(job)) + " audio");
     } else {
@@ -190,7 +197,7 @@ class ExportEngine {
       request.encoderOptions.cq = options.value("cq", 20);
       request.encoderOptions.maxBitrateMbps = options.value("maxBitrateMbps", 32);
       request.encoderOptions.lookaheadDepth = options.value("lookaheadDepth", 16);
-      request.encoderOptions.lookaheadLevel = options.value("lookaheadLevel", 2);
+      request.encoderOptions.lookaheadLevel = options.value("lookaheadLevel", 0);
       request.encoderOptions.multipass = options.value("multipass", std::string{"qres"});
       request.encoderOptions.spatialAq = options.value("spatialAq", true);
       request.encoderOptions.temporalAq = options.value("temporalAq", true);
@@ -203,9 +210,13 @@ class ExportEngine {
     }
     request.timeline = timelineFromJson(params);
     const auto videoDurationUs = visibleVideoDurationUs(request.timeline);
-    if (videoDurationUs > 0 && (request.durationUs <= 0 || request.durationUs > videoDurationUs)) {
+    if (videoDurationUs > 0) {
       request.durationUs = videoDurationUs;
     }
+    request.rangeStartUs = params.value("rangeStartUs", 0LL);
+    const auto rangeEndUs = params.value("rangeEndUs", request.durationUs);
+    if (request.rangeStartUs < 0 || rangeEndUs <= request.rangeStartUs || rangeEndUs > request.durationUs) throw std::runtime_error("export range must be within the timeline content and end after its start");
+    request.durationUs = rangeEndUs - request.rangeStartUs;
     if (request.bitrateMbps <= 0) {
       request.bitrateMbps = calculateBitrateMbps(request);
     }
@@ -319,6 +330,62 @@ class ExportEngine {
     return buildFfmpegCommand(job, "ffmpeg", "", true, true);
   }
 
+  // Stateless frame planning uses the same layer, text, color and effect filters as export.
+  // The desktop runs the returned arguments in a cancellable process outside the command engine.
+  [[nodiscard]] static nlohmann::json compositionFramePlan(const nlohmann::json& params) {
+    ExportJob job;
+    job.id = "composition_frame";
+    job.width = params.value("width", 1920);
+    job.height = params.value("height", 1080);
+    job.fps = params.value("fps", 30);
+    if (!params.at("timeUs").is_number_integer()) throw std::runtime_error("frame time must be integer microseconds");
+    const auto requestedTimeUs = params.at("timeUs").get<std::int64_t>();
+    const auto maxWidth = params.value("maxWidth", 1280);
+    if (job.width < 16 || job.width > 8192 || job.height < 16 || job.height > 8192 || job.width % 2 || job.height % 2 || job.fps < 1 || job.fps > 120 || requestedTimeUs < 0 || requestedTimeUs > 9'007'199'254'740'991LL || maxWidth < 16 || maxWidth > 4096) throw std::runtime_error("invalid composition frame dimensions, rate, or time");
+    const auto frameIndex = static_cast<std::int64_t>(std::floor((static_cast<long double>(requestedTimeUs) + 0.5L) * job.fps / 1'000'000));
+    const auto timeUs = static_cast<std::int64_t>(std::llround(static_cast<long double>(frameIndex) * 1'000'000 / job.fps));
+    job.durationUs = static_cast<std::int64_t>(std::ceil(1'000'000.0 / job.fps));
+    job.rangeStartUs = 0;
+    job.audioEnabled = false;
+    job.resourceDirectory = params.at("resourceDirectory").get<std::string>();
+    job.outputPath = (std::filesystem::u8path(job.resourceDirectory) / "frame.png").string();
+    job.timeline = timelineFromJson(params);
+    auto& clips = job.timeline.clips;
+    clips.erase(std::remove_if(clips.begin(), clips.end(), [&](const auto& clip) { return clip.trackKind != "video" || !clip.trackVisible || timeUs < clip.startUs || timeUs >= clip.startUs + clipDisplayDurationUs(clip); }), clips.end());
+    std::stable_sort(clips.begin(), clips.end(), [](const auto& a, const auto& b) { return a.trackIndex == b.trackIndex ? a.startUs < b.startUs : a.trackIndex > b.trackIndex; });
+    for (auto& clip : clips) {
+      const auto relativeUs = timeUs - clip.startUs;
+      const auto durationUs = clip.videoFadeDurationUs > 0 ? clip.videoFadeDurationUs : clipDisplayDurationUs(clip);
+      const auto fadeTimeUs = relativeUs + clip.videoFadeOffsetUs;
+      if (clip.transformEnabled) {
+        if (clip.videoFadeInUs > 0) clip.opacity *= std::clamp(static_cast<double>(fadeTimeUs) / std::min(clip.videoFadeInUs, durationUs), 0.0, 1.0);
+        if (clip.videoFadeOutUs > 0) clip.opacity *= std::clamp(static_cast<double>(durationUs - fadeTimeUs) / std::min(clip.videoFadeOutUs, durationUs), 0.0, 1.0);
+      }
+      clip.videoFadeInUs = clip.videoFadeOutUs = 0;
+      clip.videoFadeOffsetUs = clip.videoFadeDurationUs = 0;
+      const auto* media = findMedia(job.timeline.media, clip.mediaId);
+      if (media && media->isStillImage) { clip.inUs = 0; clip.outUs = job.durationUs * 3; }
+      else {
+        clip.inUs += static_cast<std::int64_t>(std::llround(relativeUs * normalizedSpeedFactor(clip)));
+        clip.outUs = std::min(clip.outUs, clip.inUs + static_cast<std::int64_t>(std::ceil(job.durationUs * 3 * normalizedSpeedFactor(clip))));
+      }
+      clip.startUs = 0;
+    }
+    auto& titles = job.timeline.titles;
+    titles.erase(std::remove_if(titles.begin(), titles.end(), [&](const auto& title) { return timeUs < title.startUs || timeUs >= title.startUs + title.durationUs; }), titles.end());
+    auto files = nlohmann::json::array();
+    for (std::size_t index = 0; index < titles.size(); ++index) {
+      titles[index].startUs = 0;
+      titles[index].durationUs = job.durationUs * 3;
+      files.push_back({{"name", "title_" + std::to_string(index) + ".txt"}, {"content", titles[index].text}});
+    }
+    std::string graph;
+    auto arguments = buildTimelineFfmpegArguments(job, "", "", true, false, &graph, maxWidth);
+    arguments.erase(arguments.begin()); // The desktop selects the installed FFmpeg binary.
+    files.push_back({{"name", "graph.filter"}, {"content", graph}});
+    return {{"arguments", arguments}, {"files", files}, {"timeUs", timeUs}, {"requestedTimeUs", requestedTimeUs}, {"width", std::min(job.width, maxWidth)}, {"projectWidth", job.width}, {"projectHeight", job.height}, {"fps", job.fps}};
+  }
+
  private:
   [[nodiscard]] static std::string buildFfmpegCommand(
       const ExportJob& job,
@@ -385,7 +452,24 @@ class ExportEngine {
       const std::string& progressPath,
       bool overwrite,
       bool useCudaDecode) {
-    const auto segments = buildTimelineSegments(job);
+    return joinQuoted(buildTimelineFfmpegArguments(job, ffmpegPath, progressPath, overwrite, useCudaDecode));
+  }
+
+  [[nodiscard]] static std::vector<std::string> buildTimelineFfmpegArguments(
+      const ExportJob& job,
+      const std::string& ffmpegPath,
+      const std::string& progressPath,
+      bool overwrite,
+      bool useCudaDecode,
+      std::string* frameGraph = nullptr,
+      int frameMaxWidth = 1280) {
+    std::vector<const ExportTimelineClip*> videoClips;
+    for (const auto& clip : job.timeline.clips) {
+      const auto* media = findMedia(job.timeline.media, clip.mediaId);
+      if (media && media->kind == "video" && clip.trackKind == "video" && clip.trackVisible && clip.outUs > clip.inUs && clip.startUs < job.rangeStartUs + job.durationUs && clip.startUs + clipDisplayDurationUs(clip) > job.rangeStartUs) videoClips.push_back(&clip);
+    }
+    // Track zero is the top layer. Later clips win overlaps on the same track.
+    std::stable_sort(videoClips.begin(), videoClips.end(), [](const auto* a, const auto* b) { return a->trackIndex == b->trackIndex ? a->startUs < b->startUs : a->trackIndex > b->trackIndex; });
     const auto audioClips = collectAudioClips(job);
     std::vector<std::string> args = {
         ffmpegPath.empty() ? "ffmpeg" : ffmpegPath,
@@ -394,7 +478,7 @@ class ExportEngine {
         "error",
         overwrite ? "-y" : "-n",
         "-filter_complex_threads",
-        "0",
+        frameGraph ? "2" : "0",
     };
     if (useCudaDecode) {
       // Stop on the first hardware decode error so compatibility decoding can
@@ -402,20 +486,14 @@ class ExportEngine {
       args.push_back("-xerror");
     }
     std::vector<std::string> filters;
-    std::vector<std::string> concatInputs;
     int inputIndex = 0;
-    int segmentIndex = 0;
-
-    for (const auto& segment : segments) {
-      const auto durationSeconds = formatSeconds(segment.durationUs);
-      if (segment.gap || !segment.clip) {
-        args.insert(args.end(), {"-f", "lavfi", "-t", durationSeconds, "-i",
-                                 "color=c=black:s=" + std::to_string(job.width) + "x" + std::to_string(job.height) + ":r=" + std::to_string(job.fps)});
-        filters.push_back("[" + std::to_string(inputIndex) + ":v]setpts=PTS-STARTPTS,setsar=1,format=yuv420p[v" + std::to_string(segmentIndex) + "]");
-        inputIndex += 1;
-      } else {
-        const auto* media = findMedia(job.timeline.media, segment.clip->mediaId);
-        if (useCudaDecode) {
+    filters.push_back("color=c=black:s=" + std::to_string(job.width) + "x" + std::to_string(job.height) + ":r=" + std::to_string(job.fps) + ":d=" + formatSeconds(job.rangeStartUs + job.durationUs) + ",format=rgba[canvas0]");
+    for (std::size_t layer = 0; layer < videoClips.size(); ++layer) {
+        const auto* clip = videoClips[layer];
+        const auto* media = findMedia(job.timeline.media, clip->mediaId);
+        const auto layerCudaDecode = useCudaDecode && !media->isStillImage;
+        if (media->isStillImage) args.insert(args.end(), {"-loop", "1", "-framerate", std::to_string(job.fps)});
+        if (layerCudaDecode) {
           args.insert(args.end(), {
                                       "-hwaccel",
                                       "cuda",
@@ -423,8 +501,6 @@ class ExportEngine {
                                       "0",
                                       "-hwaccel_output_format",
                                       "cuda",
-                                      "-extra_hw_frames",
-                                      "16",
                                   });
         } else {
           // Compatibility decoding is the recovery path for unsupported or
@@ -434,28 +510,52 @@ class ExportEngine {
         }
         args.insert(args.end(), {
                                     "-ss",
-                                    formatSeconds(segment.sourceInUs),
+                                    formatSeconds(clip->inUs),
                                     "-t",
-                                    formatSeconds(segment.sourceDurationUs),
+                                    formatSeconds(clipSourceDurationUs(*clip)),
                                     "-i",
                                     media ? media->path : std::string{},
                                 });
-        filters.push_back(videoSegmentFilter(
-            inputIndex, segmentIndex, *segment.clip, job, 0, segment.sourceDurationUs, segment.durationUs, useCudaDecode));
+        filters.push_back(videoLayerFilter(inputIndex, static_cast<int>(layer), *clip, job, layerCudaDecode));
+        const auto x = clip->transformEnabled ? clip->positionX : 0.0;
+        const auto y = clip->transformEnabled ? clip->positionY : 0.0;
+        filters.push_back("[canvas" + std::to_string(layer) + "][layer" + std::to_string(layer) + "]overlay=x=(W-w)/2+" + formatDouble(x) + ":y=(H-h)/2+" + formatDouble(y) + ":format=auto:eof_action=pass:repeatlast=0:enable='gte(t," + formatSeconds(clip->startUs) + ")*lt(t," + formatSeconds(clip->startUs + clipDisplayDurationUs(*clip)) + ")'[canvas" + std::to_string(layer + 1) + "]");
         inputIndex += 1;
-      }
-
-      concatInputs.push_back("[v" + std::to_string(segmentIndex) + "]");
-      segmentIndex += 1;
+    }
+    filters.push_back("[canvas" + std::to_string(videoClips.size()) + "]format=yuv420p[outv]");
+    if (!job.timeline.titles.empty()) filters.back() = "[canvas" + std::to_string(videoClips.size()) + "]" + titleFilterChain(job) + ",format=yuv420p[outv]";
+    if (job.rangeStartUs > 0) {
+      auto& finalVideo = filters.back();
+      finalVideo.replace(finalVideo.rfind("[outv]"), 6, ",trim=start=" + formatSeconds(job.rangeStartUs) + ":duration=" + formatSeconds(job.durationUs) + ",setpts=PTS-STARTPTS[outv]");
     }
 
-    filters.push_back(join(concatInputs, "") + "concat=n=" + std::to_string(segments.size()) + ":v=1:a=0[outv]");
+    if (frameGraph) {
+      auto& finalVideo = filters.back();
+      finalVideo.replace(finalVideo.rfind("[outv]"), 6, ",scale=min(" + std::to_string(frameMaxWidth) + "\\,iw):-2[outv]");
+    }
 
     if (job.audioEnabled) {
       appendAudioMixGraph(job, audioClips, args, filters, inputIndex);
     }
 
-    args.insert(args.end(), {"-filter_complex", join(filters, ";"), "-map", "[outv]"});
+    const auto graph = join(filters, ";");
+    if (frameGraph) {
+      *frameGraph = graph;
+      args.insert(args.end(), {"-filter_complex_script", (std::filesystem::u8path(job.resourceDirectory) / "graph.filter").string()});
+    } else if (!progressPath.empty() && graph.size() > 12'000) {
+      // Caption-rich sequences exceed Windows' process command-line limit.
+      const auto graphPath = filterGraphPath(job.id, useCudaDecode);
+      std::ofstream script(graphPath, std::ios::binary);
+      script << graph;
+      script.close();
+      if (!script) throw std::runtime_error("could not prepare export filter graph");
+      args.insert(args.end(), {"-filter_complex_script", graphPath.string()});
+    } else args.insert(args.end(), {"-filter_complex", graph});
+    args.insert(args.end(), {"-map", "[outv]"});
+    if (frameGraph) {
+      args.insert(args.end(), {"-an", "-frames:v", "1", "-c:v", "png", "-threads", "1", "-update", "1", job.outputPath});
+      return args;
+    }
     if (job.audioEnabled) {
       args.insert(args.end(), {"-map", "[outa]"});
     }
@@ -489,7 +589,7 @@ class ExportEngine {
     }
 
     args.push_back(job.outputPath);
-    return joinQuoted(args);
+    return args;
   }
 
   static void appendAudioMixGraph(
@@ -499,8 +599,8 @@ class ExportEngine {
       std::vector<std::string>& filters,
       int& inputIndex) {
     if (clips.empty()) {
-      args.insert(args.end(), {"-f", "lavfi", "-t", formatSeconds(job.durationUs), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"});
-      filters.push_back("[" + std::to_string(inputIndex) + ":a]asetpts=PTS-STARTPTS[outa]");
+      args.insert(args.end(), {"-f", "lavfi", "-t", formatSeconds(job.rangeStartUs + job.durationUs), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"});
+      filters.push_back("[" + std::to_string(inputIndex) + ":a]" + finalAudioFilterChain(job) + "[outa]");
       inputIndex += 1;
       return;
     }
@@ -531,8 +631,8 @@ class ExportEngine {
     }
 
     if (audioInputs.empty()) {
-      args.insert(args.end(), {"-f", "lavfi", "-t", formatSeconds(job.durationUs), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"});
-      filters.push_back("[" + std::to_string(inputIndex) + ":a]asetpts=PTS-STARTPTS[outa]");
+      args.insert(args.end(), {"-f", "lavfi", "-t", formatSeconds(job.rangeStartUs + job.durationUs), "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"});
+      filters.push_back("[" + std::to_string(inputIndex) + ":a]" + finalAudioFilterChain(job) + "[outa]");
       inputIndex += 1;
       return;
     }
@@ -543,6 +643,41 @@ class ExportEngine {
     } else {
       filters.push_back(join(audioInputs, "") + "amix=inputs=" + std::to_string(audioInputs.size()) + ":duration=longest:dropout_transition=0:normalize=0," + finalFilter + "[outa]");
     }
+  }
+
+  [[nodiscard]] static std::string videoLayerFilter(int inputIndex, int layerIndex, const ExportTimelineClip& clip, const ExportJob& job, bool useCudaDecode) {
+    const auto durationUs = clipDisplayDurationUs(clip);
+    std::vector<std::string> filters = {
+      "[" + std::to_string(inputIndex) + ":v]trim=start=0:duration=" + formatSeconds(clipSourceDurationUs(clip)),
+      "setpts=(PTS-STARTPTS)/" + formatDouble(normalizedSpeedFactor(clip)),
+      "trim=duration=" + formatSeconds(durationUs), "setpts=PTS-STARTPTS", "fps=" + std::to_string(job.fps)
+    };
+    const auto fit = std::to_string(job.width) + ":" + std::to_string(job.height) + ":force_original_aspect_ratio=decrease:force_divisible_by=2";
+    if (useCudaDecode) filters.insert(filters.end(), {"scale_cuda=" + fit, "hwdownload", "format=nv12"});
+    else filters.push_back("scale=" + fit);
+    filters.push_back("setsar=1");
+    appendColorFilters(clip, filters);
+    appendEffectFilters(clip, filters);
+    filters.push_back("format=rgba");
+    if (clip.transformEnabled) {
+      if (std::abs(clip.scale - 1) > 0.001) filters.push_back("scale=round(iw*" + formatDouble(std::clamp(clip.scale, 0.1, 4.0)) + "/2)*2:round(ih*" + formatDouble(std::clamp(clip.scale, 0.1, 4.0)) + "/2)*2");
+      if (std::abs(clip.rotation) > 0.001) {
+        const auto angle = formatDouble(clip.rotation * 3.14159265358979323846 / 180.0);
+        filters.push_back("rotate=" + angle + ":ow=rotw(" + angle + "):oh=roth(" + angle + "):c=black@0");
+      }
+      if (clip.opacity < 0.999) filters.push_back("colorchannelmixer=aa=" + formatDouble(std::clamp(clip.opacity, 0.0, 1.0)));
+      const auto fadeDurationUs = clip.videoFadeDurationUs > 0 ? clip.videoFadeDurationUs : durationUs;
+      const bool offsetFade = clip.videoFadeOffsetUs > 0 && (clip.videoFadeInUs > 0 || clip.videoFadeOutUs > 0);
+      if (offsetFade) filters.push_back("setpts=PTS+" + formatSeconds(clip.videoFadeOffsetUs) + "/TB");
+      if (clip.videoFadeInUs > 0) filters.push_back("fade=t=in:st=0:d=" + formatSeconds(std::min(clip.videoFadeInUs, fadeDurationUs)) + ":alpha=1");
+      if (clip.videoFadeOutUs > 0) {
+        const auto fade = std::min(clip.videoFadeOutUs, fadeDurationUs);
+        filters.push_back("fade=t=out:st=" + formatSeconds(fadeDurationUs - fade) + ":d=" + formatSeconds(fade) + ":alpha=1");
+      }
+      if (offsetFade) filters.push_back("setpts=PTS-" + formatSeconds(clip.videoFadeOffsetUs) + "/TB");
+    }
+    filters.push_back("setpts=PTS+" + formatSeconds(clip.startUs) + "/TB");
+    return join(filters, ",") + "[layer" + std::to_string(layerIndex) + "]";
   }
 
   [[nodiscard]] static std::string videoSegmentFilter(
@@ -558,6 +693,8 @@ class ExportEngine {
     std::vector<std::string> filters = {
         "[" + std::to_string(inputIndex) + ":v]trim=start=" + formatSeconds(sourceInUs) + ":duration=" + formatSeconds(sourceDurationUs),
         "setpts=(PTS-STARTPTS)/" + formatDouble(speed),
+        "trim=duration=" + formatSeconds(durationUs),
+        "setpts=PTS-STARTPTS",
         "fps=" + std::to_string(job.fps),
     };
     if (useCudaDecode) {
@@ -612,7 +749,9 @@ class ExportEngine {
       filters.push_back("eq=brightness=" + formatDouble(brightness) + ":contrast=" + formatDouble(contrast) + ":saturation=" + formatDouble(saturation));
     }
     if (std::abs(clip.temperature) > 0.001 || std::abs(clip.tint) > 0.001) {
-      filters.push_back("hue=h=" + formatDouble((clip.tint + clip.temperature * 0.35) * 3.14159265358979323846 / 180.0));
+      const auto warmth = std::clamp(clip.temperature / 100.0, -1.0, 1.0);
+      const auto tint = std::clamp(clip.tint / 100.0, -1.0, 1.0);
+      filters.push_back("colorbalance=rm=" + formatDouble(0.12 * warmth + 0.06 * tint) + ":gm=" + formatDouble(-0.08 * tint) + ":bm=" + formatDouble(-0.12 * warmth + 0.06 * tint));
     }
     appendLutPresetFilters(clip, filters);
   }
@@ -629,10 +768,10 @@ class ExportEngine {
       filters.push_back("colorbalance=bs=" + formatDouble(0.12 * strength) + ":rs=" + formatDouble(-0.06 * strength));
       filters.push_back("eq=saturation=" + formatDouble(1.0 + 0.08 * strength));
     } else if (clip.lutId == "filmic") {
-      filters.push_back("curves=preset=medium_contrast");
+      filters.push_back("curves=all='0/0 0.25/" + formatDouble(0.25 - 0.05 * strength) + " 0.75/" + formatDouble(0.75 + 0.05 * strength) + " 1/1'");
       filters.push_back("eq=saturation=" + formatDouble(1.0 - 0.12 * strength));
     } else if (clip.lutId == "mono") {
-      filters.push_back("hue=s=0");
+      filters.push_back("hue=s=" + formatDouble(1.0 - strength));
       filters.push_back("eq=contrast=" + formatDouble(1.0 + 0.12 * strength));
     }
   }
@@ -671,12 +810,25 @@ class ExportEngine {
     if (std::abs(clip.audioGainDb) > 0.001) {
       filters.push_back("volume=" + formatDb(clip.audioGainDb));
     }
-    if (clip.audioFadeInUs > 0) {
-      filters.push_back("afade=t=in:st=0:d=" + formatSeconds(std::min(clip.audioFadeInUs, outputDurationUs)));
-    }
-    if (clip.audioFadeOutUs > 0) {
-      const auto fadeDurationUs = std::min(clip.audioFadeOutUs, outputDurationUs);
-      filters.push_back("afade=t=out:st=" + formatSeconds(std::max<std::int64_t>(0, outputDurationUs - fadeDurationUs)) + ":d=" + formatSeconds(fadeDurationUs));
+    if (clip.audioFadeDurationUs > 0 && (clip.audioFadeInUs > 0 || clip.audioFadeOutUs > 0)) {
+      // Evaluate the original fade per sample after speed adjustment. afade's
+      // sample counter starts over for each input, so it cannot retain a split.
+      std::string envelope = "val(ch)";
+      const auto time = "(t+" + formatSeconds(clip.audioFadeOffsetUs) + ")";
+      if (clip.audioFadeInUs > 0) envelope += "*min(1,max(0," + time + "/" + formatSeconds(std::min(clip.audioFadeInUs, clip.audioFadeDurationUs)) + "))";
+      if (clip.audioFadeOutUs > 0) envelope += "*min(1,max(0,(" + formatSeconds(clip.audioFadeDurationUs) + "-" + time + ")/" + formatSeconds(std::min(clip.audioFadeOutUs, clip.audioFadeDurationUs)) + "))";
+      // Fix the layout before aeval: negotiation from mono inputs to the
+      // stereo export can otherwise give its evaluator inconsistent planes.
+      filters.push_back("aformat=channel_layouts=stereo");
+      filters.push_back("aeval='" + envelope + "':c=same");
+    } else {
+      if (clip.audioFadeInUs > 0) {
+        filters.push_back("afade=t=in:st=0:d=" + formatSeconds(std::min(clip.audioFadeInUs, outputDurationUs)));
+      }
+      if (clip.audioFadeOutUs > 0) {
+        const auto fadeDurationUs = std::min(clip.audioFadeOutUs, outputDurationUs);
+        filters.push_back("afade=t=out:st=" + formatSeconds(std::max<std::int64_t>(0, outputDurationUs - fadeDurationUs)) + ":d=" + formatSeconds(fadeDurationUs));
+      }
     }
     if (clip.audioCleanup) {
       filters.push_back("highpass=f=80");
@@ -687,6 +839,9 @@ class ExportEngine {
     }
     if (delayMs > 0) {
       filters.push_back("adelay=" + std::to_string(delayMs) + "|" + std::to_string(delayMs));
+      // Delayed silence can precede the first decoded frame after an input
+      // seek. Give those samples valid timestamps before atrim/amix.
+      filters.push_back("asetpts=N/SR/TB");
     }
     filters.push_back("apad");
     filters.push_back("atrim=duration=" + formatSeconds(outputDurationUs + delayMs * 1000));
@@ -705,7 +860,8 @@ class ExportEngine {
     if (job.normalizeAudio) {
       filters.push_back("loudnorm=I=-16:TP=-1.5:LRA=11");
     }
-    filters.push_back("atrim=duration=" + formatSeconds(job.durationUs));
+    filters.push_back("apad");
+    filters.push_back("atrim=start=" + formatSeconds(job.rangeStartUs) + ":duration=" + formatSeconds(job.durationUs));
     filters.push_back("asetpts=PTS-STARTPTS");
     return join(filters, ",");
   }
@@ -743,6 +899,31 @@ class ExportEngine {
 
   [[nodiscard]] static std::filesystem::path progressPathFor(const std::string& jobId) {
     return std::filesystem::temp_directory_path() / (jobId + ".progress");
+  }
+
+  [[nodiscard]] static std::filesystem::path titleTextPath(const std::string& jobId, std::size_t index) {
+    return std::filesystem::temp_directory_path() / (jobId + "_title_" + std::to_string(index) + ".txt");
+  }
+
+  [[nodiscard]] static std::filesystem::path filterGraphPath(const std::string& jobId, bool useCudaDecode) {
+    return std::filesystem::temp_directory_path() / (jobId + (useCudaDecode ? "_cuda.filter" : "_cpu.filter"));
+  }
+
+  static std::string titleFilterChain(const ExportJob& job) {
+    std::vector<std::string> filters;
+    for (std::size_t index = 0; index < job.timeline.titles.size(); ++index) {
+      const auto& title = job.timeline.titles[index];
+      if (title.startUs >= job.rangeStartUs + job.durationUs || title.startUs + title.durationUs <= job.rangeStartUs) continue;
+      std::string path;
+      const auto textPath = job.resourceDirectory.empty() ? titleTextPath(job.id, index) : std::filesystem::u8path(job.resourceDirectory) / ("title_" + std::to_string(index) + ".txt");
+      for (const auto ch : textPath.generic_string()) {
+        if (ch == ':') path += "\\:";
+        else if (ch == '\'') path += "'\\''";
+        else path += ch;
+      }
+      filters.push_back("drawtext=font=Arial:textfile='" + path + "':expansion=none:fontsize=" + std::to_string(title.fontSize) + ":fontcolor=0x" + title.color.substr(1) + ":x=(w-tw)*" + formatDouble(title.positionX / 100.0) + ":y=(h-th)*" + formatDouble(title.positionY / 100.0) + ":box=" + (title.background ? "1" : "0") + ":boxcolor=black@0.55:boxborderw=12:enable='gte(t," + formatSeconds(title.startUs) + ")*lt(t," + formatSeconds(title.startUs + title.durationUs) + ")'");
+    }
+    return filters.empty() ? "null" : join(filters, ",");
   }
 
   void runExportProcess(
@@ -802,16 +983,44 @@ class ExportEngine {
       activeJob_->logs.push_back("FFmpeg export failed with exit code " + std::to_string(exitCode));
     }
     activeJob_->finishedAt = std::chrono::steady_clock::now();
+    for (const bool cuda : {true, false}) { std::error_code ignored; std::filesystem::remove(filterGraphPath(jobId, cuda), ignored); }
+    for (std::size_t index = 0; index < activeJob_->timeline.titles.size(); ++index) {
+      std::error_code ignored;
+      std::filesystem::remove(titleTextPath(jobId, index), ignored);
+    }
   }
 
   int runCommandCancellable(const std::string& command) {
 #ifdef _WIN32
-    STARTUPINFOA startupInfo{};
+    auto diagnosticPath = activeProgressPath_;
+    diagnosticPath += ".stderr.log";
+    SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE diagnosticFile = CreateFileW(diagnosticPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &security, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
+    HANDLE nullFile = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, nullptr);
+    if (diagnosticFile == INVALID_HANDLE_VALUE || nullFile == INVALID_HANDLE_VALUE) {
+      const auto error = GetLastError();
+      if (diagnosticFile != INVALID_HANDLE_VALUE) CloseHandle(diagnosticFile);
+      if (nullFile != INVALID_HANDLE_VALUE) CloseHandle(nullFile);
+      return static_cast<int>(error);
+    }
+    STARTUPINFOW startupInfo{};
     startupInfo.cb = sizeof(startupInfo);
+    startupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startupInfo.hStdInput = nullFile;
+    startupInfo.hStdOutput = nullFile;
+    startupInfo.hStdError = diagnosticFile;
     PROCESS_INFORMATION processInfo{};
-    std::string commandLine = command;
-    if (!CreateProcessA(nullptr, commandLine.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startupInfo, &processInfo)) {
-      return static_cast<int>(GetLastError());
+    const auto length = MultiByteToWideChar(CP_UTF8, 0, command.data(), static_cast<int>(command.size()), nullptr, 0);
+    std::wstring commandLine(length, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, command.data(), static_cast<int>(command.size()), commandLine.data(), length);
+    const auto started = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &startupInfo, &processInfo);
+    const auto startError = GetLastError();
+    CloseHandle(diagnosticFile);
+    CloseHandle(nullFile);
+    if (!started) {
+      std::lock_guard lock(mutex_);
+      if (activeJob_) activeJob_->logs.push_back("Could not start FFmpeg (Windows error " + std::to_string(startError) + ")");
+      return static_cast<int>(startError);
     }
 
     {
@@ -840,6 +1049,20 @@ class ExportEngine {
       }
     }
     CloseHandle(processInfo.hProcess);
+    if (exitCode != 0 && !cancelRequested_) {
+      // Keep a bounded tail of FFmpeg's actual diagnostics in the export panel.
+      std::ifstream diagnostics(diagnosticPath, std::ios::binary);
+      diagnostics.seekg(0, std::ios::end);
+      const auto size = diagnostics.tellg();
+      if (size > 0) {
+        diagnostics.seekg(std::max<std::streamoff>(0, static_cast<std::streamoff>(size) - 12'000));
+        std::string tail((std::istreambuf_iterator<char>(diagnostics)), std::istreambuf_iterator<char>());
+        std::lock_guard lock(mutex_);
+        if (activeJob_) activeJob_->logs.push_back("FFmpeg diagnostics:\n" + tail);
+      }
+    }
+    std::error_code ignored;
+    std::filesystem::remove(diagnosticPath, ignored);
     return static_cast<int>(exitCode);
 #else
     return std::system(command.c_str());
@@ -948,6 +1171,7 @@ class ExportEngine {
         media.kind = item.value("kind", std::string{"video"});
         if (item.contains("metadata") && item.at("metadata").is_object()) {
           media.hasAudio = item.at("metadata").value("hasAudio", media.kind == "audio");
+          media.isStillImage = item.at("metadata").value("isStillImage", false);
         } else {
           media.hasAudio = media.kind == "audio";
         }
@@ -962,6 +1186,7 @@ class ExportEngine {
     }
 
     const auto& sourceTimeline = params.at("timeline");
+    timeline.titles = sourceTimeline.value("titles", std::vector<TitleOverlay>{});
     if (!sourceTimeline.contains("tracks") || !sourceTimeline.at("tracks").is_array()) {
       return timeline;
     }
@@ -988,6 +1213,8 @@ class ExportEngine {
           clip.audioMuted = audio.value("muted", false);
           clip.audioFadeInUs = audio.value("fadeInUs", 0LL);
           clip.audioFadeOutUs = audio.value("fadeOutUs", 0LL);
+          clip.audioFadeOffsetUs = audio.value("fadeOffsetUs", 0LL);
+          clip.audioFadeDurationUs = audio.value("fadeDurationUs", 0LL);
           clip.audioNormalize = audio.value("normalize", false);
           clip.audioCleanup = audio.value("cleanup", false);
           clip.audioStreamIndex = audio.value("streamIndex", 0);
@@ -1013,6 +1240,10 @@ class ExportEngine {
           clip.positionY = transform.value("positionY", 0.0);
           clip.rotation = transform.value("rotation", 0.0);
           clip.opacity = transform.value("opacity", 1.0);
+          clip.videoFadeInUs = transform.value("fadeInUs", 0LL);
+          clip.videoFadeOutUs = transform.value("fadeOutUs", 0LL);
+          clip.videoFadeOffsetUs = transform.value("fadeOffsetUs", 0LL);
+          clip.videoFadeDurationUs = transform.value("fadeDurationUs", 0LL);
         }
         if (item.contains("effects") && item.at("effects").is_array()) {
           for (const auto& effectItem : item.at("effects")) {
@@ -1044,12 +1275,19 @@ class ExportEngine {
 
   [[nodiscard]] static std::int64_t visibleVideoDurationUs(const ExportRequestTimeline& timeline) {
     std::int64_t durationUs = 0;
+    for (const auto& title : timeline.titles) durationUs = std::max(durationUs, title.startUs + title.durationUs);
     for (const auto& clip : timeline.clips) {
       const auto* media = findMedia(timeline.media, clip.mediaId);
       if (!media || media->kind != "video" || clip.trackKind != "video" || !clip.trackVisible || clip.outUs <= clip.inUs) {
         continue;
       }
       durationUs = std::max(durationUs, clip.startUs + clipDisplayDurationUs(clip));
+    }
+    if (durationUs == 0) {
+      for (const auto& clip : timeline.clips) {
+        const auto* media = findMedia(timeline.media, clip.mediaId);
+        if (media && media->hasAudio && !clip.audioMuted && !clip.trackMuted && (clip.trackKind != "video" || clip.trackVisible)) durationUs = std::max(durationUs, clip.startUs + clipDisplayDurationUs(clip));
+      }
     }
     return durationUs;
   }
@@ -1078,7 +1316,7 @@ class ExportEngine {
   }
 
   [[nodiscard]] static bool hasRenderableTimeline(const ExportJob& job) {
-    return countRenderableVideoClips(job) > 0 || countRenderableAudioClips(job) > 0;
+    return !job.timeline.titles.empty() || countRenderableVideoClips(job) > 0 || countRenderableAudioClips(job) > 0;
   }
 
   [[nodiscard]] static std::size_t countRenderableVideoClips(const ExportJob& job) {
@@ -1342,13 +1580,12 @@ class ExportEngine {
                             });
 
     if (lookaheadDepth > 0 && !ultraHighQuality) {
-      args.insert(args.end(), {
-                                  "-rc-lookahead",
-                                  std::to_string(lookaheadDepth),
-                                  "-lookahead_level",
-                                  std::to_string(custom.enabled ? custom.lookaheadLevel
-                                                                : (job.quality == "pro_max" ? 3 : 2)),
-                              });
+      args.insert(args.end(), {"-rc-lookahead", std::to_string(lookaheadDepth)});
+      // Extended lookahead levels depend on codec and GPU capabilities. H.264
+      // only supports level zero; let NVENC use its compatible default otherwise.
+      if (custom.enabled && custom.lookaheadLevel > 0 && job.codec != "h264_nvenc") {
+        args.insert(args.end(), {"-lookahead_level", std::to_string(custom.lookaheadLevel)});
+      }
     }
 
     const auto multipass = custom.enabled

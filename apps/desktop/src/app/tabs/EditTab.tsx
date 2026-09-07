@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ComponentProps,
   type Dispatch,
   type DragEvent as ReactDragEvent,
   type MouseEvent as ReactMouseEvent,
@@ -14,12 +15,15 @@ import {
   type SetStateAction,
   type WheelEvent as ReactWheelEvent
 } from "react";
+import { usePlaybackClock } from "../../features/timeline/usePlaybackClock";
 import {
   Eye,
   EyeOff,
   Film,
+  Flag,
   Filter,
   FolderOpen,
+  FoldHorizontal,
   Import,
   Clipboard,
   ClipboardPaste,
@@ -41,6 +45,7 @@ import {
   StepBack,
   StepForward,
   Trash2,
+  Type,
   Unlock,
   Unlink,
   Volume2,
@@ -61,17 +66,24 @@ import {
   type PreviewState,
   type ProjectSettings,
   type Timeline,
-  type TimelineClip
+  type TimelineClip,
+  type TitleOverlay
 } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 import { IconButton } from "../../components/IconButton";
 import { Modal } from "../../components/Modal";
+import { MarkerPanel } from "../../components/MarkerPanel";
+import { TitlePanel } from "../../components/TitlePanel";
+import { RenderedCompositionFrame, type CompositionRenderStatus } from "../../components/RenderedCompositionFrame";
+import { NumberField } from "../../components/NumberField";
+import { TimecodeInput } from "../../components/TimecodeInput";
 import { Panel } from "../../components/Panel";
+import { PanelDivider } from "../../components/PanelDivider";
 import { Slider } from "../../components/Slider";
 import { Toggle } from "../../components/Toggle";
 import { executeCommand } from "../../features/commands/commandClient";
-import { isTypingTarget, matchesShortcut, shortcutFor, type ShortcutMap } from "../../features/commands/shortcuts";
+import { isEditorShortcutBlocked, matchesShortcut, shortcutFor, type ShortcutMap } from "../../features/commands/shortcuts";
 import type { LogStatus } from "../../features/logging/appLog";
 import { importMediaPaths, type ImportMediaResult } from "../../features/media/importMedia";
 import {
@@ -106,7 +118,7 @@ import {
 } from "../../features/playback/preview";
 
 const timelineHeaderWidth = 128;
-const minTimelineZoom = 32;
+const minTimelineZoom = 4;
 const maxTimelineZoom = 180;
 const timelineZoomStep = 8;
 const minTimelineDurationUs = 10_000_000;
@@ -136,7 +148,7 @@ interface EditTabProps {
   onImportMediaResult: (result: ImportMediaResult | null) => void;
   onRemoveMediaAsset: (assetId: string, data?: unknown) => void;
   onRenameMediaAsset: (assetId: string, nextName: string) => void;
-  onRelinkMediaAsset: (assetId: string, asset: MediaAsset) => void;
+  onRelinkMediaAsset: (assetId: string, path: string) => Promise<void>;
   missingMediaPaths: string[];
   projectPath?: string;
   shortcuts: ShortcutMap;
@@ -184,6 +196,12 @@ interface MediaDropPreviewState {
   invalid: boolean;
 }
 
+interface TimelineGapSelection {
+  trackId: string;
+  startUs: number;
+  endUs: number;
+}
+
 type EditContextMenuState =
   | {
       kind: "media";
@@ -200,6 +218,14 @@ type EditContextMenuState =
   | {
       kind: "track";
       trackId: string;
+      x: number;
+      y: number;
+    }
+  | {
+      kind: "gap";
+      trackId: string;
+      startUs: number;
+      endUs: number;
       x: number;
       y: number;
     };
@@ -235,8 +261,6 @@ export function EditTab({
   shortcuts,
   setStatusMessage
 }: EditTabProps) {
-  const playbackFrameRef = useRef<number | null>(null);
-  const lastPlaybackTimeRef = useRef<number | null>(null);
   const internalMediaDragRef = useRef(false);
   const mediaDragStateRef = useRef<MediaPointerDragState | null>(null);
   const mediaDragFrameRef = useRef<number | null>(null);
@@ -249,13 +273,23 @@ export function EditTab({
   const lastTimelineDropRef = useRef<{ key: string; at: number } | null>(null);
   const importDroppedPathsRef = useRef<(paths: string[]) => Promise<void>>(async () => undefined);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
+  const [selectedGap, setSelectedGap] = useState<TimelineGapSelection | null>(null);
   const [mediaDragOver, setMediaDragOver] = useState(false);
   const [snapping, setSnapping] = useState(true);
   const [soloTrackIds, setSoloTrackIds] = useState<string[]>([]);
   const [loopPlayback, setLoopPlayback] = useState(false);
+  const [markersOpen, setMarkersOpen] = useState(false);
+  const [titleEditor, setTitleEditor] = useState<string | null>(null);
   const [previewQuality, setPreviewQuality] = useState<PreviewQuality>("Proxy");
   const [previewScale, setPreviewScale] = useState<PreviewScaleMode>("fit");
   const [timelineZoom, setTimelineZoom] = useState(72);
+  const [previewHeight, setPreviewHeight] = useState(() => {
+    try { const value = Number(localStorage.getItem("editor.preview-height") ?? 56); return Number.isFinite(value) ? clamp(value, 30, 75) : 56; } catch { return 56; }
+  });
+  function resizePreview(value: number) {
+    setPreviewHeight(value);
+    try { localStorage.setItem("editor.preview-height", String(value)); } catch { /* Layout still works if storage is unavailable. */ }
+  }
   const [timelineClipboard, setTimelineClipboard] = useState<ClipboardClip[]>([]);
   const [draggingMediaId, setDraggingMediaId] = useState<string | null>(null);
   const [mediaDropTrackId, setMediaDropTrackId] = useState<string | null>(null);
@@ -279,8 +313,19 @@ export function EditTab({
   const contextMediaAsset = contextMenu?.kind === "media" ? mediaAssets.find((asset) => asset.id === contextMenu.assetId) : undefined;
   const contextClip = contextMenu?.kind === "clip" ? timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === contextMenu.clipId) : undefined;
   const contextTrack = contextMenu?.kind === "track" ? timeline.tracks.find((track) => track.id === contextMenu.trackId) : undefined;
+  const contextGap = contextMenu?.kind === "gap" ? contextMenu : undefined;
+  const contextGapTrack = contextGap ? timeline.tracks.find((track) => track.id === contextGap.trackId) : undefined;
   const speedDialogClip = speedDialogClipId ? timeline.tracks.flatMap((track) => track.clips).find((clip) => clip.id === speedDialogClipId) : undefined;
+  const speedDialogClips = speedDialogClip
+    ? selectedClipIds.includes(speedDialogClip.id)
+      ? timeline.tracks.flatMap((track) => track.clips).filter((clip) => selectedClipIds.includes(clip.id))
+      : [speedDialogClip]
+    : [];
   const activeVideoClip = findActiveClip(timeline, playheadUs, "video", soloTrackIds);
+  const activeVideoItems = findActiveClips(timeline, playheadUs, "video", soloTrackIds).flatMap((clip) => {
+    const asset = mediaAssets.find((item) => item.id === clip.mediaId);
+    return asset ? [{ clip, asset }] : [];
+  });
   const activeAudioClips = findActiveClips(timeline, playheadUs, "audio", soloTrackIds);
   const activeVideoAsset = activeVideoClip ? mediaAssets.find((asset) => asset.id === activeVideoClip.mediaId) : undefined;
   const activeAudioItems = useMemo(
@@ -293,6 +338,8 @@ export function EditTab({
         .filter((item): item is { clip: TimelineClip; asset: MediaAsset } => Boolean(item)),
     [activeAudioClips, mediaAssets]
   );
+  const compositeAudioItems = [...activeAudioItems, ...activeVideoItems.filter(({ clip, asset }) => asset.metadata?.hasAudio && !clip.audio?.muted && !timeline.tracks.find((track) => track.id === clip.trackId)?.muted)];
+  const playbackClockClipId = compositeAudioItems[0]?.clip.id ?? (activeVideoAsset && !activeVideoAsset.metadata?.isStillImage ? activeVideoClip?.id ?? "" : "");
   const missingMediaSet = useMemo(() => new Set(missingMediaPaths), [missingMediaPaths]);
   const visibleMediaAssets = useMemo(
     () => filterAndSortMediaAssets(mediaAssets, {
@@ -311,6 +358,10 @@ export function EditTab({
     setPlaying(false);
     setPlayheadUs(nextPlayheadUs);
   }, []);
+  const { onPlaybackClock: onMediaPlaybackClock, onPlaybackClockUnavailable: onMediaPlaybackClockUnavailable } = usePlaybackClock({
+    playing, playheadUs, clipId: playbackClockClipId, durationUs: getTimelineContentEndUs(timeline),
+    speedPercent: previewSpeedPercent, loop: loopPlayback, setPlaying, setPlayheadUs
+  });
 
   function applyEngineTimeline(data: unknown) {
     const nextTimeline = (data as { timeline?: Timeline } | undefined)?.timeline;
@@ -348,6 +399,7 @@ export function EditTab({
   }
 
   function selectClip(clipId: string, mode: "single" | "toggle" | "range" = "single") {
+    setSelectedGap(null);
     if (mode === "toggle") {
       setSelectedClipIds((current) => (current.includes(clipId) ? current.filter((id) => id !== clipId) : [...current, clipId]));
       return;
@@ -371,6 +423,16 @@ export function EditTab({
 
   function clearClipSelection() {
     setSelectedClipIds([]);
+    setSelectedGap(null);
+  }
+
+  function selectGap(gap: TimelineGapSelection) {
+    setSelectedClipIds([]);
+    setSelectedGap(gap);
+    setStatusMessage(`Selected ${formatPreciseDuration(gap.endUs - gap.startUs)} gap`, {
+      source: "timeline",
+      details: { trackId: gap.trackId, startUs: gap.startUs, endUs: gap.endUs }
+    });
   }
 
   async function runCommand(command: EditorCommand, fallbackError = "Command failed"): Promise<CommandResult> {
@@ -384,20 +446,10 @@ export function EditTab({
   }
 
   async function runTimelineCommandBatch(items: Array<{ command: EditorCommand; fallbackError: string }>) {
-    const results: CommandResult[] = [];
-    let lastTimelineData: unknown;
-    for (const item of items) {
-      const result = await runCommand(item.command, item.fallbackError);
-      results.push(result);
-      if (result.data) {
-        lastTimelineData = result.data;
-      }
-      if (!result.ok) {
-        break;
-      }
-    }
-    applyEngineTimeline(lastTimelineData);
-    return results;
+    if (!items.length) return [];
+    const result = await runCommand({ type: "execute_batch", commands: items.map((item) => item.command) }, items[0].fallbackError);
+    if (result.ok) applyEngineTimeline(result.data);
+    return items.map(() => result);
   }
 
   async function splitAtPlayhead(targetClip?: TimelineClip) {
@@ -497,9 +549,30 @@ export function EditTab({
   }
 
   function fitTimeline() {
-    const durationSeconds = Math.max(1, Math.ceil(timeline.durationUs / 1_000_000));
-    const fittedZoom = clamp(Math.floor(1100 / durationSeconds), minTimelineZoom, maxTimelineZoom);
+    const durationSeconds = Math.max(1, getTimelineContentEndUs(timeline) / 1_000_000);
+    const viewport = document.querySelector<HTMLElement>(".timeline-scroll");
+    const width = Math.max(100, (viewport?.clientWidth ?? 900) - timelineHeaderWidth - 30);
+    const fittedZoom = clamp(width / durationSeconds, minTimelineZoom, maxTimelineZoom);
     setTimelineZoom(fittedZoom);
+    viewport?.scrollTo({ left: 0 });
+  }
+
+  function seekEdit(direction: -1 | 1) {
+    const edges = [0, ...getTimelineClips().flatMap((clip) => [clip.startUs, clip.startUs + getClipDisplayDurationUs(clip)])];
+    const candidates = edges.filter((time) => direction < 0 ? time < playheadUs - 1 : time > playheadUs + 1);
+    if (candidates.length) {
+      setPlaying(false);
+      setPlayheadClamped(direction < 0 ? Math.max(...candidates) : Math.min(...candidates));
+    }
+  }
+
+  async function applyInspectorCommand(command: EditorCommand, throwOnFailure = false) {
+    const result = await runCommand(command);
+    if (result.ok) applyEngineTimeline(result.data);
+    else {
+      setStatusMessage(result.error ?? "Could not apply edit", { level: "error" });
+      if (throwOnFailure) throw new Error(result.error ?? "Could not apply edit");
+    }
   }
 
   function setPlayheadClamped(valueUs: number) {
@@ -519,11 +592,11 @@ export function EditTab({
 
   function stopPlayback() {
     setPlaying(false);
-    if (playbackFrameRef.current !== null) {
-      cancelAnimationFrame(playbackFrameRef.current);
-      playbackFrameRef.current = null;
-    }
-    lastPlaybackTimeRef.current = null;
+  }
+
+  function togglePlayback() {
+    if (!playing && playheadUs >= getTimelineContentEndUs(timeline)) setPlayheadUs(0);
+    setPlaying((value) => !value);
   }
 
   async function nudgeSelectedClip(direction: -1 | 1, targetClip?: TimelineClip) {
@@ -539,7 +612,9 @@ export function EditTab({
       return;
     }
 
-    const moved = clips.map((clip) => ({ ...clip, startUs: Math.max(0, clip.startUs + direction * 100_000) }));
+    const frameUs = Math.round(1_000_000 / projectSettings.fps);
+    const deltaUs = Math.max(-Math.min(...clips.map((clip) => clip.startUs)), direction * frameUs);
+    const moved = clips.map((clip) => ({ ...clip, startUs: clip.startUs + deltaUs }));
     const results = await runTimelineCommandBatch(
       moved.map((clip) => ({
         command: {
@@ -591,11 +666,11 @@ export function EditTab({
       return;
     }
 
-    const deltaUs = nextStartUs - clip.startUs;
+    const deltaUs = Math.max(-Math.min(...selectedMoveClips.map((item) => item.startUs)), nextStartUs - clip.startUs);
     const movedClips = selectedMoveClips.map((item) => ({
       ...item,
       trackId: item.id === clipId ? targetTrackId : item.trackId,
-      startUs: Math.max(0, item.startUs + deltaUs)
+      startUs: item.startUs + deltaUs
     }));
     const changedClips = movedClips.filter((item) => {
       const original = selectedMoveClips.find((candidate) => candidate.id === item.id);
@@ -732,7 +807,7 @@ export function EditTab({
       selectedIds.push(videoClipId);
     }
 
-    if (asset.kind === "audio" || asset.metadata?.hasAudio) {
+    if (targetTrack.kind === "audio" && (asset.kind === "audio" || asset.metadata?.hasAudio)) {
       const audioStreams = getAudioStreams(asset);
       const existingAudioTracks = timeline.tracks.filter((track) => track.kind === "audio" && !track.locked);
       const orderedAudioTracks = targetTrack.kind === "audio" ? [targetTrack, ...existingAudioTracks.filter((track) => track.id !== targetTrack.id)] : existingAudioTracks;
@@ -789,17 +864,6 @@ export function EditTab({
         selectedIds.push(audioClipId);
       }
 
-      if (targetTrack.kind === "video" && selectedIds.length > 1) {
-        commands.push({
-          command: {
-            type: "apply_audio_adjustment",
-            clipId: videoClipId,
-            adjustment: { muted: true },
-            history: { mode: "replace", group: groupId }
-          },
-          fallbackError: "Mute embedded video audio failed"
-        });
-      }
     }
 
     const results = await runTimelineCommandBatch(commands);
@@ -813,6 +877,51 @@ export function EditTab({
     });
 
     void getMediaDurationUs(asset, fallbackDurationUs);
+  }
+
+  async function deleteSelectedGap(targetGap: TimelineGapSelection | null = selectedGap) {
+    if (!targetGap) {
+      setStatusMessage("No gap selected", { level: "warning" });
+      return;
+    }
+
+    const track = timeline.tracks.find((item) => item.id === targetGap.trackId);
+    const currentGap = track ? getTrackGaps(track).find((gap) => sameTimelineGap(gap, targetGap)) : undefined;
+    if (!track || !currentGap) {
+      setSelectedGap(null);
+      setStatusMessage("That gap no longer exists", { level: "warning" });
+      return;
+    }
+    if (track.locked) {
+      setStatusMessage(`${track.name} is locked`, { level: "warning" });
+      return;
+    }
+
+    const gapDurationUs = currentGap.endUs - currentGap.startUs;
+    const trailingClips = [...track.clips]
+      .filter((clip) => clip.startUs >= currentGap.endUs)
+      .sort((left, right) => left.startUs - right.startUs);
+    const groupId = `delete-gap:${track.id}:${currentGap.startUs}:${currentGap.endUs}:${Date.now()}`;
+    const results = await runTimelineCommandBatch(
+      trailingClips.map((clip) => ({
+        command: {
+          type: "move_clip",
+          clipId: clip.id,
+          trackId: track.id,
+          startUs: Math.max(0, clip.startUs - gapDurationUs),
+          snapping: false,
+          history: { mode: "replace", group: groupId }
+        },
+        fallbackError: "Delete gap failed"
+      }))
+    );
+    setSelectedGap(null);
+    const failed = results.find((result) => !result.ok);
+    setStatusMessage(failed ? failed.error ?? "Delete gap failed" : `Deleted ${formatPreciseDuration(gapDurationUs)} gap on ${track.name}`, {
+      level: failed ? "error" : "success",
+      source: "timeline",
+      details: { ...currentGap, movedClipIds: trailingClips.map((clip) => clip.id) }
+    });
   }
 
   async function importDroppedPaths(paths: string[]) {
@@ -1009,6 +1118,7 @@ export function EditTab({
   function openClipContextMenu(event: ReactMouseEvent, clip: TimelineClip) {
     event.preventDefault();
     event.stopPropagation();
+    setSelectedGap(null);
     if (!selectedClipIds.includes(clip.id)) {
       setSelectedClipIds([clip.id]);
     }
@@ -1077,15 +1187,7 @@ export function EditTab({
         return;
       }
 
-      const metadata = await probeMediaPath(selection).catch(() => undefined);
-      const relinkedAsset = {
-        ...pathToMediaAsset(selection, metadata),
-        id: asset.id,
-        name: asset.name,
-        importedAt: asset.importedAt,
-        intelligence: asset.intelligence
-      };
-      onRelinkMediaAsset(asset.id, relinkedAsset);
+      await onRelinkMediaAsset(asset.id, selection);
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Relink media failed", { level: "error", source: "media" });
     }
@@ -1228,7 +1330,12 @@ export function EditTab({
           startUs: clip.startUs,
           inUs: clip.inUs,
           outUs: clip.outUs,
-          speedPercent: normalizeClipSpeedPercent(clip.speedPercent)
+          speedPercent: normalizeClipSpeedPercent(clip.speedPercent),
+          color: clip.color,
+          audio: clip.audio,
+          transform: clip.transform,
+          effects: clip.effects,
+          lut: clip.lut
         },
         fallbackError: `${actionLabel} clip failed`
       }))
@@ -1241,6 +1348,19 @@ export function EditTab({
       level: failed ? "error" : "success",
       source: "timeline",
       details: { clipIds: clips.map((clip) => clip.id) }
+    });
+  }
+
+  function openGapContextMenu(event: ReactMouseEvent, gap: TimelineGapSelection) {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedClipIds([]);
+    setSelectedGap(gap);
+    setContextMenu({
+      kind: "gap",
+      ...gap,
+      x: event.clientX,
+      y: event.clientY
     });
   }
 
@@ -1265,11 +1385,36 @@ export function EditTab({
       return;
     }
 
+    const clips = speedDialogClips;
+    const lockedTrackName = lockedTrackNameForClips(clips);
+    if (lockedTrackName) {
+      setStatusMessage(`${lockedTrackName} is locked`, { level: "warning", source: "timeline" });
+      return;
+    }
+
     const nextSpeedPercent = normalizeClipSpeedPercent(speedDraft);
+    const nextDurationUs = clips.reduce(
+      (durationUs, clip) => durationUs + getClipDisplayDurationUs({ ...clip, speedPercent: nextSpeedPercent }),
+      0
+    );
+    const groupId = `change-speed:${Date.now()}`;
     setSpeedDialogClipId("");
-    const result = await runCommand({ type: "apply_clip_speed", clipId: speedDialogClip.id, speedPercent: nextSpeedPercent }, "Change speed failed");
-    applyEngineTimeline(result.data);
-    setStatusMessage(result.ok ? `Clip speed ${nextSpeedPercent}%` : result.error ?? "Change speed failed", { level: result.ok ? "success" : "error", source: "timeline" });
+    const results = await runTimelineCommandBatch(
+      clips.map((clip) => ({
+        command: {
+          type: "apply_clip_speed",
+          clipId: clip.id,
+          speedPercent: nextSpeedPercent,
+          history: { mode: "replace", group: groupId }
+        },
+        fallbackError: "Change speed failed"
+      }))
+    );
+    const failed = results.find((result) => !result.ok);
+    setStatusMessage(failed ? failed.error ?? "Change speed failed" : `Set ${clips.length} clip${clips.length === 1 ? "" : "s"} to ${nextSpeedPercent}% - combined duration ${formatPreciseDuration(nextDurationUs)}`, {
+      level: failed ? "error" : "success",
+      source: "timeline"
+    });
   }
 
   async function renameTrack(trackId: string) {
@@ -1325,82 +1470,269 @@ export function EditTab({
     setStatusMessage(result.ok ? `Deleted ${track.name}` : result.error ?? "Delete track failed", { level: result.ok ? "success" : "error", source: "timeline" });
   }
 
+  function detachedAudioClipsForVideo(videoClip: TimelineClip) {
+    const detachedIdPrefix = `audio_${videoClip.id}_`;
+    return timeline.tracks
+      .filter((track) => track.kind === "audio")
+      .flatMap((track) => track.clips)
+      .filter((clip) => clip.mediaId === videoClip.mediaId && clip.id.startsWith(detachedIdPrefix));
+  }
+
+  function detachedSourceVideoClip(audioClip: TimelineClip) {
+    return timeline.tracks
+      .filter((track) => track.kind === "video")
+      .flatMap((track) => track.clips)
+      .filter((clip) => clip.mediaId === audioClip.mediaId && audioClip.id.startsWith(`audio_${clip.id}_`))
+      .sort((left, right) => right.id.length - left.id.length)[0];
+  }
+
+  function attachableAudioPairs(targetClip: TimelineClip) {
+    const selection = selectedClipsForAction(targetClip);
+    const pairs = new Map<string, { videoClip: TimelineClip; audioClips: TimelineClip[] }>();
+    const addPair = (videoClip: TimelineClip, audioClips: TimelineClip[]) => {
+      if (audioClips.length === 0) {
+        return;
+      }
+      const existing = pairs.get(videoClip.id);
+      pairs.set(videoClip.id, {
+        videoClip,
+        audioClips: [...new Map([...(existing?.audioClips ?? []), ...audioClips].map((clip) => [clip.id, clip] as const)).values()]
+      });
+    };
+
+    for (const clip of selection) {
+      const track = trackForClip(clip);
+      if (track?.kind === "video") {
+        addPair(clip, detachedAudioClipsForVideo(clip));
+      } else if (track?.kind === "audio") {
+        const videoClip = detachedSourceVideoClip(clip);
+        if (videoClip) {
+          addPair(videoClip, [clip]);
+        }
+      }
+    }
+
+    return [...pairs.values()];
+  }
+
+  async function attachClipAudio(targetClip: TimelineClip) {
+    const pairs = attachableAudioPairs(targetClip);
+    if (pairs.length === 0) {
+      setStatusMessage("No detached audio found for the selection", { level: "warning", source: "audio" });
+      return;
+    }
+
+    const affectedClips = pairs.flatMap((pair) => [pair.videoClip, ...pair.audioClips]);
+    const lockedTrackName = lockedTrackNameForClips(affectedClips);
+    if (lockedTrackName) {
+      setStatusMessage(`${lockedTrackName} is locked`, { level: "warning", source: "audio" });
+      return;
+    }
+
+    const groupId = `attach-audio:${Date.now()}`;
+    const commands: Array<{ command: EditorCommand; fallbackError: string }> = [];
+    for (const pair of pairs) {
+      const primaryAudioClip = [...pair.audioClips].sort(
+        (left, right) => (normalizeAudioAdjustment(left.audio).streamIndex ?? 0) - (normalizeAudioAdjustment(right.audio).streamIndex ?? 0)
+      )[0];
+      commands.push({
+        command: {
+          type: "apply_audio_adjustment",
+          clipId: pair.videoClip.id,
+          adjustment: { ...normalizeAudioAdjustment(primaryAudioClip.audio), muted: false },
+          history: { mode: "replace", group: groupId }
+        },
+        fallbackError: "Attach audio settings failed"
+      });
+      commands.push(
+        ...pair.audioClips.map((audioClip) => ({
+          command: {
+            type: "delete_clip" as const,
+            clipId: audioClip.id,
+            history: { mode: "replace" as const, group: groupId }
+          },
+          fallbackError: "Remove detached audio failed"
+        }))
+      );
+    }
+
+    const results = await runTimelineCommandBatch(commands);
+    const failed = results.find((result) => !result.ok);
+    if (!failed) {
+      setSelectedClipIds(pairs.map((pair) => pair.videoClip.id));
+    }
+    const audioClipCount = pairs.reduce((count, pair) => count + pair.audioClips.length, 0);
+    setStatusMessage(failed ? failed.error ?? "Attach audio failed" : `Attached ${audioClipCount} audio clip${audioClipCount === 1 ? "" : "s"} to ${pairs.length} video clip${pairs.length === 1 ? "" : "s"}`, {
+      level: failed ? "error" : "success",
+      source: "audio",
+      details: { videoClipIds: pairs.map((pair) => pair.videoClip.id), audioClipIds: pairs.flatMap((pair) => pair.audioClips.map((clip) => clip.id)) }
+    });
+  }
+
+  async function mergeAudioTracks(targetTrackId: string, mode: "selected" | "all", targetClip?: TimelineClip) {
+    const targetTrack = timeline.tracks.find((track) => track.id === targetTrackId && track.kind === "audio");
+    if (!targetTrack) {
+      setStatusMessage("Choose an audio track to merge into", { level: "warning", source: "audio" });
+      return;
+    }
+
+    const audioTracks = timeline.tracks.filter((track) => track.kind === "audio");
+    const scopedClips = mode === "all"
+      ? audioTracks.filter((track) => track.id !== targetTrack.id).flatMap((track) => track.clips)
+      : selectedClipsForAction(targetClip).filter((clip) => trackForClip(clip)?.kind === "audio" && clip.trackId !== targetTrack.id);
+    const movingClipIds = new Set(scopedClips.map((clip) => clip.id));
+    const sourceTracks = audioTracks.filter((track) => track.id !== targetTrack.id && (mode === "all" || track.clips.some((clip) => movingClipIds.has(clip.id))));
+    if (sourceTracks.length === 0) {
+      setStatusMessage("No other audio tracks are selected to merge", { level: "warning", source: "audio" });
+      return;
+    }
+
+    const lockedTrack = [targetTrack, ...sourceTracks].find((track) => track.locked);
+    if (lockedTrack) {
+      setStatusMessage(`${lockedTrack.name} is locked`, { level: "warning", source: "audio" });
+      return;
+    }
+
+    const emptiedSourceTracks = sourceTracks.filter((track) => mode === "all" || track.clips.every((clip) => movingClipIds.has(clip.id)));
+    const groupId = `merge-audio-tracks:${targetTrack.id}:${Date.now()}`;
+    const commands: Array<{ command: EditorCommand; fallbackError: string }> = [
+      ...scopedClips.map((clip) => ({
+        command: {
+          type: "move_clip" as const,
+          clipId: clip.id,
+          trackId: targetTrack.id,
+          startUs: clip.startUs,
+          snapping: false,
+          history: { mode: "replace" as const, group: groupId }
+        },
+        fallbackError: "Merge audio clip failed"
+      })),
+      ...emptiedSourceTracks.map((track) => ({
+        command: {
+          type: "delete_track" as const,
+          trackId: track.id,
+          history: { mode: "replace" as const, group: groupId }
+        },
+        fallbackError: "Remove merged audio track failed"
+      }))
+    ];
+
+    const results = await runTimelineCommandBatch(commands);
+    const failed = results.find((result) => !result.ok);
+    if (!failed && mode === "selected") {
+      setSelectedClipIds(selectedClipsForAction(targetClip).filter((clip) => trackForClip(clip)?.kind === "audio").map((clip) => clip.id));
+    }
+    setSoloTrackIds((current) => current.filter((id) => !emptiedSourceTracks.some((track) => track.id === id)));
+    setStatusMessage(failed ? failed.error ?? "Merge audio tracks failed" : `Merged ${sourceTracks.length} audio track${sourceTracks.length === 1 ? "" : "s"} into ${targetTrack.name}`, {
+      level: failed ? "error" : "success",
+      source: "audio",
+      details: { targetTrackId, sourceTrackIds: sourceTracks.map((track) => track.id), movedClipIds: scopedClips.map((clip) => clip.id) }
+    });
+  }
+
   async function detachClipAudio(clip: TimelineClip) {
-    const sourceTrack = trackForClip(clip);
-    const asset = mediaAssets.find((item) => item.id === clip.mediaId);
-    if (!sourceTrack || sourceTrack.kind !== "video" || !asset?.metadata?.hasAudio) {
+    const sourceClips = selectedClipsForAction(clip).filter((candidate) => {
+      const sourceTrack = trackForClip(candidate);
+      const asset = mediaAssets.find((item) => item.id === candidate.mediaId);
+      return sourceTrack?.kind === "video" && Boolean(asset?.metadata?.hasAudio) && detachedAudioClipsForVideo(candidate).length === 0;
+    });
+    if (sourceClips.length === 0) {
       setStatusMessage("Selected clip has no detachable audio", { level: "warning", source: "audio" });
       return;
     }
 
-    const refreshedMetadata = asset.metadata?.audioStreamCount ? asset.metadata : await probeMediaPath(asset.path).catch(() => undefined);
-    const audioStreams = getAudioStreams({ ...asset, metadata: refreshedMetadata ?? asset.metadata });
+    const lockedTrackName = lockedTrackNameForClips(sourceClips);
+    if (lockedTrackName) {
+      setStatusMessage(`${lockedTrackName} is locked`, { level: "warning", source: "audio" });
+      return;
+    }
+
+    const sources = await Promise.all(sourceClips.map(async (sourceClip) => {
+      const asset = mediaAssets.find((item) => item.id === sourceClip.mediaId)!;
+      const refreshedMetadata = asset.metadata?.audioStreamCount ? asset.metadata : await probeMediaPath(asset.path).catch(() => undefined);
+      return {
+        sourceClip,
+        asset,
+        audioStreams: getAudioStreams({ ...asset, metadata: refreshedMetadata ?? asset.metadata })
+      };
+    }));
+    const maxStreamCount = Math.max(...sources.map((source) => source.audioStreams.length));
     const existingAudioTracks = timeline.tracks.filter((track) => track.kind === "audio" && !track.locked);
-    const missingTrackCount = Math.max(0, audioStreams.length - existingAudioTracks.length);
-    const createdTrackIds = Array.from({ length: missingTrackCount }, (_, index) => `a_detached_${Date.now()}_${index}`);
-    const targetTrackIds = [...existingAudioTracks.map((track) => track.id), ...createdTrackIds].slice(0, audioStreams.length);
-    const detachedClipIds = audioStreams.map((stream, index) => `audio_${clip.id}_${stream.index}_${Date.now()}_${index}`);
-    const groupId = `detach-audio:${clip.id}:${Date.now()}`;
+    const missingTrackCount = Math.max(0, maxStreamCount - existingAudioTracks.length);
+    const operationTime = Date.now();
+    const createdTrackIds = Array.from({ length: missingTrackCount }, (_, index) => `a_detached_${operationTime}_${index}`);
+    const targetTrackIds = [...existingAudioTracks.map((track) => track.id), ...createdTrackIds].slice(0, maxStreamCount);
+    const detachedClipIds: string[] = [];
+    const groupId = `detach-audio:${operationTime}`;
 
     const commands: Array<{ command: EditorCommand; fallbackError: string }> = [
-      { command: { type: "apply_audio_adjustment", clipId: clip.id, adjustment: { muted: true }, history: { mode: "replace", group: groupId } }, fallbackError: "Mute source clip failed" },
       ...createdTrackIds.map((trackId, index) => ({
         command: {
           type: "add_track" as const,
           trackId,
-          name: audioStreams[existingAudioTracks.length + index]?.title || `Audio ${timeline.tracks.filter((track) => track.kind === "audio").length + index + 1}`,
+          name: sources[0]?.audioStreams[existingAudioTracks.length + index]?.title || `Audio ${timeline.tracks.filter((track) => track.kind === "audio").length + index + 1}`,
           kind: "audio" as const,
           index: timeline.tracks.length + index,
           history: { mode: "replace" as const, group: groupId }
         },
         fallbackError: "Add detached audio track failed"
-      })),
-      ...audioStreams.flatMap((stream, index) => {
-        const detachedAudio = {
-          ...defaultAudioAdjustment,
-          ...clip.audio,
-          muted: false,
-          streamIndex: stream.index
-        };
-        const detachedClipId = detachedClipIds[index];
-        const targetTrackId = targetTrackIds[index];
-        return [
+      }))
+    ];
+    for (const [sourceIndex, source] of sources.entries()) {
+      commands.push({
+        command: {
+          type: "apply_audio_adjustment",
+          clipId: source.sourceClip.id,
+          adjustment: { muted: true },
+          history: { mode: "replace", group: groupId }
+        },
+        fallbackError: "Mute source clip failed"
+      });
+      for (const [streamPosition, stream] of source.audioStreams.entries()) {
+        const detachedClipId = `audio_${source.sourceClip.id}_${stream.index}_${operationTime}_${sourceIndex}_${streamPosition}`;
+        detachedClipIds.push(detachedClipId);
+        commands.push(
           {
             command: {
-              type: "add_clip" as const,
+              type: "add_clip",
               clipId: detachedClipId,
-              mediaId: clip.mediaId,
-              trackId: targetTrackId,
-              startUs: clip.startUs,
-              inUs: clip.inUs,
-              outUs: clip.outUs,
-              speedPercent: normalizeClipSpeedPercent(clip.speedPercent),
-              history: { mode: "replace" as const, group: groupId }
+              mediaId: source.sourceClip.mediaId,
+              trackId: targetTrackIds[streamPosition],
+              startUs: source.sourceClip.startUs,
+              inUs: source.sourceClip.inUs,
+              outUs: source.sourceClip.outUs,
+              speedPercent: normalizeClipSpeedPercent(source.sourceClip.speedPercent),
+              history: { mode: "replace", group: groupId }
             },
             fallbackError: "Detach audio failed"
           },
           {
             command: {
-              type: "apply_audio_adjustment" as const,
+              type: "apply_audio_adjustment",
               clipId: detachedClipId,
-              adjustment: detachedAudio,
-              history: { mode: "replace" as const, group: groupId }
+              adjustment: {
+                ...defaultAudioAdjustment,
+                ...source.sourceClip.audio,
+                muted: false,
+                streamIndex: stream.index
+              },
+              history: { mode: "replace", group: groupId }
             },
             fallbackError: "Detached audio settings failed"
           }
-        ];
-      })
-    ];
+        );
+      }
+    }
 
     const results = await runTimelineCommandBatch(commands);
     if (results.every((result) => result.ok)) {
       setSelectedClipIds(detachedClipIds);
     }
     const failed = results.find((result) => !result.ok);
-    setStatusMessage(failed ? failed.error ?? "Detach audio failed" : `Detached ${audioStreams.length} audio track${audioStreams.length === 1 ? "" : "s"} from ${asset.name}`, {
+    setStatusMessage(failed ? failed.error ?? "Detach audio failed" : `Detached ${detachedClipIds.length} audio clip${detachedClipIds.length === 1 ? "" : "s"} from ${sourceClips.length} video clip${sourceClips.length === 1 ? "" : "s"}`, {
       level: failed ? "error" : "success",
       source: "audio",
-      details: { sourceClipId: clip.id, audioClipIds: detachedClipIds, trackIds: targetTrackIds, streamIndexes: audioStreams.map((stream) => stream.index) }
+      details: { sourceClipIds: sourceClips.map((sourceClip) => sourceClip.id), audioClipIds: detachedClipIds, trackIds: targetTrackIds }
     });
   }
 
@@ -1456,8 +1788,14 @@ export function EditTab({
     if (contextMenu?.kind === "clip" && contextClip) {
       const playheadInsideClip = isPlayheadInsideClip(contextClip, playheadUs);
       const contextTrack = trackForClip(contextClip);
-      const contextAsset = mediaAssets.find((asset) => asset.id === contextClip.mediaId);
-      const canDetachAudio = contextTrack?.kind === "video" && Boolean(contextAsset?.metadata?.hasAudio);
+      const contextSelection = selectedClipsForAction(contextClip);
+      const attachablePairs = attachableAudioPairs(contextClip);
+      const detachableSelection = contextSelection.filter((clip) => {
+        const track = trackForClip(clip);
+        const asset = mediaAssets.find((item) => item.id === clip.mediaId);
+        return track?.kind === "video" && Boolean(asset?.metadata?.hasAudio) && detachedAudioClipsForVideo(clip).length === 0;
+      });
+      const mergeableSelectedAudio = contextTrack?.kind === "audio" && contextSelection.some((clip) => trackForClip(clip)?.kind === "audio" && clip.trackId !== contextTrack.id);
       return [
         {
           id: "split-at-playhead",
@@ -1486,14 +1824,28 @@ export function EditTab({
         },
         {
           id: "detach-audio",
-          label: "Detach Audio",
+          label: detachableSelection.length > 1 ? `Detach Audio from ${detachableSelection.length} Clips` : "Detach Audio",
           icon: <Unlink size={15} />,
-          disabled: !canDetachAudio,
+          disabled: detachableSelection.length === 0,
           onSelect: () => void detachClipAudio(contextClip)
         },
         {
+          id: "attach-audio",
+          label: attachablePairs.length > 1 ? "Attach Audio to Selection" : "Attach Audio",
+          icon: <Link2 size={15} />,
+          disabled: attachablePairs.length === 0,
+          onSelect: () => void attachClipAudio(contextClip)
+        },
+        {
+          id: "merge-selected-audio-tracks",
+          label: "Merge Selected Audio Tracks Here",
+          icon: <Music size={15} />,
+          disabled: !mergeableSelectedAudio,
+          onSelect: () => contextTrack && void mergeAudioTracks(contextTrack.id, "selected", contextClip)
+        },
+        {
           id: "change-speed",
-          label: "Change Speed...",
+          label: contextSelection.length > 1 ? `Change Speed for ${contextSelection.length} Clips...` : "Change Speed...",
           icon: <SlidersHorizontal size={15} />,
           onSelect: () => startChangingClipSpeed(contextClip)
         },
@@ -1532,8 +1884,22 @@ export function EditTab({
       ];
     }
 
+    if (contextGap && contextGapTrack) {
+      return [
+        {
+          id: "delete-gap",
+          label: `Delete ${formatPreciseDuration(contextGap.endUs - contextGap.startUs)} Gap`,
+          icon: <Trash2 size={15} />,
+          disabled: contextGapTrack.locked,
+          danger: true,
+          onSelect: () => void deleteSelectedGap(contextGap)
+        }
+      ];
+    }
+
     if (contextMenu?.kind === "track" && contextTrack) {
       const trackEmpty = contextTrack.clips.length === 0;
+      const audioTrackCount = timeline.tracks.filter((track) => track.kind === "audio").length;
       return [
         {
           id: "rename-track",
@@ -1566,6 +1932,13 @@ export function EditTab({
               icon: contextTrack.visible ? <EyeOff size={15} /> : <Eye size={15} />,
               onSelect: () => toggleTrack(contextTrack.id, "visible")
             },
+        {
+          id: "merge-all-audio-tracks",
+          label: "Merge All Audio Tracks Here",
+          icon: <Music size={15} />,
+          disabled: contextTrack.kind !== "audio" || contextTrack.locked || audioTrackCount < 2,
+          onSelect: () => void mergeAudioTracks(contextTrack.id, "all")
+        },
         {
           id: "add-track-above",
           label: "Add Track Above",
@@ -1625,103 +1998,95 @@ export function EditTab({
   }, [timeline.durationUs]);
 
   useEffect(() => {
-    if (!playing) {
-      if (playbackFrameRef.current !== null) {
-        cancelAnimationFrame(playbackFrameRef.current);
-        playbackFrameRef.current = null;
-      }
-      lastPlaybackTimeRef.current = null;
-      return;
-    }
-
-    function tick(now: number) {
-      if (lastPlaybackTimeRef.current === null) {
-        lastPlaybackTimeRef.current = now;
-      }
-
-      const elapsedMs = now - lastPlaybackTimeRef.current;
-      lastPlaybackTimeRef.current = now;
-      setPlayheadUs((current) => {
-        const next = current + Math.round(elapsedMs * 1000 * clamp(previewSpeedPercent / 100, 0.25, 2));
-        const end = Math.max(timeline.durationUs, 1_000_000);
-        if (next >= end) {
-          if (loopPlayback) {
-            return 0;
-          }
-          stopPlayback();
-          return end;
-        }
-        return next;
-      });
-      playbackFrameRef.current = requestAnimationFrame(tick);
-    }
-
-    playbackFrameRef.current = requestAnimationFrame(tick);
-    return () => {
-      if (playbackFrameRef.current !== null) {
-        cancelAnimationFrame(playbackFrameRef.current);
-        playbackFrameRef.current = null;
-      }
-    };
-  }, [loopPlayback, playing, previewSpeedPercent, timeline.durationUs]);
-
-  useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (isTypingTarget(event.target)) {
+      if (isEditorShortcutBlocked(event)) {
         return;
       }
 
       if (matchesShortcut(event, shortcutFor(shortcuts, "play_pause"))) {
         event.preventDefault();
-        setPlaying((value) => !value);
+        togglePlayback();
         return;
       }
 
-      if (!event.ctrlKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "l") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "toggle_loop"))) {
         event.preventDefault();
         setLoopPlayback((value) => !value);
         setStatusMessage(`Loop playback ${loopPlayback ? "off" : "on"}`, { source: "timeline" });
         return;
       }
 
-      if (!event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "ArrowLeft") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "step_back"))) {
         event.preventDefault();
         stepPlayhead(-1);
         return;
       }
 
-      if (!event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "ArrowRight") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "step_forward"))) {
         event.preventDefault();
         stepPlayhead(1);
         return;
       }
 
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "go_start")) || matchesShortcut(event, shortcutFor(shortcuts, "go_end"))) {
         event.preventDefault();
+        setPlaying(false);
+        setPlayheadClamped(matchesShortcut(event, shortcutFor(shortcuts, "go_start")) ? 0 : getTimelineContentEndUs(timeline));
+        return;
+      }
+      if (matchesShortcut(event, shortcutFor(shortcuts, "previous_edit")) || matchesShortcut(event, shortcutFor(shortcuts, "next_edit"))) {
+        event.preventDefault();
+        seekEdit(matchesShortcut(event, shortcutFor(shortcuts, "previous_edit")) ? -1 : 1);
+        return;
+      }
+      if (matchesShortcut(event, shortcutFor(shortcuts, "fit_timeline"))) {
+        event.preventDefault();
+        fitTimeline();
+        return;
+      }
+      if (matchesShortcut(event, shortcutFor(shortcuts, "add_marker"))) {
+        event.preventDefault();
+        void applyInspectorCommand({ type: "add_marker", timeUs: playheadUs, name: `Marker ${(timeline.markers?.length ?? 0) + 1}` });
+        return;
+      }
+      if (matchesShortcut(event, shortcutFor(shortcuts, "previous_marker")) || matchesShortcut(event, shortcutFor(shortcuts, "next_marker"))) {
+        event.preventDefault();
+        const previous = matchesShortcut(event, shortcutFor(shortcuts, "previous_marker"));
+        const times = (timeline.markers ?? []).map((marker) => marker.timeUs).filter((time) => previous ? time < playheadUs - 1 : time > playheadUs + 1);
+        if (times.length) { setPlaying(false); setPlayheadClamped(previous ? Math.max(...times) : Math.min(...times)); }
+        return;
+      }
+      if (event.key === "Escape") {
+        clearClipSelection();
+        return;
+      }
+      if (matchesShortcut(event, shortcutFor(shortcuts, "select_all"))) {
+        event.preventDefault();
+        setSelectedGap(null);
         setSelectedClipIds(getTimelineClips().map((clip) => clip.id));
         setStatusMessage("Selected all timeline clips", { source: "timeline" });
         return;
       }
 
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "copy"))) {
         event.preventDefault();
         copySelectedClips();
         return;
       }
 
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "x") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "cut"))) {
         event.preventDefault();
         void cutSelectedClips();
         return;
       }
 
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "paste"))) {
         event.preventDefault();
         pasteTimelineClips();
         return;
       }
 
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "d") {
+      if (matchesShortcut(event, shortcutFor(shortcuts, "duplicate"))) {
         event.preventDefault();
         duplicateSelectedClips();
         return;
@@ -1733,9 +2098,15 @@ export function EditTab({
         return;
       }
 
-      if (matchesShortcut(event, shortcutFor(shortcuts, "delete")) || matchesShortcut(event, shortcutFor(shortcuts, "ripple_delete"))) {
+      if (
+        matchesShortcut(event, shortcutFor(shortcuts, "delete")) ||
+        matchesShortcut(event, shortcutFor(shortcuts, "ripple_delete")) ||
+        (Boolean(selectedGap) && event.key === "Backspace" && !event.ctrlKey && !event.altKey && !event.metaKey)
+      ) {
         event.preventDefault();
-        if (matchesShortcut(event, shortcutFor(shortcuts, "ripple_delete"))) {
+        if (selectedGap) {
+          void deleteSelectedGap();
+        } else if (matchesShortcut(event, shortcutFor(shortcuts, "ripple_delete"))) {
           void rippleDelete();
         } else {
           void deleteSelectedClip();
@@ -1763,7 +2134,7 @@ export function EditTab({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [loopPlayback, playheadUs, projectSettings.fps, selectedClip, selectedClipIds, shortcuts, snapping, timeline, timelineClipboard]);
+  }, [loopPlayback, playing, playheadUs, projectSettings.fps, selectedClip, selectedClipIds, selectedGap, shortcuts, snapping, timeline, timelineClipboard]);
 
   return (
     <div className="edit-workspace">
@@ -1772,7 +2143,7 @@ export function EditTab({
           <div className="media-bin-primary-row">
             <label className="media-search">
               <Search size={15} />
-              <input value={mediaSearch} onChange={(event) => setMediaSearch(event.target.value)} placeholder="Search media" />
+              <input aria-label="Search media" value={mediaSearch} onChange={(event) => setMediaSearch(event.target.value)} placeholder="Search media" />
             </label>
             <Button icon={<Import size={16} />} variant="primary" onClick={onImportMedia}>
               Import
@@ -1795,6 +2166,8 @@ export function EditTab({
               <option value="type">Type</option>
             </select>
           </div>
+          <details className="media-advanced-filters">
+            <summary><Filter size={13} /> More filters{[mediaDurationFilter, mediaResolutionFilter, mediaFpsFilter].some((value) => value !== "all") ? " · Active" : ""}</summary>
           <div className="media-filter-row compact">
             <select value={mediaDurationFilter} aria-label="Filter duration" onChange={(event) => setMediaDurationFilter(event.target.value as MediaDurationFilter)}>
               <option value="all">Any duration</option>
@@ -1816,11 +2189,13 @@ export function EditTab({
               <option value="unknown">Unknown fps</option>
             </select>
           </div>
+          </details>
           <div className="media-bin-summary">
             <span>
               <Filter size={13} />
               {visibleMediaAssets.length}/{mediaAssets.length}
             </span>
+            {mediaSearch || mediaTypeFilter !== "all" || [mediaDurationFilter, mediaResolutionFilter, mediaFpsFilter].some((value) => value !== "all") ? <button type="button" className="media-clear-filters" onClick={() => {setMediaSearch("");setMediaTypeFilter("all");setMediaDurationFilter("all");setMediaResolutionFilter("all");setMediaFpsFilter("all");}}>Clear filters</button> : null}
             {missingMediaPaths.length > 0 ? <span className="media-status-danger">{missingMediaPaths.length} missing</span> : null}
           </div>
         </div>
@@ -1900,7 +2275,7 @@ export function EditTab({
         </div>
       </Panel>
 
-      <section className="preview-and-timeline">
+      <section className="preview-and-timeline" style={{ gridTemplateRows: `minmax(180px, ${previewHeight}%) 6px minmax(160px, 1fr)` }}>
         <Panel
           title="Preview"
           actions={
@@ -1921,6 +2296,11 @@ export function EditTab({
         >
           <div className="preview-player">
             <PreviewSurface
+              timeline={timeline}
+              mediaAssets={mediaAssets}
+              titles={(timeline.titles ?? []).filter((title) => playheadUs >= title.startUs && playheadUs < title.startUs + title.durationUs)}
+              videoItems={activeVideoItems}
+              compositeAudioItems={compositeAudioItems}
               previewUrl={previewUrl}
               projectPath={projectPath}
               videoAsset={activeVideoAsset}
@@ -1933,25 +2313,16 @@ export function EditTab({
               playing={playing}
               previewVolumePercent={previewVolumePercent}
               previewSpeedPercent={previewSpeedPercent}
+              onPlaybackClock={onMediaPlaybackClock}
+              onPlaybackClockUnavailable={onMediaPlaybackClockUnavailable}
             />
             <div className="transport">
-              <IconButton label={playing ? "Pause" : "Play"} icon={playing ? <Pause size={18} /> : <Play size={18} />} onClick={() => setPlaying((value) => !value)} />
+              <IconButton label={playing ? "Pause" : "Play"} icon={playing ? <Pause size={18} /> : <Play size={18} />} onClick={togglePlayback} disabled={getTimelineContentEndUs(timeline) === 0} />
               <IconButton label="Step back one frame" icon={<StepBack size={17} />} onClick={() => stepPlayhead(-1)} />
               <IconButton label="Step forward one frame" icon={<StepForward size={17} />} onClick={() => stepPlayhead(1)} />
               <IconButton label={loopPlayback ? "Loop playback on" : "Loop playback off"} icon={<Repeat size={17} />} className={loopPlayback ? "icon-active" : ""} onClick={() => setLoopPlayback((value) => !value)} />
-              <IconButton label="Copy clips" icon={<Copy size={17} />} disabled={selectedClipIds.length === 0} onClick={() => copySelectedClips()} />
-              <IconButton label="Paste clips" icon={<ClipboardPaste size={17} />} disabled={timelineClipboard.length === 0} onClick={pasteTimelineClips} />
-              <Button icon={<Scissors size={16} />} onClick={() => void splitAtPlayhead()}>
-                Split
-              </Button>
-              <Button icon={<Trash2 size={16} />} onClick={() => void deleteSelectedClip()}>
-                Delete
-              </Button>
-              <Button icon={<Trash2 size={16} />} variant="danger" onClick={() => void rippleDelete()}>
-                Ripple Delete
-              </Button>
+              <TimecodeInput valueUs={playheadUs} fps={projectSettings.fps} maxUs={timeline.durationUs} onSeek={(timeUs) => { setPlaying(false); setPlayheadClamped(timeUs); }} />
               <div className="transport-right-controls">
-                <Toggle label="Snapping" checked={snapping} onChange={(event) => setSnapping(event.target.checked)} />
                 <div className="preview-control-strip">
                   <Slider
                     label="Volume %"
@@ -1975,6 +2346,7 @@ export function EditTab({
           </div>
         </Panel>
 
+        <PanelDivider value={previewHeight} onChange={resizePreview} />
         <Panel
           title="Timeline"
           actions={
@@ -1987,37 +2359,42 @@ export function EditTab({
         >
           <div className="timeline-panel">
             <div className="timeline-toolbar">
-              <Button icon={<Film size={16} />} onClick={() => addTrack("video")}>
+              <Button title="Add video track" icon={<Film size={16} />} onClick={() => addTrack("video")}>
                 Video Track
               </Button>
-              <Button icon={<Music size={16} />} onClick={() => addTrack("audio")}>
+              <Button title="Add audio track" icon={<Music size={16} />} onClick={() => addTrack("audio")}>
                 Audio Track
               </Button>
               <IconButton label="Copy clips" icon={<Copy size={17} />} disabled={selectedClipIds.length === 0} onClick={() => copySelectedClips()} />
               <IconButton label="Paste clips" icon={<ClipboardPaste size={17} />} disabled={timelineClipboard.length === 0} onClick={pasteTimelineClips} />
               <IconButton label="Duplicate clips" icon={<Clipboard size={17} />} disabled={selectedClipIds.length === 0} onClick={() => duplicateSelectedClips()} />
-              <Button icon={<Scissors size={16} />} onClick={() => void splitAtPlayhead()}>
+              <Button title="Split at playhead" icon={<Scissors size={16} />} disabled={!selectedClip || Boolean(lockedTrackNameForClip(selectedClip)) || !isPlayheadInsideClip(selectedClip, playheadUs)} onClick={() => void splitAtPlayhead()}>
                 Split
               </Button>
-              <Button icon={<Trash2 size={16} />} onClick={() => void deleteSelectedClip()}>
-                Delete
+              <Button title={selectedGap ? "Delete gap" : "Delete selected clips"} icon={<Trash2 size={16} />} disabled={!selectedGap && selectedClipIds.length === 0} onClick={() => void (selectedGap ? deleteSelectedGap() : deleteSelectedClip())}>
+                {selectedGap ? "Delete Gap" : "Delete"}
               </Button>
-              <Button icon={<Trash2 size={16} />} variant="danger" onClick={() => void rippleDelete()}>
+              <Button title="Ripple delete selected clips" icon={<FoldHorizontal size={16} />} disabled={selectedClipIds.length === 0} onClick={() => void rippleDelete()}>
                 Ripple
               </Button>
               <IconButton label="Nudge left" icon={<StepBack size={17} />} onClick={() => nudgeSelectedClip(-1)} />
               <IconButton label="Nudge right" icon={<StepForward size={17} />} onClick={() => nudgeSelectedClip(1)} />
               <IconButton label="Fit timeline" icon={<Maximize2 size={17} />} onClick={fitTimeline} />
-              <Toggle label="Snapping" checked={snapping} onChange={(event) => setSnapping(event.target.checked)} />
+              <Button title="Markers" icon={<Flag size={16} />} onClick={() => setMarkersOpen(true)}>Markers</Button>
+              <Button title="Titles and captions" icon={<Type size={16} />} onClick={() => setTitleEditor("")}>Titles & captions</Button>
               {selectedClipIds.length > 1 ? <span className="timeline-selection-count">{selectedClipIds.length} selected</span> : null}
+              {selectedGap ? <span className="timeline-selection-count">{formatPreciseDuration(selectedGap.endUs - selectedGap.startUs)} gap selected</span> : null}
               <span className="timeline-timecode">{formatTimelineTime(Math.floor(playheadUs / 1_000_000))}</span>
             </div>
             <TimelineSurface
+              onEditTitle={setTitleEditor}
               timeline={timeline}
               mediaAssets={mediaAssets}
               selectedClipIds={selectedClipIds}
+              selectedGap={selectedGap}
               soloTrackIds={soloTrackIds}
               onSelectClip={selectClip}
+              onSelectGap={selectGap}
               onClearSelection={clearClipSelection}
               playheadUs={playheadUs}
               onPlayheadChange={onTimelinePlayheadChange}
@@ -2029,6 +2406,7 @@ export function EditTab({
               onMoveClip={moveClip}
               onTrimClip={trimClip}
               onOpenClipContextMenu={openClipContextMenu}
+              onOpenGapContextMenu={openGapContextMenu}
               onOpenTrackContextMenu={openTrackContextMenu}
               onToggleTrack={toggleTrack}
               draggingMediaId={draggingMediaId}
@@ -2041,8 +2419,14 @@ export function EditTab({
         </Panel>
       </section>
 
-      <Panel title="Clip Inspector" className="clip-inspector">
-        {selectedClip ? <ClipInspector clip={selectedClip} /> : <div className="empty-state">Select a clip.</div>}
+      <Panel title={selectedGap ? "Gap Inspector" : "Clip Inspector"} className="clip-inspector">
+        {selectedClip ? (
+          <ClipInspector key={selectedClip.id} clip={selectedClip} nextClip={timeline.tracks.find((track) => track.id === selectedClip.trackId && track.kind === "video")?.clips.find((clip) => clip.id !== selectedClip.id && Math.abs(clip.startUs - selectedClip.startUs - getClipDisplayDurationUs(selectedClip)) <= 1)} asset={mediaAssets.find((asset) => asset.id === selectedClip.mediaId)} locked={Boolean(lockedTrackNameForClip(selectedClip))} onCommand={applyInspectorCommand} />
+        ) : selectedGap ? (
+          <GapInspector gap={selectedGap} trackName={timeline.tracks.find((track) => track.id === selectedGap.trackId)?.name ?? selectedGap.trackId} />
+        ) : (
+          <div className="empty-state">Select a clip or a gap.</div>
+        )}
       </Panel>
 
       {mediaDragState?.active ? (
@@ -2054,12 +2438,30 @@ export function EditTab({
       ) : null}
 
       {contextMenu ? <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenuItems()} onClose={() => setContextMenu(null)} /> : null}
-      <Modal title="Change Clip Speed" open={Boolean(speedDialogClip)} onClose={() => setSpeedDialogClipId("")}>
+      <Modal title="Timeline markers" open={markersOpen} onClose={() => setMarkersOpen(false)}>
+        <MarkerPanel markers={timeline.markers ?? []} playheadUs={playheadUs} onSeek={(timeUs) => { setPlaying(false); setPlayheadClamped(timeUs); setMarkersOpen(false); }} onCommand={applyInspectorCommand} />
+      </Modal>
+      <Modal title="Titles and captions" open={titleEditor !== null} onClose={() => setTitleEditor(null)}>
+        <TitlePanel key={titleEditor ?? ""} titles={timeline.titles ?? []} selectedId={titleEditor ?? ""} playheadUs={playheadUs} onCommand={(command) => applyInspectorCommand(command, true)} onSeek={(timeUs) => { setPlaying(false); setPlayheadClamped(timeUs); }} />
+      </Modal>
+      <Modal title={speedDialogClips.length > 1 ? `Change Speed for ${speedDialogClips.length} Clips` : "Change Clip Speed"} open={Boolean(speedDialogClip)} onClose={() => setSpeedDialogClipId("")}>
         <div className="control-stack">
           <label>
             Speed %
             <input type="number" min={25} max={400} step={5} value={speedDraft} onChange={(event) => setSpeedDraft(event.target.value)} />
           </label>
+          {speedDialogClips.length > 0 ? (
+            <label>
+              {speedDialogClips.length > 1 ? "Combined timeline duration" : "Timeline duration"}
+              <input
+                value={formatPreciseDuration(speedDialogClips.reduce(
+                  (durationUs, clip) => durationUs + getClipDisplayDurationUs({ ...clip, speedPercent: normalizeClipSpeedPercent(speedDraft) }),
+                  0
+                ))}
+                readOnly
+              />
+            </label>
+          ) : null}
           <div className="export-actions">
             <Button icon={<SlidersHorizontal size={16} />} onClick={() => void applyClipSpeed()}>
               Apply
@@ -2072,11 +2474,14 @@ export function EditTab({
 }
 
 const TimelineSurface = memo(function TimelineSurface({
+  onEditTitle,
   timeline,
   mediaAssets,
   selectedClipIds,
+  selectedGap,
   soloTrackIds,
   onSelectClip,
+  onSelectGap,
   onClearSelection,
   playheadUs,
   onPlayheadChange,
@@ -2088,6 +2493,7 @@ const TimelineSurface = memo(function TimelineSurface({
   onMoveClip,
   onTrimClip,
   onOpenClipContextMenu,
+  onOpenGapContextMenu,
   onOpenTrackContextMenu,
   onToggleTrack,
   draggingMediaId,
@@ -2096,11 +2502,14 @@ const TimelineSurface = memo(function TimelineSurface({
   onMediaDropTrackChange,
   setStatusMessage
 }: {
+  onEditTitle: (titleId: string) => void;
   timeline: typeof starterTimeline;
   mediaAssets: MediaAsset[];
   selectedClipIds: string[];
+  selectedGap: TimelineGapSelection | null;
   soloTrackIds: string[];
   onSelectClip: (clipId: string, mode?: "single" | "toggle" | "range") => void;
+  onSelectGap: (gap: TimelineGapSelection) => void;
   onClearSelection: () => void;
   playheadUs: number;
   onPlayheadChange: (playheadUs: number) => void;
@@ -2112,6 +2521,7 @@ const TimelineSurface = memo(function TimelineSurface({
   onMoveClip: (clipId: string, targetTrackId: string, startUs: number) => Promise<void>;
   onTrimClip: (clipId: string, edge: "start" | "end", deltaUs: number) => Promise<void>;
   onOpenClipContextMenu: (event: ReactMouseEvent, clip: TimelineClip) => void;
+  onOpenGapContextMenu: (event: ReactMouseEvent, gap: TimelineGapSelection) => void;
   onOpenTrackContextMenu: (event: ReactMouseEvent, trackId: string) => void;
   onToggleTrack: (trackId: string, field: "locked" | "muted" | "visible" | "solo") => void;
   draggingMediaId: string | null;
@@ -2131,7 +2541,7 @@ const TimelineSurface = memo(function TimelineSurface({
   const durationSeconds = getTimelineDurationSeconds(timeline.durationUs);
   const timelineWidth = Math.max(1200, durationSeconds * zoomPxPerSecond);
   const playheadLeft = timelineHeaderWidth + (playheadUs / 1_000_000) * zoomPxPerSecond;
-  const marks = createTimeMarks(durationSeconds);
+  const marks = createTimeMarks(durationSeconds, zoomPxPerSecond);
   const mediaById = useMemo(() => new Map(mediaAssets.map((asset) => [asset.id, asset])), [mediaAssets]);
   const visibleLaneStartPx = Math.max(0, visibleTimelineRange.left - timelineHeaderWidth);
   const visibleLaneEndPx = Math.max(0, visibleTimelineRange.right - timelineHeaderWidth);
@@ -2260,6 +2670,14 @@ const TimelineSurface = memo(function TimelineSurface({
 
   function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
     event.preventDefault();
+    if (event.altKey || (!event.shiftKey && !event.ctrlKey && (event.target as HTMLElement).closest(".track-header"))) {
+      event.currentTarget.scrollTop += event.deltaY;
+      if (lastWheelModeRef.current !== "tracks") {
+        lastWheelModeRef.current = "tracks";
+        setStatusMessage("Scrolling tracks · Alt+wheel also scrolls vertically");
+      }
+      return;
+    }
     if (event.shiftKey || event.ctrlKey) {
       const mode = event.ctrlKey ? "ctrl-zoom" : "shift-zoom";
       if (lastWheelModeRef.current !== mode) {
@@ -2420,6 +2838,7 @@ const TimelineSurface = memo(function TimelineSurface({
     <div
       ref={scrollRef}
       className="timeline-scroll"
+      aria-label="Timeline. Wheel pans time; Ctrl or Shift plus wheel zooms; Alt plus wheel or wheel over track headers scrolls tracks."
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
@@ -2436,6 +2855,7 @@ const TimelineSurface = memo(function TimelineSurface({
                 {mark.label}
               </span>
             ))}
+            {(timeline.markers ?? []).map((marker) => <button key={marker.id} className="timeline-marker" title={`${marker.name} · ${(marker.timeUs / 1_000_000).toFixed(3)} s`} aria-label={`Go to ${marker.name}`} style={{ left: `${marker.timeUs / 1_000_000 * zoomPxPerSecond}px`, color: marker.color }} onPointerDown={(event) => event.stopPropagation()} onClick={() => onPlayheadChange(marker.timeUs)}><Flag size={14} fill="currentColor" /></button>)}
           </div>
         </div>
         <div
@@ -2452,10 +2872,15 @@ const TimelineSurface = memo(function TimelineSurface({
         >
           <span className="playhead-handle" />
         </div>
+        {(timeline.titles?.length ?? 0) > 0 ? <div className="title-track-row" style={{ gridTemplateColumns: `${timelineHeaderWidth}px ${timelineWidth}px` }}>
+          <div className="track-header"><span>Titles & captions</span></div>
+          <div className="title-track-lane">{timeline.titles?.map((title) => <button key={title.id} className="timeline-title" style={{ left: title.startUs / 1_000_000 * zoomPxPerSecond, width: Math.max(24, title.durationUs / 1_000_000 * zoomPxPerSecond) }} title={`${title.text} · click to edit`} onPointerDown={(event) => event.stopPropagation()} onClick={() => onEditTitle(title.id)}>{title.text}</button>)}</div>
+        </div> : null}
         {timeline.tracks.map((track) => {
           const soloActive = soloTrackIds.length > 0;
           const trackSoloed = soloTrackIds.includes(track.id);
           const trackAudibleVisible = (track.kind === "audio" ? !track.muted : track.visible) && (!soloActive || trackSoloed);
+          const trackGaps = getTrackGaps(track);
           return (
           <div
             className={[
@@ -2541,6 +2966,37 @@ const TimelineSurface = memo(function TimelineSurface({
                 void onAddMediaToTimeline(asset, track.id, placement.startUs);
               }}
             >
+              {trackGaps
+                .filter((gap) => {
+                  const start = (gap.startUs / 1_000_000) * zoomPxPerSecond;
+                  const end = (gap.endUs / 1_000_000) * zoomPxPerSecond;
+                  return end >= visibleLaneStartPx && start <= visibleLaneEndPx;
+                })
+                .map((gap) => {
+                  const durationUs = gap.endUs - gap.startUs;
+                  return (
+                    <button
+                      type="button"
+                      key={`${gap.trackId}:${gap.startUs}:${gap.endUs}`}
+                      className={sameTimelineGap(selectedGap, gap) ? "timeline-gap selected" : "timeline-gap"}
+                      style={{
+                        left: `${(gap.startUs / 1_000_000) * zoomPxPerSecond}px`,
+                        width: `${(durationUs / 1_000_000) * zoomPxPerSecond}px`
+                      }}
+                      aria-label={`${formatPreciseDuration(durationUs)} empty gap on ${track.name}`}
+                      aria-pressed={sameTimelineGap(selectedGap, gap)}
+                      title={`${formatPreciseDuration(durationUs)} empty gap - click to select, Delete to remove`}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onSelectGap(gap);
+                      }}
+                      onContextMenu={(event) => onOpenGapContextMenu(event, gap)}
+                    >
+                      <span>{formatPreciseDuration(durationUs)} gap</span>
+                    </button>
+                  );
+                })}
               {mediaDropPreview?.trackId === track.id && !mediaDropPreview.invalid ? (
                 <>
                   {mediaDropPreview.snapped ? (
@@ -2575,6 +3031,7 @@ const TimelineSurface = memo(function TimelineSurface({
                 const width = getClipVisualWidth(durationUs, zoomPxPerSecond);
                 const mediaAsset = mediaById.get(clip.mediaId);
                 const mediaName = mediaAsset?.name ?? clip.mediaId;
+                const speedPercent = normalizeClipSpeedPercent(displayClip.speedPercent);
                 return (
                   <button
                     type="button"
@@ -2589,7 +3046,7 @@ const TimelineSurface = memo(function TimelineSurface({
                       .join(" ")}
                     data-tight={width < 56 ? "true" : undefined}
                     style={{ left: `${start}px`, width: `${width}px` }}
-                    title={mediaName}
+                    title={`${mediaName} - ${speedPercent}% - ${formatPreciseDuration(durationUs)}`}
                     onPointerDown={(event) => beginClipInteraction(event, clip, "move")}
                     onPointerMove={updateClipInteraction}
                     onPointerUp={finishClipInteraction}
@@ -2619,7 +3076,7 @@ const TimelineSurface = memo(function TimelineSurface({
                       }}
                     />
                     {track.kind === "audio" && mediaAsset ? <TimelineClipWaveform asset={mediaAsset} clip={displayClip} /> : null}
-                    <span className="timeline-clip-label">{mediaName}</span>
+                    <span className="timeline-clip-label">{mediaName}{speedPercent !== 100 ? ` - ${speedPercent}%` : ""}</span>
                     {track.kind === "audio" ? <Volume2 size={13} /> : null}
                     <span
                       className="clip-trim-handle end"
@@ -2643,7 +3100,81 @@ const TimelineSurface = memo(function TimelineSurface({
   );
 });
 
-function PreviewSurface({
+function PreviewSurface(props: ComponentProps<typeof SinglePreviewSurface> & { timeline: Timeline; mediaAssets: MediaAsset[]; titles: TitleOverlay[]; videoItems: Array<{ clip: TimelineClip; asset: MediaAsset }>; compositeAudioItems: Array<{ clip: TimelineClip; asset: MediaAsset }> }) {
+  if (!props.playing || props.titles.length > 0 || props.videoItems.length > 1 || props.compositeAudioItems.length > 1 || props.videoAsset?.metadata?.isStillImage || props.videoClip?.audio?.normalize || props.videoClip?.audio?.cleanup || props.projectSettings.normalizeAudio || props.projectSettings.cleanupAudio || clipHasVisualEdits(props.videoClip)) return <CompositionPreview {...props} audioItems={props.compositeAudioItems} />;
+  return <SinglePreviewSurface {...props} />;
+}
+
+export function CompositionPreview(props: ComponentProps<typeof SinglePreviewSurface> & { timeline: Timeline; mediaAssets: MediaAsset[]; titles: TitleOverlay[]; videoItems: Array<{ clip: TimelineClip; asset: MediaAsset }> }) {
+  const frameRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 640, height: 360 });
+  const [renderStatus, setRenderStatus] = useState<CompositionRenderStatus>({state:"rendering"});
+  const { projectSettings, videoItems, audioItems, playheadUs, playing, previewSpeedPercent } = props;
+  useEffect(() => {
+    void pauseNativePreview().catch(() => undefined);
+    const element = frameRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => setSize({ width: entry.contentRect.width, height: entry.contentRect.height }));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const fit = Math.min(size.width / projectSettings.width, size.height / projectSettings.height);
+  const scale = props.previewScale === "fit" ? fit : Number(props.previewScale) / 100;
+  return <div ref={frameRef} className="preview-frame has-media composition-preview">
+    <div className="composition-stage" style={{ width: projectSettings.width, height: projectSettings.height, transform: `translate(-50%, -50%) scale(${scale})` }}>
+      {[...videoItems].reverse().map(({ clip, asset }) => <ComposedVideoLayer key={clip.id} asset={asset} clip={clip} playheadUs={playheadUs} playing={playing} previewSpeedPercent={previewSpeedPercent} projectPath={props.projectPath} previewQuality={props.previewQuality} clockMaster={audioItems.length === 0 && clip.id === props.videoClip?.id} onPlaybackClock={props.onPlaybackClock} onPlaybackClockUnavailable={props.onPlaybackClockUnavailable} />)}
+      {props.titles.map((title) => <div key={title.id} className="composition-title" style={{ left: `${title.positionX}%`, top: `${title.positionY}%`, transform: `translate(-${title.positionX}%, -${title.positionY}%)`, fontSize: title.fontSize, color: title.color, background: title.background ? "rgba(0,0,0,.55)" : undefined, boxShadow: title.background ? "0 0 0 12px rgba(0,0,0,.55)" : undefined }}>{title.text}</div>)}
+      {!playing && "__TAURI_INTERNALS__" in window ? <RenderedCompositionFrame onStatus={setRenderStatus} timeline={props.timeline} mediaAssets={props.mediaAssets} projectSettings={projectSettings} projectPath={props.projectPath} timeUs={playheadUs} maxWidth={Math.min(4096, Math.max(16, Math.round(projectSettings.width / (props.previewQuality === "Full" ? 1 : props.previewQuality === "1/2" ? 2 : props.previewQuality === "1/4" ? 4 : Math.max(1, projectSettings.width / 1280)))))} /> : null}
+    </div>
+    {audioItems.map((item, index) => <AudioPreviewElement key={`${item.clip.id}:${item.clip.audio?.streamIndex ?? 0}`} {...item} projectSettings={projectSettings} playheadUs={playheadUs} playing={playing} previewSpeedPercent={previewSpeedPercent} previewVolumePercent={props.previewVolumePercent} clockMaster={index === 0} onPlaybackClock={props.onPlaybackClock} onPlaybackClockUnavailable={props.onPlaybackClockUnavailable} />)}
+    <div className="preview-stats"><span>{projectSettings.width} × {projectSettings.height} · {videoItems.length} {videoItems.length === 1 ? "layer" : "layers"}</span><span title={renderStatus.error}>{playing ? "Draft playback" : !("__TAURI_INTERNALS__" in window) ? "Browser preview" : renderStatus.state === "ready" ? "Rendered frame" : renderStatus.state === "error" ? "Rendered preview unavailable" : "Updating frame…"}</span></div>
+  </div>;
+}
+
+function ComposedVideoLayer({ asset, clip, playheadUs, playing, previewSpeedPercent, projectPath, previewQuality, clockMaster, onPlaybackClock, onPlaybackClockUnavailable }: {
+  asset: MediaAsset; clip: TimelineClip; playheadUs: number; playing: boolean; previewSpeedPercent: number; projectPath?: string; previewQuality: PreviewQuality; clockMaster: boolean; onPlaybackClock: (clipId: string, timeUs: number) => void; onPlaybackClockUnavailable: (clipId: string) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [src, setSrc] = useState("");
+  const [failed, setFailed] = useState(false);
+  const [frame, setFrame] = useState("");
+  const frameTime = useDebouncedValue(getClipMediaTimeUs(clip, playheadUs), playing ? 120 : 30);
+  useEffect(() => {
+    let cancelled = false;
+    setFailed(false);
+    void (async () => {
+      const cache = previewQuality === "Proxy" && projectPath ? await getMediaCacheStatus(asset, projectPath) : null;
+      const url = await getMediaSourceUrl(cache?.proxy === "ready" && cache.proxyPath ? cache.proxyPath : asset.path);
+      if (!cancelled) setSrc(url);
+    })().catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, [asset, projectPath, previewQuality]);
+  useEffect(() => { syncMediaElement(videoRef, clip, playheadUs, playing, previewSpeedPercent); }, [clip, playheadUs, playing, previewSpeedPercent, src]);
+  useMediaElementTimelineClock(videoRef, clip, playing, clockMaster && Boolean(src) && !failed, src, onPlaybackClock, onPlaybackClockUnavailable);
+  useEffect(() => {
+    if (!failed || playing) return;
+    let cancelled = false;
+    void getMediaPreviewFrameDataUrl(asset, frameTime).then((url) => { if (!cancelled && url) setFrame(url); });
+    return () => { cancelled = true; };
+  }, [asset, failed, frameTime, playing]);
+  const style = { ...getClipVisualPreviewStyle(clip, {}), opacity: clipVideoOpacity(clip, playheadUs) };
+  return <div className="composition-video-layer" style={style}>
+    {src && asset.metadata?.isStillImage ? <img src={src} alt="" /> : src && !failed ? <video ref={videoRef} src={src} muted playsInline preload="auto" onError={() => { setFailed(true); if (clockMaster) onPlaybackClockUnavailable(clip.id); }} onLoadedMetadata={() => syncMediaElement(videoRef, clip, playheadUs, playing, previewSpeedPercent)} /> : frame ? <img src={frame} alt="" /> : null}
+    {failed && playing ? <span className="composition-warning">Generate a proxy for {asset.name} to preview this format.</span> : null}
+  </div>;
+}
+
+function clipVideoOpacity(clip: TimelineClip, timeUs: number) {
+  const transform = normalizeTransform(clip.transform);
+  if (!transform.enabled) return 1;
+  const duration = transform.fadeDurationUs || getClipDisplayDurationUs(clip);
+  const relative = Math.max(0, timeUs - clip.startUs) + (transform.fadeOffsetUs ?? 0);
+  const fadeIn = Math.min(transform.fadeInUs ?? 0, duration);
+  const fadeOut = Math.min(transform.fadeOutUs ?? 0, duration);
+  return transform.opacity * (fadeIn > 0 ? Math.min(1, relative / fadeIn) : 1) * (fadeOut > 0 ? Math.min(1, Math.max(0, duration - relative) / fadeOut) : 1);
+}
+
+function SinglePreviewSurface({
   previewUrl,
   projectPath,
   videoAsset,
@@ -2655,7 +3186,9 @@ function PreviewSurface({
   playheadUs,
   playing,
   previewVolumePercent,
-  previewSpeedPercent
+  previewSpeedPercent,
+  onPlaybackClock,
+  onPlaybackClockUnavailable
 }: {
   previewUrl?: string;
   projectPath?: string;
@@ -2669,6 +3202,8 @@ function PreviewSurface({
   playing: boolean;
   previewVolumePercent: number;
   previewSpeedPercent: number;
+  onPlaybackClock: (clipId: string, playheadUs: number) => void;
+  onPlaybackClockUnavailable: (clipId: string) => void;
 }) {
   const frameRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -2683,9 +3218,11 @@ function PreviewSurface({
   const [stats, setStats] = useState<PreviewState | null>(null);
   const separateAudioPreviewActive = audioItems.length > 0;
   const settledPlayheadUs = useDebouncedValue(playheadUs, playing ? 120 : 30);
-  const previewCommandPlayheadUs = playing ? playbackStartPlayheadRef.current : settledPlayheadUs;
+  const previewTimelinePlayheadUs = playing ? playbackStartPlayheadRef.current : settledPlayheadUs;
   const mediaElementSyncPlayheadUs = settledPlayheadUs;
   const enginePreviewActive = stats?.renderMode === "native-d3d" || stats?.renderMode === "engine-frame";
+  const nativePreviewClip = videoClip ?? audioItems[0]?.clip;
+  const previewCommandMediaTimeUs = nativePreviewClip ? getClipMediaTimeUs(nativePreviewClip, previewTimelinePlayheadUs) : previewTimelinePlayheadUs;
 
   useEffect(() => {
     if (!playing) {
@@ -2810,7 +3347,7 @@ function PreviewSurface({
       scale: previewScale,
       colorMode: projectSettings.colorMode,
       fps: projectSettings.fps,
-      playheadUs: previewCommandPlayheadUs,
+      playheadUs: previewCommandMediaTimeUs,
       inUs: videoClip?.inUs ?? audioItems[0]?.clip.inUs ?? 0,
       outUs: videoClip?.outUs ?? audioItems[0]?.clip.outUs ?? 0,
       playbackRate: effectivePlaybackRate(videoClip ?? audioItems[0]?.clip, previewSpeedPercent),
@@ -2823,7 +3360,7 @@ function PreviewSurface({
     }
     nativeStateKeyRef.current = key;
     void setNativePreviewState(params).then(setStats).catch(() => undefined);
-  }, [audioItems, enginePreviewActive, previewCommandPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, previewQuality, previewScale, projectSettings.colorMode, projectSettings.fps, separateAudioPreviewActive, videoAsset, videoClip]);
+  }, [audioItems, enginePreviewActive, previewCommandMediaTimeUs, previewSpeedPercent, previewVolumePercent, playing, previewQuality, previewScale, projectSettings.colorMode, projectSettings.fps, separateAudioPreviewActive, videoAsset, videoClip]);
 
   useEffect(() => {
     if (!enginePreviewActive) {
@@ -2837,23 +3374,41 @@ function PreviewSurface({
       return;
     }
 
-    const seekKey = String(settledPlayheadUs);
+    const mediaTimeUs = nativePreviewClip ? getClipMediaTimeUs(nativePreviewClip, settledPlayheadUs) : settledPlayheadUs;
+    const seekKey = `${nativePreviewClip?.id ?? "none"}:${mediaTimeUs}`;
     if (nativeSeekKeyRef.current === seekKey) {
       return;
     }
     nativeSeekKeyRef.current = seekKey;
     const sequence = ++nativeSeekSequenceRef.current;
-    void seekNativePreview(settledPlayheadUs).then((nextStats) => {
+    void seekNativePreview(mediaTimeUs).then((nextStats) => {
       if (sequence === nativeSeekSequenceRef.current) {
         setStats(nextStats);
       }
     }).catch(() => undefined);
-  }, [enginePreviewActive, playing, settledPlayheadUs]);
+  }, [enginePreviewActive, nativePreviewClip, playing, settledPlayheadUs]);
 
   useEffect(() => {
-    syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent);
+    syncMediaElement(
+      videoRef,
+      videoClip,
+      mediaElementSyncPlayheadUs,
+      playing,
+      previewSpeedPercent,
+      separateAudioPreviewActive ? undefined : () => videoClip && onPlaybackClockUnavailable(videoClip.id)
+    );
     applyMediaElementAudio(videoRef, videoClip, projectSettings, mediaElementSyncPlayheadUs, previewVolumePercent);
-  }, [videoClip, mediaElementSyncPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, videoSrc, projectSettings, stats?.childHwnd, stats?.renderMode, separateAudioPreviewActive]);
+  }, [videoClip, mediaElementSyncPlayheadUs, previewSpeedPercent, previewVolumePercent, playing, videoSrc, projectSettings, stats?.childHwnd, stats?.renderMode, separateAudioPreviewActive, onPlaybackClockUnavailable]);
+
+  useMediaElementTimelineClock(
+    videoRef,
+    videoClip,
+    playing,
+    Boolean(videoSrc) && !separateAudioPreviewActive,
+    `${videoSrc}:${stats?.renderMode ?? ""}:${stats?.childHwnd ?? ""}`,
+    onPlaybackClock,
+    onPlaybackClockUnavailable
+  );
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -2891,8 +3446,18 @@ function PreviewSurface({
           preload="auto"
           style={visualPreviewStyle}
           onCanPlay={() => setVideoPlaybackFailed(false)}
-          onError={() => setVideoPlaybackFailed(true)}
-          onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent)}
+          onError={() => {
+            setVideoPlaybackFailed(true);
+            onPlaybackClockUnavailable(videoClip.id);
+          }}
+          onLoadedMetadata={() => syncMediaElement(
+            videoRef,
+            videoClip,
+            mediaElementSyncPlayheadUs,
+            playing,
+            previewSpeedPercent,
+            () => onPlaybackClockUnavailable(videoClip.id)
+          )}
         />
       ) : null}
       {hiddenVideoCarrierActive && videoAsset && videoClip && videoSrc ? (
@@ -2905,14 +3470,22 @@ function PreviewSurface({
           aria-hidden="true"
           tabIndex={-1}
           style={hiddenAudioCarrierStyle}
-          onLoadedMetadata={() => syncMediaElement(videoRef, videoClip, mediaElementSyncPlayheadUs, playing, previewSpeedPercent)}
+          onError={() => onPlaybackClockUnavailable(videoClip.id)}
+          onLoadedMetadata={() => syncMediaElement(
+            videoRef,
+            videoClip,
+            mediaElementSyncPlayheadUs,
+            playing,
+            previewSpeedPercent,
+            () => onPlaybackClockUnavailable(videoClip.id)
+          )}
         />
       ) : null}
       {!nativePreviewActive && engineFrameActive ? <img className="preview-frame-image" src={stats?.frameDataUrl ?? ""} alt="" style={visualPreviewStyle} /> : null}
       {!nativePreviewActive && !engineFrameActive && videoPlaybackFailed && frameSrc ? <img className="preview-frame-image" src={frameSrc} alt="" style={visualPreviewStyle} /> : null}
       {!nativePreviewActive && audioItems.length > 0 ? (
         <>
-          {audioItems.map((item) => (
+          {audioItems.map((item, index) => (
             <AudioPreviewElement
               key={`${item.clip.id}:${normalizeAudioAdjustment(item.clip.audio).streamIndex ?? 0}`}
               asset={item.asset}
@@ -2922,6 +3495,9 @@ function PreviewSurface({
               playing={playing}
               previewSpeedPercent={previewSpeedPercent}
               previewVolumePercent={previewVolumePercent}
+              clockMaster={index === 0}
+              onPlaybackClock={onPlaybackClock}
+              onPlaybackClockUnavailable={onPlaybackClockUnavailable}
             />
           ))}
           {!videoAsset ? <Music size={34} /> : null}
@@ -2956,7 +3532,10 @@ function AudioPreviewElement({
   playheadUs,
   playing,
   previewSpeedPercent,
-  previewVolumePercent
+  previewVolumePercent,
+  clockMaster,
+  onPlaybackClock,
+  onPlaybackClockUnavailable
 }: {
   asset: MediaAsset;
   clip: TimelineClip;
@@ -2965,28 +3544,57 @@ function AudioPreviewElement({
   playing: boolean;
   previewSpeedPercent: number;
   previewVolumePercent: number;
+  clockMaster: boolean;
+  onPlaybackClock: (clipId: string, playheadUs: number) => void;
+  onPlaybackClockUnavailable: (clipId: string) => void;
 }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [src, setSrc] = useState("");
   const streamIndex = normalizeAudioAdjustment(clip.audio).streamIndex ?? 0;
+  const normalizePreview = Boolean(clip.audio?.normalize || projectSettings.normalizeAudio);
+  const cleanupPreview = Boolean(clip.audio?.cleanup || projectSettings.cleanupAudio);
 
   useEffect(() => {
     let cancelled = false;
     setSrc("");
-    void getMediaAudioPreviewSourceUrl(asset, streamIndex).then((url) => {
+    void getMediaAudioPreviewSourceUrl(asset, streamIndex, normalizePreview, cleanupPreview).then((url) => {
       if (!cancelled) {
         setSrc(url);
+        if (!url && clockMaster) {
+          onPlaybackClockUnavailable(clip.id);
+        }
+      }
+    }).catch(() => {
+      if (!cancelled && clockMaster) {
+        onPlaybackClockUnavailable(clip.id);
       }
     });
     return () => {
       cancelled = true;
     };
-  }, [asset, streamIndex]);
+  }, [asset, clip.id, clockMaster, onPlaybackClockUnavailable, streamIndex, normalizePreview, cleanupPreview]);
 
   useEffect(() => {
-    syncMediaElement(audioRef, clip, playheadUs, playing, previewSpeedPercent);
+    syncMediaElement(
+      audioRef,
+      clip,
+      playheadUs,
+      playing,
+      previewSpeedPercent,
+      clockMaster ? () => onPlaybackClockUnavailable(clip.id) : undefined
+    );
     applyMediaElementAudio(audioRef, clip, projectSettings, playheadUs, previewVolumePercent);
-  }, [clip, playheadUs, previewSpeedPercent, previewVolumePercent, playing, src, projectSettings]);
+  }, [clip, clockMaster, onPlaybackClockUnavailable, playheadUs, previewSpeedPercent, previewVolumePercent, playing, src, projectSettings]);
+
+  useMediaElementTimelineClock(
+    audioRef,
+    clip,
+    playing,
+    Boolean(src) && clockMaster,
+    src,
+    onPlaybackClock,
+    onPlaybackClockUnavailable
+  );
 
   if (!src) {
     return null;
@@ -2998,9 +3606,54 @@ function AudioPreviewElement({
       src={src}
       preload="auto"
       style={hiddenAudioCarrierStyle}
-      onLoadedMetadata={() => syncMediaElement(audioRef, clip, playheadUs, playing, previewSpeedPercent)}
+      onError={() => clockMaster && onPlaybackClockUnavailable(clip.id)}
+      onLoadedMetadata={() => syncMediaElement(
+        audioRef,
+        clip,
+        playheadUs,
+        playing,
+        previewSpeedPercent,
+        clockMaster ? () => onPlaybackClockUnavailable(clip.id) : undefined
+      )}
     />
   );
+}
+
+function useMediaElementTimelineClock<T extends HTMLMediaElement>(
+  ref: RefObject<T>,
+  clip: TimelineClip | undefined,
+  playing: boolean,
+  enabled: boolean,
+  elementKey: string,
+  onPlaybackClock: (clipId: string, playheadUs: number) => void,
+  onPlaybackClockUnavailable: (clipId: string) => void
+) {
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || !clip || !playing || !enabled) {
+      return;
+    }
+
+    let frame: number | null = null;
+    const publish = () => {
+      if (!element.paused && !element.seeking && element.readyState >= 2 && Number.isFinite(element.currentTime)) {
+        onPlaybackClock(clip.id, getClipTimelineTimeUs(clip, element.currentTime));
+      }
+      frame = requestAnimationFrame(publish);
+    };
+    const markUnavailable = () => onPlaybackClockUnavailable(clip.id);
+
+    element.addEventListener("error", markUnavailable);
+    element.addEventListener("ended", markUnavailable);
+    frame = requestAnimationFrame(publish);
+    return () => {
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+      }
+      element.removeEventListener("error", markUnavailable);
+      element.removeEventListener("ended", markUnavailable);
+    };
+  }, [clip, elementKey, enabled, onPlaybackClock, onPlaybackClockUnavailable, playing, ref]);
 }
 
 const hiddenAudioCarrierStyle: CSSProperties = {
@@ -3256,49 +3909,82 @@ function MediaManagementStatus({
   }, [asset, projectPath, refreshKey, generating]);
 
   return (
-    <span className="media-management-status">
-      <span className={missing ? "media-status-danger" : "media-status-ok"}>{missing ? "Missing" : "Linked"}</span>
-      <span>{statusLabel("Thumb", cacheStatus.thumbnail)}</span>
-      <span>{statusLabel("Wave", cacheStatus.waveform)}</span>
-      <span className={cacheStatus.proxy === "missing" || cacheStatus.proxy === "error" || cacheStatus.proxy === "generating" ? "media-status-warning" : ""}>
+    <span className="media-management-status" title={[statusLabel("Thumbnail", cacheStatus.thumbnail), statusLabel("Waveform", cacheStatus.waveform), statusLabel("Proxy", cacheStatus.proxy)].join(" · ")}>
+      <span className={missing ? "media-status-danger" : "media-status-ok"}>{missing ? "Missing" : "Available"}</span>
+      {cacheStatus.thumbnail === "error" ? <span className="media-status-warning">Thumbnail unavailable</span> : null}
+      {cacheStatus.waveform === "error" ? <span className="media-status-warning">Waveform unavailable</span> : null}
+      {["ready", "generating", "missing", "error"].includes(cacheStatus.proxy) ? <span className={cacheStatus.proxy === "missing" || cacheStatus.proxy === "error" || cacheStatus.proxy === "generating" ? "media-status-warning" : ""}>
         {statusLabel("Proxy", cacheStatus.proxy)}
-      </span>
+      </span> : null}
     </span>
   );
 }
 
-function ClipInspector({ clip }: { clip: TimelineClip }) {
-  const durationSeconds = ((clip.outUs - clip.inUs) / 1_000_000).toFixed(2);
-
-  return (
-    <div className="inspector-stack">
-      <label>
-        Clip ID
-        <input value={clip.id} readOnly />
-      </label>
-      <label>
-        Start
-        <input value={`${(clip.startUs / 1_000_000).toFixed(2)}s`} readOnly />
-      </label>
-      <label>
-        Duration
-        <input value={`${durationSeconds}s`} readOnly />
-      </label>
-      <label>
-        Scale
-        <input type="number" value={100} readOnly />
-      </label>
-      <label>
-        Opacity
-        <input type="number" value={100} readOnly />
-      </label>
-    </div>
-  );
+function ClipInspector({ clip, nextClip, asset, locked, onCommand }: {
+  clip: TimelineClip; nextClip?: TimelineClip; asset?: MediaAsset; locked: boolean; onCommand: (command: EditorCommand) => Promise<void>;
+}) {
+  const transform = normalizeTransform(clip.transform);
+  const audio = normalizeAudioAdjustment(clip.audio);
+  const [busy, setBusy] = useState(false);
+  const [transitionSeconds, setTransitionSeconds] = useState(0.5);
+  const maxTransitionSeconds = nextClip ? (Math.min(getClipDisplayDurationUs(clip), getClipDisplayDurationUs(nextClip)) - 1) / 1_000_000 : 0;
+  const effectiveTransitionSeconds = Math.min(transitionSeconds, maxTransitionSeconds);
+  async function commit(command: EditorCommand) {
+    setBusy(true);
+    try { await onCommand(command); } finally { setBusy(false); }
+  }
+  function changeTransform(value: Partial<ClipTransform>) {
+    void commit({ type: "apply_transform", clipId: clip.id, transform: value });
+  }
+  return <div className="inspector-stack">
+    <div className="inspector-summary"><strong>{asset?.name ?? "Selected clip"}</strong><span>{formatPreciseDuration(getClipDisplayDurationUs(clip))} on timeline</span></div>
+    {locked ? <p className="inline-notice">Unlock the track to edit this clip.</p> : null}
+    <fieldset className="inspector-fields" disabled={locked || busy}>
+      <legend>Timing</legend>
+      <NumberField label="Start · seconds" value={Number((clip.startUs / 1_000_000).toFixed(4))} min={0} step={0.01}
+        onCommit={(value) => void commit({ type: "move_clip", clipId: clip.id, trackId: clip.trackId, startUs: Math.round(value * 1_000_000) })} />
+      <NumberField label="Source in · seconds" value={Number((clip.inUs / 1_000_000).toFixed(4))} min={0} max={(clip.outUs - 1) / 1_000_000} step={0.01}
+        onCommit={(value) => void commit({ type: "set_clip_source_range", clipId: clip.id, inUs: Math.round(value * 1_000_000), outUs: clip.outUs })} />
+      <NumberField label="Source out · seconds" value={Number((clip.outUs / 1_000_000).toFixed(4))} min={(clip.inUs + 1) / 1_000_000} max={!asset?.metadata?.isStillImage && asset?.metadata?.durationUs ? asset.metadata.durationUs / 1_000_000 : undefined} step={0.01}
+        onCommit={(value) => void commit({ type: "trim_clip", clipId: clip.id, edge: "end", timeUs: Math.round(value * 1_000_000) })} />
+      <NumberField label="Speed · %" value={normalizeClipSpeedPercent(clip.speedPercent)} min={25} max={400} step={5}
+        onCommit={(value) => void commit({ type: "apply_clip_speed", clipId: clip.id, speedPercent: value })} />
+    </fieldset>
+    {asset?.kind !== "audio" ? <fieldset className="inspector-fields" disabled={locked || busy}>
+      <legend>Transform</legend>
+      <NumberField label="Scale · %" value={Math.round(transform.scale * 100)} min={10} max={400} onCommit={(value) => changeTransform({ scale: value / 100 })} />
+      <NumberField label="Position X · px" value={transform.positionX} min={-8192} max={8192} onCommit={(value) => changeTransform({ positionX: value })} />
+      <NumberField label="Position Y · px" value={transform.positionY} min={-8192} max={8192} onCommit={(value) => changeTransform({ positionY: value })} />
+      <NumberField label="Rotation · degrees" value={transform.rotation} min={-180} max={180} onCommit={(value) => changeTransform({ rotation: value })} />
+      <NumberField label="Opacity · %" value={Math.round(transform.opacity * 100)} min={0} max={100} onCommit={(value) => changeTransform({ opacity: value / 100 })} />
+      <NumberField label="Fade in · seconds" value={(transform.fadeInUs ?? 0) / 1_000_000} min={0} max={getClipDisplayDurationUs(clip) / 1_000_000} step={0.1} onCommit={(value) => changeTransform({ fadeInUs: Math.round(value * 1_000_000) })} />
+      <NumberField label="Fade out · seconds" value={(transform.fadeOutUs ?? 0) / 1_000_000} min={0} max={getClipDisplayDurationUs(clip) / 1_000_000} step={0.1} onCommit={(value) => changeTransform({ fadeOutUs: Math.round(value * 1_000_000) })} />
+      {transform.fadeDurationUs ? <p className="muted">Fades continue through the original split. Changing a fade applies it to this segment.</p> : null}
+      <Button onClick={() => changeTransform(defaultClipTransform)}>Reset transform</Button>
+    </fieldset> : null}
+    {nextClip ? <fieldset className="inspector-fields" disabled={locked || busy}>
+      <legend>Transition to next clip</legend>
+      <NumberField label="Crossfade · seconds" value={effectiveTransitionSeconds} min={0.000001} max={maxTransitionSeconds} step={0.1} onCommit={setTransitionSeconds} />
+      <Button disabled={maxTransitionSeconds <= 0} onClick={() => void commit({ type: "crossfade_clips", firstClipId: clip.id, secondClipId: nextClip.id, durationUs: Math.round(effectiveTransitionSeconds * 1_000_000) })}>Crossfade to next clip</Button>
+      <small className="muted-line">Overlaps the next clip and moves later clips on this track earlier.</small>
+    </fieldset> : null}
+    {asset?.kind === "audio" || asset?.metadata?.hasAudio ? <fieldset className="inspector-fields" disabled={locked || busy}>
+      <legend>Audio</legend>
+      <NumberField label="Gain · dB" value={audio.gainDb} min={-60} max={12} step={0.5}
+        onCommit={(value) => void commit({ type: "apply_audio_adjustment", clipId: clip.id, adjustment: { gainDb: value } })} />
+      <Toggle label="Mute clip" checked={audio.muted} onChange={(event) => void commit({ type: "apply_audio_adjustment", clipId: clip.id, adjustment: { muted: event.target.checked } })} />
+      <NumberField label="Audio fade in · seconds" value={audio.fadeInUs / 1_000_000} min={0} max={getClipDisplayDurationUs(clip) / 1_000_000} step={0.1} onCommit={(value) => void commit({ type: "apply_audio_adjustment", clipId: clip.id, adjustment: { fadeInUs: Math.round(value * 1_000_000) } })} />
+      <NumberField label="Audio fade out · seconds" value={audio.fadeOutUs / 1_000_000} min={0} max={getClipDisplayDurationUs(clip) / 1_000_000} step={0.1} onCommit={(value) => void commit({ type: "apply_audio_adjustment", clipId: clip.id, adjustment: { fadeOutUs: Math.round(value * 1_000_000) } })} />
+    </fieldset> : null}
+    <details className="clip-source-details"><summary>Source details</summary><p>{asset?.path ?? clip.mediaId}</p><p>Source in: {(clip.inUs / 1_000_000).toFixed(3)}s</p><p>Clip: {clip.id}</p></details>
+  </div>;
 }
 
-function createTimeMarks(durationSeconds: number) {
+function createTimeMarks(durationSeconds: number, zoomPxPerSecond: number) {
   const marks: Array<{ seconds: number; label: string }> = [];
-  for (let seconds = 0; seconds <= durationSeconds; seconds += 5) {
+  const intervals = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+  const intervalSeconds = intervals.find((interval) => interval * zoomPxPerSecond >= 72) ?? intervals.at(-1)!;
+  for (let seconds = 0; seconds <= durationSeconds; seconds += intervalSeconds) {
     marks.push({
       seconds,
       label: formatTimelineTime(seconds)
@@ -3367,7 +4053,7 @@ function clipHasVisualEdits(clip: TimelineClip | undefined) {
         Math.abs(transform.positionX) > 0.001 ||
         Math.abs(transform.positionY) > 0.001 ||
         Math.abs(transform.rotation) > 0.001 ||
-        Math.abs(transform.opacity - 1) > 0.001)) ||
+        Math.abs(transform.opacity - 1) > 0.001 || (transform.fadeInUs ?? 0) > 0 || (transform.fadeOutUs ?? 0) > 0)) ||
     effects.some((effect) => effect.enabled && effect.amount > 0)
   );
 }
@@ -3591,6 +4277,10 @@ function compareClipsByTimeline(left: TimelineClip, right: TimelineClip) {
   return left.trackId.localeCompare(right.trackId) || left.startUs - right.startUs || left.id.localeCompare(right.id);
 }
 
+function formatPreciseDuration(durationUs: number) {
+  return `${(Math.max(0, durationUs) / 1_000_000).toFixed(2)}s`;
+}
+
 function getTimelineContentEndUs(timeline: Timeline) {
   return timeline.tracks.reduce(
     (duration, track) =>
@@ -3598,12 +4288,35 @@ function getTimelineContentEndUs(timeline: Timeline) {
         duration,
         ...track.clips.map((clip) => clip.startUs + getClipDisplayDurationUs(clip))
       ),
-    0
+    Math.max(0, ...(timeline.titles ?? []).map((title) => title.startUs + title.durationUs))
+  );
+}
+
+function GapInspector({ gap, trackName }: { gap: TimelineGapSelection; trackName: string }) {
+  return (
+    <div className="inspector-stack">
+      <label>
+        Track
+        <input value={trackName} readOnly />
+      </label>
+      <label>
+        Start
+        <input value={formatPreciseDuration(gap.startUs)} readOnly />
+      </label>
+      <label>
+        End
+        <input value={formatPreciseDuration(gap.endUs)} readOnly />
+      </label>
+      <label>
+        Duration
+        <input value={formatPreciseDuration(gap.endUs - gap.startUs)} readOnly />
+      </label>
+    </div>
   );
 }
 
 function getTimelineEditDurationUs(timeline: Timeline) {
-  return Math.max(minTimelineDurationUs, getTimelineContentEndUs(timeline) + timelineTailRoomUs);
+  return Math.max(minTimelineDurationUs, getTimelineContentEndUs(timeline) + timelineTailRoomUs, ...(timeline.markers ?? []).map((marker) => marker.timeUs + timelineTailRoomUs));
 }
 
 function withTimelineEditDuration(timeline: Timeline): Timeline {
@@ -3619,14 +4332,25 @@ function findActiveClip(timeline: typeof starterTimeline, playheadUs: number, ki
 
 function findActiveClips(timeline: typeof starterTimeline, playheadUs: number, kind: "video" | "audio", soloTrackIds: string[] = []) {
   return timeline.tracks
-    .filter((track) => track.kind === kind && !track.locked && (kind === "audio" ? !track.muted : track.visible) && (soloTrackIds.length === 0 || soloTrackIds.includes(track.id)))
-    .flatMap((track) => track.clips)
+    .filter((track) => track.kind === kind && (kind === "audio" ? !track.muted : track.visible) && (soloTrackIds.length === 0 || soloTrackIds.includes(track.id)))
+    .sort((a, b) => a.index - b.index)
+    .flatMap((track) => [...track.clips].sort((a, b) => b.startUs - a.startUs))
     .filter((clip) => playheadUs >= clip.startUs && playheadUs < clip.startUs + getClipDisplayDurationUs(clip));
 }
 
 function getClipMediaTimeUs(clip: TimelineClip, playheadUs: number) {
   const sourceOffsetUs = Math.round(Math.max(0, playheadUs - clip.startUs) * getClipSpeedFactor(clip));
   return clamp(sourceOffsetUs + clip.inUs, clip.inUs, Math.max(clip.inUs, clip.outUs - 1));
+}
+
+function getClipTimelineTimeUs(clip: TimelineClip, mediaTimeSeconds: number) {
+  const sourceTimeUs = Math.max(0, Math.round(mediaTimeSeconds * 1_000_000));
+  const sourceOffsetUs = Math.max(0, sourceTimeUs - clip.inUs);
+  return clamp(
+    clip.startUs + Math.round(sourceOffsetUs / getClipSpeedFactor(clip)),
+    clip.startUs,
+    clip.startUs + getClipDisplayDurationUs(clip)
+  );
 }
 
 function isPlayheadInsideClip(clip: TimelineClip, playheadUs: number) {
@@ -3661,7 +4385,8 @@ function syncMediaElement<T extends HTMLVideoElement | HTMLAudioElement>(
   clip: TimelineClip | undefined,
   playheadUs: number,
   playing: boolean,
-  previewSpeedPercent = 100
+  previewSpeedPercent = 100,
+  onPlaybackUnavailable?: () => void
 ) {
   const element = ref.current;
   if (!element || !clip) {
@@ -3681,7 +4406,7 @@ function syncMediaElement<T extends HTMLVideoElement | HTMLAudioElement>(
 
   if (playing) {
     void element.play().catch(() => {
-      // Browser/WebView codec or autoplay failures should not stop timeline playback.
+      onPlaybackUnavailable?.();
     });
   } else {
     element.pause();
@@ -3706,8 +4431,9 @@ function applyMediaElementAudio<T extends HTMLVideoElement | HTMLAudioElement>(
   }
 
   const audio = normalizeAudioAdjustment(clip.audio);
-  const clipTimeUs = clamp(Math.round((playheadUs - clip.startUs) * getClipSpeedFactor(clip)), 0, clip.outUs - clip.inUs);
-  const fadeMultiplier = audioFadeMultiplier(audio, clipTimeUs, clip.outUs - clip.inUs);
+  const durationUs = getClipDisplayDurationUs(clip);
+  const clipTimeUs = clamp(playheadUs - clip.startUs, 0, durationUs);
+  const fadeMultiplier = audioFadeMultiplier(audio, clipTimeUs, durationUs);
   const linearGain = dbToLinear((projectSettings.masterGainDb ?? 0) + audio.gainDb) * fadeMultiplier * clamp(previewVolumePercent / 100, 0, 2);
   setMediaElementGain(element, audio.muted ? 0 : linearGain);
 }
@@ -3726,17 +4452,11 @@ function normalizeAudioAdjustment(value?: Partial<AudioAdjustment>): AudioAdjust
 }
 
 function audioFadeMultiplier(audio: AudioAdjustment, clipTimeUs: number, durationUs: number) {
-  let multiplier = 1;
-  if (audio.fadeInUs > 0 && clipTimeUs < audio.fadeInUs) {
-    multiplier *= clamp(clipTimeUs / audio.fadeInUs, 0, 1);
-  }
-  if (audio.fadeOutUs > 0) {
-    const fadeOutStartUs = Math.max(0, durationUs - audio.fadeOutUs);
-    if (clipTimeUs > fadeOutStartUs) {
-      multiplier *= clamp((durationUs - clipTimeUs) / audio.fadeOutUs, 0, 1);
-    }
-  }
-  return multiplier;
+  const duration = audio.fadeDurationUs || durationUs;
+  const time = clipTimeUs + (audio.fadeOffsetUs ?? 0);
+  const fadeIn = Math.min(audio.fadeInUs, duration);
+  const fadeOut = Math.min(audio.fadeOutUs, duration);
+  return (fadeIn > 0 ? clamp(time / fadeIn, 0, 1) : 1) * (fadeOut > 0 ? clamp((duration - time) / fadeOut, 0, 1) : 1);
 }
 
 function dbToLinear(gainDb: number) {
@@ -3758,6 +4478,29 @@ function getTrackEndUs(track: (typeof starterTimeline.tracks)[number], excludedC
   return track.clips
     .filter((clip) => clip.id !== excludedClipId)
     .reduce((endUs, clip) => Math.max(endUs, clip.startUs + getClipDisplayDurationUs(clip)), 0);
+}
+
+function getTrackGaps(track: Timeline["tracks"][number]): TimelineGapSelection[] {
+  const orderedClips = [...track.clips].sort((left, right) => left.startUs - right.startUs);
+  const gaps: TimelineGapSelection[] = [];
+  let hasOccupiedTime = false;
+  let occupiedUntilUs = 0;
+
+  for (const clip of orderedClips) {
+    const clipStartUs = Math.max(0, clip.startUs);
+    const clipEndUs = clipStartUs + getClipDisplayDurationUs(clip);
+    if (hasOccupiedTime && clipStartUs > occupiedUntilUs) {
+      gaps.push({ trackId: track.id, startUs: occupiedUntilUs, endUs: clipStartUs });
+    }
+    occupiedUntilUs = Math.max(occupiedUntilUs, clipEndUs);
+    hasOccupiedTime = true;
+  }
+
+  return gaps;
+}
+
+function sameTimelineGap(left: TimelineGapSelection | null | undefined, right: TimelineGapSelection | null | undefined) {
+  return Boolean(left && right && left.trackId === right.trackId && left.startUs === right.startUs && left.endUs === right.endUs);
 }
 
 function getClipVisualLeft(startUs: number, zoomPxPerSecond: number) {
@@ -3848,6 +4591,7 @@ function resolveTrackSnapStart(
   const candidates = targetTrack.clips
     .filter((clip) => clip.id !== excludedClipId)
     .flatMap((clip) => [clip.startUs, clip.startUs + getClipDisplayDurationUs(clip)]);
+  candidates.push(...(timeline.markers ?? []).map((marker) => marker.timeUs));
 
   if (candidates.length === 0) {
     const gridStartUs = snapTime(startUs);

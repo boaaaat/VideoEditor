@@ -3,6 +3,7 @@ import { Bot, CheckCheck, Film, History, ListChecks, Sparkles, X } from "lucide-
 import type { AiEditProposal } from "@ai-video-editor/protocol";
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
+import { AgentAccessPanel } from "./AgentAccessPanel";
 import type { MediaAsset } from "../../features/media/mediaTypes";
 
 interface FutureAiTabProps {
@@ -16,15 +17,15 @@ interface FutureAiTabProps {
 export function FutureAiTab({ mediaAssets, proposals, onGenerateProposal, onApplyProposal, onRejectProposal }: FutureAiTabProps) {
   const videoAssets = useMemo(() => mediaAssets.filter((asset) => asset.kind === "video"), [mediaAssets]);
   const [goal, setGoal] = useState("make a 45 second YouTube intro cut");
-  const [selectedMediaIds, setSelectedMediaIds] = useState<string[]>([]);
+  const [excludedMediaIds, setExcludedMediaIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
 
-  const selectedIds = selectedMediaIds.length > 0 ? selectedMediaIds : videoAssets.map((asset) => asset.id);
+  const selectedIds = videoAssets.map((asset) => asset.id).filter((id) => !excludedMediaIds.includes(id));
   const pendingProposals = proposals.filter((proposal) => proposal.status === "pending");
   const pastProposals = proposals.filter((proposal) => proposal.status !== "pending");
 
   function toggleMedia(id: string) {
-    setSelectedMediaIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
+    setExcludedMediaIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
   }
 
   async function generateProposal() {
@@ -38,8 +39,10 @@ export function FutureAiTab({ mediaAssets, proposals, onGenerateProposal, onAppl
 
   return (
     <div className="tool-grid">
-      <Panel title="Rough Cut Copilot">
+      <AgentAccessPanel />
+      <Panel title="Quick rough cut">
         <div className="control-stack">
+          <p className="muted-line">Arrange selected videos in order to a target duration. This uses a simple assembly rule; connect an agent above for edits based on your instructions.</p>
           <label>
             Edit goal
             <input value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="make a 30 second rough cut" />

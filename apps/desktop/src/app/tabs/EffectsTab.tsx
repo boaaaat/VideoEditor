@@ -5,6 +5,7 @@ import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Slider } from "../../components/Slider";
 import { Toggle } from "../../components/Toggle";
+import { useAdjustmentHistory } from "../../features/commands/useAdjustmentHistory";
 import { executeCommand } from "../../features/commands/commandClient";
 import type { LogStatus } from "../../features/logging/appLog";
 import type { MediaAsset } from "../../features/media/mediaTypes";
@@ -15,6 +16,7 @@ interface EffectsTabProps {
   setTimeline: Dispatch<SetStateAction<Timeline>>;
   mediaAssets: MediaAsset[];
   projectSettings: ProjectSettings;
+  projectPath?: string;
   playheadUs: number;
   setPlayheadUs: Dispatch<SetStateAction<number>>;
   playing: boolean;
@@ -29,6 +31,7 @@ export function EffectsTab({
   setTimeline,
   mediaAssets,
   projectSettings,
+  projectPath,
   playheadUs,
   setPlayheadUs,
   playing,
@@ -40,6 +43,8 @@ export function EffectsTab({
   const videoClips = collectVideoClips(timeline);
   const [selectedClipId, setSelectedClipId] = useState("");
   const selectedClip = videoClips.find((clip) => clip.id === selectedClipId) ?? videoClips[0];
+  const historyFor = useAdjustmentHistory();
+  const controlsDisabled = !selectedClip || Boolean(timeline.tracks.find((track) => track.id === selectedClip.trackId)?.locked);
   const transform = normalizeTransform(selectedClip?.transform);
   const effects = normalizeEffects(selectedClip?.effects);
 
@@ -64,7 +69,7 @@ export function EffectsTab({
       return;
     }
 
-    void executeCommand({ type: "apply_transform", clipId: selectedClip.id, transform: next, history: { mode: "replace", group: `transform:${selectedClip.id}` } }).then((result) => {
+    void executeCommand({ type: "apply_transform", clipId: selectedClip.id, transform: next, history: historyFor(`transform:${selectedClip.id}:${Object.keys(next).join(",")}`) }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
         setStatusMessage(label, { details: { clipId: selectedClip.id, transform: next } });
@@ -82,7 +87,7 @@ export function EffectsTab({
       return;
     }
 
-    void executeCommand({ type: "apply_effect_stack", clipId: selectedClip.id, effects: nextEffects, history: { mode: "replace", group: `effects:${selectedClip.id}` } }).then((result) => {
+    void executeCommand({ type: "apply_effect_stack", clipId: selectedClip.id, effects: nextEffects, history: historyFor(`effects:${selectedClip.id}:${label}`) }).then((result) => {
       if (result.ok) {
         applyEngineTimeline(result.data);
         setStatusMessage(label, { details: { clipId: selectedClip.id, effects: nextEffects } });
@@ -106,13 +111,10 @@ export function EffectsTab({
       setStatusMessage("Select a video clip first", { level: "warning" });
       return;
     }
-    void executeCommand({ type: "apply_transform", clipId: selectedClip.id, transform: defaultClipTransform })
-      .then((result) => {
-        if (result.ok) {
-          return executeCommand({ type: "apply_effect_stack", clipId: selectedClip.id, effects: defaultClipEffects });
-        }
-        throw new Error(result.error ?? "Reset effects failed");
-      })
+    void executeCommand({ type: "execute_batch", commands: [
+      { type: "apply_transform", clipId: selectedClip.id, transform: defaultClipTransform },
+      { type: "apply_effect_stack", clipId: selectedClip.id, effects: defaultClipEffects }
+    ] })
       .then((result) => {
         if (result.ok) {
           applyEngineTimeline(result.data);
@@ -133,6 +135,7 @@ export function EffectsTab({
           timeline={timeline}
           mediaAssets={mediaAssets}
           projectSettings={projectSettings}
+          projectPath={projectPath}
           selectedClipId={selectedClip?.id ?? ""}
           onSelectedClipIdChange={setSelectedClipId}
           playheadUs={playheadUs}
@@ -161,13 +164,15 @@ export function EffectsTab({
             >
               {videoClips.length === 0 ? <option value="">No video clips</option> : null}
               {videoClips.map((clip) => (
-                <option key={clip.id} value={clip.id}>{clip.id} - {formatSeconds(clip.startUs)}</option>
+                <option key={clip.id} value={clip.id}>{mediaAssets.find((asset) => asset.id === clip.mediaId)?.name ?? clip.id} — {formatSeconds(clip.startUs)}</option>
               ))}
             </select>
           </label>
+          {selectedClip && controlsDisabled ? <span className="muted-line">Unlock this clip’s track to make adjustments.</span> : null}
         </div>
       </Panel>
 
+      <fieldset className="editor-controls-group" disabled={controlsDisabled}>
       <Panel title="Transform">
         <div className="control-stack">
           <Toggle label="Transform enabled" checked={transform.enabled} onChange={(event) => updateSelectedClipTransform({ enabled: event.target.checked }, event.target.checked ? "Transform enabled" : "Transform disabled")} />
@@ -197,6 +202,7 @@ export function EffectsTab({
           </Button>
         </div>
       </Panel>
+      </fieldset>
       </div>
     </div>
   );

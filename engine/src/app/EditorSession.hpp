@@ -86,26 +86,48 @@ class EditorSession {
     };
   }
 
-  void openDatabase(const std::filesystem::path& databasePath) {
-    closeDatabase();
-    databasePath_ = databasePath;
-    media_.clear();
-    timeline_ = Timeline{};
-    proposals_.clear();
-    history_.clear();
-    projectSettings_ = defaultProjectSettingsJson();
-    activeProject_ = nlohmann::json::object();
-    savedAt_ = nowStamp();
-
-    std::filesystem::create_directories(databasePath_.parent_path());
-    if (sqlite3_open(databasePath_.string().c_str(), &db_) != SQLITE_OK) {
-      const std::string message = db_ ? sqlite3_errmsg(db_) : "unknown sqlite error";
-      sqlite3_close(db_);
-      db_ = nullptr;
+  void openDatabase(const std::filesystem::path& databasePath, const nlohmann::json& project = nullptr) {
+    // Keep the current connection and its undo history until the destination is fully loaded.
+    EditorSession candidate(nullptr);
+    candidate.databasePath_ = databasePath;
+    candidate.projectSettings_ = defaultProjectSettingsJson();
+    candidate.savedAt_ = nowStamp();
+    std::filesystem::create_directories(databasePath.parent_path());
+    const auto utf8Path = databasePath.u8string();
+    if (sqlite3_open(reinterpret_cast<const char*>(utf8Path.c_str()), &candidate.db_) != SQLITE_OK) {
+      const std::string message = candidate.db_ ? sqlite3_errmsg(candidate.db_) : "unknown sqlite error";
       throw std::runtime_error("failed to open editor session database: " + message);
     }
-    initialize();
-    load();
+    candidate.exec("PRAGMA journal_mode=WAL;");
+    candidate.exec("SAVEPOINT open_project;");
+    candidate.initialize();
+    candidate.load();
+    if (project.is_object()) {
+      candidate.setActiveProject(project);
+      const auto root = std::filesystem::path(project.value("path", std::string{}));
+      bool resolvedMedia = false;
+      for (auto& media : candidate.media_) {
+        const auto path = std::filesystem::path(media.path);
+        if (!root.empty() && !path.empty() && path.is_relative() && media.path.find("://") == std::string::npos) {
+          media.path = (root / path).lexically_normal().string();
+          if (media.metadata.is_object()) media.metadata["path"] = media.path;
+          resolvedMedia = true;
+        }
+      }
+      if (resolvedMedia) candidate.saveMedia();
+      candidate.saveProjectMetadata();
+    }
+    candidate.exec("RELEASE open_project;");
+    using std::swap;
+    swap(db_, candidate.db_);
+    swap(databasePath_, candidate.databasePath_);
+    swap(media_, candidate.media_);
+    swap(timeline_, candidate.timeline_);
+    swap(proposals_, candidate.proposals_);
+    swap(history_, candidate.history_);
+    swap(projectSettings_, candidate.projectSettings_);
+    swap(activeProject_, candidate.activeProject_);
+    swap(savedAt_, candidate.savedAt_);
   }
 
   void setActiveProject(nlohmann::json project) {
@@ -131,6 +153,8 @@ class EditorSession {
         {"fps", timeline_.fps},
         {"durationUs", timeline_.durationUs},
         {"tracks", tracksJson()},
+        {"markers", markersJson()},
+        {"titles", timeline_.titles},
     };
   }
 
@@ -163,6 +187,32 @@ class EditorSession {
   }
 
   void replaceState(const nlohmann::json& state, bool resetHistory = true) {
+    const auto originalMedia = media_;
+    const auto originalTimeline = timeline_;
+    const auto originalProposals = proposals_;
+    const auto originalHistory = history_;
+    const auto originalSettings = projectSettings_;
+    const auto originalProject = activeProject_;
+    const auto originalSavedAt = savedAt_;
+    exec("SAVEPOINT replace_state;");
+    try {
+      replaceStateImpl(state, resetHistory);
+      exec("RELEASE replace_state;");
+    } catch (...) {
+      media_ = originalMedia;
+      timeline_ = originalTimeline;
+      proposals_ = originalProposals;
+      history_ = originalHistory;
+      projectSettings_ = originalSettings;
+      activeProject_ = originalProject;
+      savedAt_ = originalSavedAt;
+      exec("ROLLBACK TO replace_state;");
+      exec("RELEASE replace_state;");
+      throw;
+    }
+  }
+
+  void replaceStateImpl(const nlohmann::json& state, bool resetHistory) {
     media_.clear();
     timeline_ = Timeline{};
     proposals_.clear();
@@ -212,19 +262,48 @@ class EditorSession {
   }
 
   nlohmann::json importMedia(const nlohmann::json& command, const FfprobeService& ffprobeService) {
+    std::vector<std::filesystem::path> copiedFiles;
+    try { return mediaTransaction([&] { return importMediaImpl(command, ffprobeService, copiedFiles); }); }
+    catch (...) {
+      // These are exclusively new files created by this import; never remove a source file.
+      for (const auto& file : copiedFiles) { std::error_code ignored; std::filesystem::remove(file, ignored); }
+      throw;
+    }
+  }
+
+  nlohmann::json importMediaImpl(const nlohmann::json& command, const FfprobeService& ffprobeService, std::vector<std::filesystem::path>& copiedFiles) {
     const auto beforeState = projectStateJson();
-    if (!command.contains("paths") || !command.at("paths").is_array()) {
-      throw std::runtime_error("import_media requires paths");
+    if (!command.contains("paths") || !command.at("paths").is_array() || command.at("paths").empty() || command.at("paths").size() > 100) {
+      throw std::runtime_error("import_media requires 1 to 100 paths");
     }
 
     auto imported = nlohmann::json::array();
+    std::vector<std::string> sourcePaths;
     for (const auto& item : command.at("paths")) {
-      const auto path = item.get<std::string>();
+      auto path = normalizedMediaPath(item.get<std::string>());
+      if (std::any_of(sourcePaths.begin(), sourcePaths.end(), [&](const auto& seen) { return sameMediaPath(seen, path); })) continue;
+      sourcePaths.push_back(path);
       if (!isSupportedMediaPath(path)) {
         throw std::runtime_error("unsupported media type: " + path);
       }
 
-      const auto id = mediaIdForPath(path);
+      auto metadata = ffprobeService.probe(path).toJson();
+      const auto originalName = fileName(path);
+      if (command.value("copyToProject", false)) {
+        const auto projectPath = activeProject_.value("path", std::string{});
+        if (projectPath.empty()) throw std::runtime_error("open a project before copying media into it");
+        const auto root = std::filesystem::canonical(std::filesystem::u8path(projectPath));
+        const auto directory = root / "media";
+        std::filesystem::create_directories(directory);
+        if (std::filesystem::canonical(directory).parent_path() != root) throw std::runtime_error("project media folder resolves outside the project");
+        const auto copied = directory / std::filesystem::u8path(stableHash(idSeed() + path) + "_" + originalName);
+        if (!std::filesystem::copy_file(std::filesystem::u8path(path), copied, std::filesystem::copy_options::none)) throw std::runtime_error("could not copy media into project");
+        copiedFiles.push_back(copied);
+        path = pathUtf8(copied);
+        metadata["path"] = path;
+      }
+      const auto existing = std::find_if(media_.begin(), media_.end(), [&](const auto& asset) { return sameMediaPath(asset.path, path); });
+      const auto id = existing == media_.end() ? mediaIdForPath(path) : existing->id;
       auto media = mediaById(id);
       if (!media) {
         media = IndexedMedia{};
@@ -232,11 +311,12 @@ class EditorSession {
       }
 
       media->path = path;
-      media->name = fileName(path);
+      if (media->name.empty()) media->name = originalName;
       media->extension = extensionForPath(path);
-      media->kind = media->extension == "mp3" ? "audio" : "video";
+      media->kind = metadata.value("width", 0) > 0 ? "video" : "audio";
       media->importedAt = nowStamp();
-      media->metadata = probeOrFallback(path, media->kind, ffprobeService);
+      media->metadata = metadata;
+      validateReplacement(*media);
       media->intelligence = intelligenceFor(*media);
       upsertMedia(*media);
       imported.push_back(media->toJson());
@@ -248,7 +328,33 @@ class EditorSession {
     return result;
   }
 
+  nlohmann::json relinkMedia(const nlohmann::json& command, const FfprobeService& ffprobeService) {
+    return mediaTransaction([&] {
+      const auto beforeState = projectStateJson();
+      auto media = mediaById(command.at("mediaId").get<std::string>());
+      if (!media) throw std::runtime_error("media not found");
+      const auto path = normalizedMediaPath(command.at("path").get<std::string>());
+      if (!isSupportedMediaPath(path)) throw std::runtime_error("unsupported replacement media type: " + path);
+      media->metadata = ffprobeService.probe(path).toJson();
+      const auto kind = media->metadata.value("width", 0) > 0 ? "video" : "audio";
+      if (media->kind != kind) throw std::runtime_error("replacement must have the same video/audio kind as the original");
+      media->path = path;
+      media->extension = extensionForPath(path);
+      validateReplacement(*media);
+      media->intelligence = intelligenceFor(*media);
+      upsertMedia(*media);
+      saveMedia();
+      auto result = commandResult("relink_media", projectStateJson());
+      recordCommand(command, beforeState, result);
+      return result;
+    });
+  }
+
   nlohmann::json removeMedia(const nlohmann::json& command) {
+    return mediaTransaction([&] { return removeMediaImpl(command); });
+  }
+
+  nlohmann::json removeMediaImpl(const nlohmann::json& command) {
     const auto beforeState = projectStateJson();
     const auto mediaId = command.value("mediaId", std::string{});
     if (mediaId.empty()) {
@@ -258,6 +364,12 @@ class EditorSession {
     const auto media = findMedia(mediaId);
     if (!media) {
       throw std::runtime_error("media not found: " + mediaId);
+    }
+
+    for (const auto& track : timeline_.tracks) {
+      if (track.locked && std::any_of(track.clips.begin(), track.clips.end(), [&](const Clip& clip) { return clip.mediaId == mediaId; })) {
+        throw std::runtime_error("media is used on locked track: " + track.id + "; unlock the track before removing it");
+      }
     }
 
     media_.erase(std::remove_if(media_.begin(), media_.end(), [&](const IndexedMedia& item) {
@@ -281,9 +393,102 @@ class EditorSession {
   }
 
   nlohmann::json executeCommand(const nlohmann::json& command) {
+    if (command.value("type", std::string{}) == "execute_batch") return executeBatch(command);
+    const auto originalTimeline = timeline_;
+    const auto originalHistory = history_;
+    const auto originalSettings = projectSettings_;
+    exec("SAVEPOINT editor_command;");
+    try {
+      auto result = executeCommandImpl(command);
+      exec("RELEASE editor_command;");
+      return result;
+    } catch (...) {
+      timeline_ = originalTimeline;
+      history_ = originalHistory;
+      projectSettings_ = originalSettings;
+      exec("ROLLBACK TO editor_command;");
+      exec("RELEASE editor_command;");
+      throw;
+    }
+  }
+
+  nlohmann::json executeBatch(const nlohmann::json& command, const std::string& proposalId = "") {
+    if (!command.contains("commands") || !command.at("commands").is_array() || command.at("commands").empty() || command.at("commands").size() > 500) {
+      throw std::runtime_error("execute_batch requires between 1 and 500 editing commands");
+    }
+    const auto beforeState = projectStateJson();
+    const auto originalTimeline = timeline_;
+    const auto originalProposals = proposals_;
+    const auto originalHistory = history_;
+    exec("SAVEPOINT editor_batch;");
+    try {
+      for (auto item : command.at("commands")) {
+        const auto type = item.value("type", std::string{});
+        if (type == "execute_batch" || type == "import_media" || type == "relink_media" || type == "remove_media" || type == "export_timeline" || type == "update_project_settings") {
+          throw std::runtime_error("batch only supports timeline editing commands, not " + type);
+        }
+        item["history"] = {{"mode", "none"}};
+        executeCommand(item);
+      }
+      if (!proposalId.empty()) {
+        auto proposal = proposalById(proposalId);
+        if (!proposal || proposal->status != "pending") throw std::runtime_error("proposal is not pending");
+        proposal->status = "applied";
+        upsertProposal(*proposal);
+        saveProposals();
+      }
+      history_ = originalHistory;
+      auto result = commandResult("execute_batch", projectStateJson());
+      recordCommand(command, beforeState, result);
+      exec("RELEASE editor_batch;");
+      return result;
+    } catch (...) {
+      timeline_ = originalTimeline;
+      proposals_ = originalProposals;
+      history_ = originalHistory;
+      exec("ROLLBACK TO editor_batch;");
+      exec("RELEASE editor_batch;");
+      throw;
+    }
+  }
+
+  nlohmann::json executeCommandImpl(const nlohmann::json& command) {
     const auto beforeState = projectStateJson();
     const auto type = command.value("type", std::string{});
-    if (type == "add_track") {
+    if (type == "update_project_settings") {
+      auto settings = projectSettings_;
+      settings.update(command.at("settings"));
+      const auto width = settings.at("width").get<int>();
+      const auto height = settings.at("height").get<int>();
+      const auto fps = settings.at("fps").get<int>();
+      const auto gain = settings.value("masterGainDb", 0.0);
+      if (width < 16 || width > 8192 || height < 16 || height > 8192 || width % 2 != 0 || height % 2 != 0 || (fps != 24 && fps != 25 && fps != 30 && fps != 50 && fps != 60) || !std::isfinite(gain) || gain < -60 || gain > 12) throw std::runtime_error("unsupported project dimensions, frame rate, or audio gain");
+      projectSettings_ = settings;
+      timeline_.fps = fps;
+      saveAppState();
+    } else if (type == "import_captions") {
+      const auto& cues = command.at("captions");
+      const auto mode = command.value("mode", std::string{"append"});
+      if (!cues.is_array() || cues.empty() || cues.size() > 5000 || (mode != "append" && mode != "replace")) throw std::runtime_error("import_captions requires 1–5,000 captions and append or replace mode");
+      auto titles = timeline_.titles;
+      if (mode == "replace") titles.erase(std::remove_if(titles.begin(), titles.end(), [](const auto& title) { return title.kind == "caption"; }), titles.end());
+      const auto prefix = "caption_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_";
+      const auto style = command.value("style", nlohmann::json::object());
+      if (!style.is_object()) throw std::runtime_error("caption style must be an object");
+      for (std::size_t index = 0; index < cues.size(); ++index) {
+        const auto& cue = cues.at(index);
+        nlohmann::json value = {{"fontSize", 36}, {"positionY", 92}};
+        for (const auto& key : {"fontSize", "color", "positionX", "positionY", "background"}) if (style.contains(key)) value[key] = style.at(key);
+        value.update({{"id", prefix + std::to_string(index)}, {"kind", "caption"}, {"text", cue.at("text")}, {"startUs", cue.at("startUs")}, {"durationUs", cue.at("durationUs")}});
+        titles.push_back(value.get<TitleOverlay>());
+      }
+      std::stable_sort(titles.begin(), titles.end(), [](const auto& a, const auto& b) { return a.startUs < b.startUs; });
+      timeline_.titles = std::move(titles);
+    } else if (type == "add_title" || type == "update_title" || type == "delete_title") {
+      editTitle(command);
+    } else if (type == "add_marker" || type == "update_marker" || type == "delete_marker") {
+      editMarker(command);
+    } else if (type == "add_track") {
       addTrack(command);
     } else if (type == "update_track") {
       updateTrack(command);
@@ -293,13 +498,43 @@ class EditorSession {
       moveClip(command);
     } else if (type == "trim_clip") {
       trimClip(command);
+    } else if (type == "set_clip_source_range") {
+      auto* clip = findClip(command.at("clipId").get<std::string>());
+      if (!clip) throw std::runtime_error("clip not found");
+      ensureClipTrackEditable(clip->id, type);
+      const auto inUs = command.at("inUs").get<std::int64_t>();
+      const auto outUs = command.at("outUs").get<std::int64_t>();
+      const auto* media = findMedia(clip->mediaId);
+      const auto duration = media && !media->metadata.value("isStillImage", false) ? media->metadata.value("durationUs", 0LL) : 0LL;
+      if (inUs < 0 || outUs <= inUs || (duration > 0 && outUs > duration)) throw std::runtime_error("source range is outside media bounds");
+      if (clip->inUs != inUs || clip->outUs != outUs) resetFadeRanges(*clip);
+      clip->inUs = inUs;
+      clip->outUs = outUs;
     } else if (type == "split_clip") {
       splitClip(command);
+    } else if (type == "crossfade_clips") {
+      auto* first = findClip(command.at("firstClipId").get<std::string>());
+      auto* second = findClip(command.at("secondClipId").get<std::string>());
+      if (!first || !second || first == second || first->trackId != second->trackId) throw std::runtime_error("crossfade requires two clips on the same video track");
+      ensureClipTrackEditable(first->id, type);
+      auto* track = findTrack(first->trackId);
+      const auto duration = command.at("durationUs").get<std::int64_t>();
+      const auto firstEnd = first->startUs + displayedClipDurationUs(*first);
+      if (track->kind != TrackKind::Video || std::abs(firstEnd - second->startUs) > 1 || duration <= 0 || duration >= std::min(displayedClipDurationUs(*first), displayedClipDurationUs(*second))) throw std::runtime_error("crossfade needs adjacent video clips and a duration shorter than both clips");
+      const auto secondStart = second->startUs;
+      resetFadeRanges(*first);
+      resetFadeRanges(*second);
+      first->transform.fadeOutUs = 0;
+      first->audioFadeOutUs = duration;
+      second->transform.enabled = true;
+      second->transform.fadeInUs = duration;
+      second->audioFadeInUs = duration;
+      for (auto& clip : track->clips) if (clip.startUs >= secondStart) clip.startUs -= duration;
     } else if (type == "delete_clip") {
       deleteClip(command);
     } else if (type == "ripple_delete_clip") {
       ensureClipTrackEditable(command.value("clipId", std::string{}), "ripple_delete_clip");
-      TimelineService::rippleDelete(timeline_, command.value("clipId", std::string{}));
+      TimelineService::rippleDelete(timeline_, command.value("clipId", std::string{}), command.value("trackMode", std::string{"selected_track"}) == "all_tracks");
     } else if (type == "delete_track") {
       deleteTrack(command);
     } else if (type == "apply_color_adjustment" || type == "apply_lut") {
@@ -318,7 +553,7 @@ class EditorSession {
 
     recalculateTimelineDuration();
     saveTimeline();
-    auto result = commandResult(type, {{"timeline", timelineJson()}});
+    auto result = commandResult(type, type == "update_project_settings" ? projectStateJson() : nlohmann::json{{"timeline", timelineJson()}});
     recordCommand(command, beforeState, result);
     return result;
   }
@@ -328,8 +563,10 @@ class EditorSession {
       return commandHistoryResult(false, "Nothing to undo");
     }
 
+    const auto previousHistory = history_;
     const auto entry = history_.undo();
-    replaceState(entry.beforeState, false);
+    try { replaceState(entry.beforeState, false); }
+    catch (...) { history_ = previousHistory; throw; }
     return commandHistoryResult(true, "", entry.id, entry.type);
   }
 
@@ -338,8 +575,10 @@ class EditorSession {
       return commandHistoryResult(false, "Nothing to redo");
     }
 
+    const auto previousHistory = history_;
     const auto entry = history_.redo();
-    replaceState(entry.afterState, false);
+    try { replaceState(entry.afterState, false); }
+    catch (...) { history_ = previousHistory; throw; }
     return commandHistoryResult(true, "", entry.id, entry.type);
   }
 
@@ -404,6 +643,38 @@ class EditorSession {
     return proposal.toJson();
   }
 
+  nlohmann::json createProposal(const nlohmann::json& params) {
+    if (!params.contains("commands") || !params.at("commands").is_array() || params.at("commands").empty() || params.at("commands").size() > 500) {
+      throw std::runtime_error("proposal requires between 1 and 500 editing commands");
+    }
+    // Validate by applying inside an outer savepoint, then restore the original session.
+    const auto originalTimeline = timeline_;
+    const auto originalHistory = history_;
+    exec("SAVEPOINT proposal_validation;");
+    try {
+      executeBatch({{"type", "execute_batch"}, {"commands", params.at("commands")}});
+      exec("ROLLBACK TO proposal_validation;");
+      exec("RELEASE proposal_validation;");
+      timeline_ = originalTimeline;
+      history_ = originalHistory;
+    } catch (...) {
+      timeline_ = originalTimeline;
+      history_ = originalHistory;
+      exec("ROLLBACK TO proposal_validation;");
+      exec("RELEASE proposal_validation;");
+      throw;
+    }
+    AiEditProposal proposal;
+    proposal.id = "proposal_" + stableHash(idSeed());
+    proposal.goal = params.value("goal", std::string{"Agent edit proposal"});
+    proposal.explanation = params.value("explanation", std::string{});
+    proposal.commands = params.at("commands");
+    proposal.createdAt = nowStamp();
+    upsertProposal(proposal);
+    saveProposals();
+    return proposal.toJson();
+  }
+
   nlohmann::json applyProposal(const nlohmann::json& params) {
     const auto proposalId = params.value("proposalId", std::string{});
     auto proposal = proposalById(proposalId);
@@ -414,13 +685,8 @@ class EditorSession {
       throw std::runtime_error("proposal is not pending: " + proposalId);
     }
 
-    for (const auto& command : proposal->commands) {
-      executeCommand(command);
-    }
-    proposal->status = "applied";
-    upsertProposal(*proposal);
-    saveProposals();
-    return proposal->toJson();
+    executeBatch({{"type", "execute_batch"}, {"label", proposal->goal}, {"commands", proposal->commands}}, proposalId);
+    return proposalById(proposalId)->toJson();
   }
 
   nlohmann::json rejectProposal(const nlohmann::json& params) {
@@ -436,6 +702,52 @@ class EditorSession {
   }
 
  private:
+  explicit EditorSession(std::nullptr_t) {}
+
+  void validateReplacement(const IndexedMedia& media) const {
+    for (const auto& track : timeline_.tracks) for (const auto& clip : track.clips) {
+      if (clip.mediaId != media.id) continue;
+      if (track.locked) throw std::runtime_error("media is used on locked track: " + track.name + "; unlock it before replacing the source");
+      if (track.kind == TrackKind::Video && media.kind != "video") throw std::runtime_error("replacement has no video required by clip: " + clip.id);
+      if (!media.metadata.value("isStillImage", false) && clip.outUs > media.metadata.value("durationUs", 0LL)) throw std::runtime_error("replacement is shorter than the source range used by clip: " + clip.id);
+      const auto* previous = findMedia(media.id);
+      const auto needsAudio = track.kind == TrackKind::Audio || (previous && previous->metadata.value("hasAudio", false) && !clip.audioMuted);
+      if (needsAudio && (!media.metadata.value("hasAudio", false) || clip.audioStreamIndex >= media.metadata.value("audioStreamCount", 0))) throw std::runtime_error("replacement lacks the audio stream used by clip: " + clip.id);
+    }
+  }
+
+  static std::string pathUtf8(const std::filesystem::path& path) {
+    const auto value = path.u8string();
+    return {reinterpret_cast<const char*>(value.data()), value.size()};
+  }
+  static std::string normalizedMediaPath(const std::string& path) {
+    if (path.empty() || path.find('\0') != std::string::npos) throw std::runtime_error("media path is empty or invalid");
+    return pathUtf8(std::filesystem::weakly_canonical(std::filesystem::absolute(std::filesystem::u8path(path))));
+  }
+  static bool sameMediaPath(const std::string& left, const std::string& right) {
+    std::error_code error;
+    return left == right || std::filesystem::equivalent(std::filesystem::u8path(left), std::filesystem::u8path(right), error);
+  }
+
+  template <typename Action>
+  nlohmann::json mediaTransaction(Action action) {
+    const auto originalMedia = media_;
+    const auto originalTimeline = timeline_;
+    const auto originalHistory = history_;
+    exec("SAVEPOINT media_command;");
+    try {
+      auto result = action();
+      exec("RELEASE media_command;");
+      return result;
+    } catch (...) {
+      media_ = originalMedia;
+      timeline_ = originalTimeline;
+      history_ = originalHistory;
+      exec("ROLLBACK TO media_command;");
+      exec("RELEASE media_command;");
+      throw;
+    }
+  }
   static IndexedMedia mediaFromJson(const nlohmann::json& value) {
     IndexedMedia media;
     media.id = value.value("id", std::string{});
@@ -455,6 +767,8 @@ class EditorSession {
     timeline.name = value.value("name", timeline.name);
     timeline.fps = value.value("fps", timeline.fps);
     timeline.durationUs = value.value("durationUs", timeline.durationUs);
+    timeline.markers = markersFromJson(value.value("markers", nlohmann::json::array()));
+    timeline.titles = value.value("titles", std::vector<TitleOverlay>{});
 
     if (value.contains("tracks") && value.at("tracks").is_array()) {
       for (const auto& item : value.at("tracks")) {
@@ -515,6 +829,9 @@ class EditorSession {
     clip.audioMuted = audio.value("muted", false);
     clip.audioFadeInUs = audio.value("fadeInUs", 0LL);
     clip.audioFadeOutUs = audio.value("fadeOutUs", 0LL);
+    clip.audioFadeOffsetUs = audio.value("fadeOffsetUs", 0LL);
+    clip.audioFadeDurationUs = audio.value("fadeDurationUs", 0LL);
+    validateFadeRange(clip.audioFadeInUs, clip.audioFadeOutUs, clip.audioFadeOffsetUs, clip.audioFadeDurationUs);
     clip.audioNormalize = audio.value("normalize", false);
     clip.audioCleanup = audio.value("cleanup", false);
     clip.audioStreamIndex = audio.value("streamIndex", 0);
@@ -559,7 +876,6 @@ class EditorSession {
   }
 
   void initialize() {
-    exec("PRAGMA journal_mode=WAL;");
     exec(R"sql(
       CREATE TABLE IF NOT EXISTS media_index (
         id TEXT PRIMARY KEY,
@@ -627,6 +943,7 @@ class EditorSession {
     loadClips();
     loadProposals();
     loadAppState();
+    timeline_.fps = projectSettings_.value("fps", 30);
     if (timeline_.tracks.empty()) {
       timeline_.tracks = defaultTracks();
       saveTimeline();
@@ -636,6 +953,8 @@ class EditorSession {
 
   void closeDatabase() {
     if (db_) {
+      // A malformed row can throw while a SELECT is live. Finalize it before closing.
+      while (auto* statement = sqlite3_next_stmt(db_, nullptr)) sqlite3_finalize(statement);
       sqlite3_close(db_);
       db_ = nullptr;
     }
@@ -700,6 +1019,9 @@ class EditorSession {
       clip.audioMuted = audio.value("muted", false);
       clip.audioFadeInUs = audio.value("fadeInUs", 0LL);
       clip.audioFadeOutUs = audio.value("fadeOutUs", 0LL);
+      clip.audioFadeOffsetUs = audio.value("fadeOffsetUs", 0LL);
+      clip.audioFadeDurationUs = audio.value("fadeDurationUs", 0LL);
+      validateFadeRange(clip.audioFadeInUs, clip.audioFadeOutUs, clip.audioFadeOffsetUs, clip.audioFadeDurationUs);
       clip.audioNormalize = audio.value("normalize", false);
       clip.audioCleanup = audio.value("cleanup", false);
       clip.audioStreamIndex = audio.value("streamIndex", 0);
@@ -741,6 +1063,10 @@ class EditorSession {
         projectSettings_.update(value);
       } else if (key == "project" && value.is_object()) {
         activeProject_ = value;
+      } else if (key == "timeline_markers" && value.is_array()) {
+        timeline_.markers = markersFromJson(value);
+      } else if (key == "timeline_titles" && value.is_array()) {
+        timeline_.titles = value.get<std::vector<TitleOverlay>>();
       } else if (key == "saved_at" && value.is_string()) {
         savedAt_ = value.get<std::string>();
       }
@@ -766,6 +1092,8 @@ class EditorSession {
   }
 
   void saveTimeline() {
+    upsertAppState("timeline_markers", markersJson());
+    upsertAppState("timeline_titles", timeline_.titles);
     exec("DELETE FROM timeline_clips;");
     exec("DELETE FROM timeline_tracks;");
     for (const auto& track : timeline_.tracks) {
@@ -797,6 +1125,71 @@ class EditorSession {
         stepDone(clipStatement);
       }
     }
+  }
+
+  static std::vector<TimelineMarker> markersFromJson(const nlohmann::json& rows) {
+    std::vector<TimelineMarker> markers;
+    for (const auto& row : rows) {
+      TimelineMarker marker{row.at("id").get<std::string>(), row.at("timeUs").get<std::int64_t>(), row.value("name", std::string{"Marker"}), row.value("color", std::string{"#f5c76b"})};
+      validateMarker(marker);
+      if (std::any_of(markers.begin(), markers.end(), [&](const auto& other) { return other.id == marker.id; })) throw std::runtime_error("duplicate marker ID");
+      markers.push_back(marker);
+    }
+    return markers;
+  }
+
+  static void validateMarker(const TimelineMarker& marker) {
+    if (marker.id.empty() || marker.timeUs < 0 || marker.name.empty() || marker.name.size() > 200) throw std::runtime_error("marker requires an ID, nonnegative time, and a name up to 200 characters");
+    if (marker.color.size() != 7 || marker.color[0] != '#' || !std::all_of(marker.color.begin() + 1, marker.color.end(), [](unsigned char ch) { return std::isxdigit(ch); })) throw std::runtime_error("marker color must be #RRGGBB");
+  }
+
+  nlohmann::json markersJson() const {
+    auto rows = nlohmann::json::array();
+    for (const auto& marker : timeline_.markers) rows.push_back({{"id", marker.id}, {"timeUs", marker.timeUs}, {"name", marker.name}, {"color", marker.color}});
+    return rows;
+  }
+
+  void editMarker(const nlohmann::json& command) {
+    const auto type = command.at("type").get<std::string>();
+    const auto id = command.value("markerId", "marker_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    auto it = std::find_if(timeline_.markers.begin(), timeline_.markers.end(), [&](const auto& marker) { return marker.id == id; });
+    if (type == "add_marker") {
+      if (it != timeline_.markers.end()) throw std::runtime_error("marker ID already exists");
+      TimelineMarker marker{id, command.at("timeUs").get<std::int64_t>(), command.value("name", std::string{"Marker"}), command.value("color", std::string{"#f5c76b"})};
+      validateMarker(marker);
+      timeline_.markers.push_back(marker);
+    } else {
+      if (it == timeline_.markers.end()) throw std::runtime_error("marker not found");
+      if (type == "delete_marker") timeline_.markers.erase(it);
+      else {
+        it->timeUs = command.value("timeUs", it->timeUs);
+        it->name = command.value("name", it->name);
+        it->color = command.value("color", it->color);
+        validateMarker(*it);
+      }
+    }
+    std::stable_sort(timeline_.markers.begin(), timeline_.markers.end(), [](const auto& a, const auto& b) { return a.timeUs < b.timeUs; });
+  }
+
+  void editTitle(const nlohmann::json& command) {
+    const auto type = command.at("type").get<std::string>();
+    const auto id = command.value("titleId", "title_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    auto it = std::find_if(timeline_.titles.begin(), timeline_.titles.end(), [&](const auto& title) { return title.id == id; });
+    if (type == "add_title") {
+      if (it != timeline_.titles.end()) throw std::runtime_error("title ID already exists");
+      auto value = command;
+      value["id"] = id;
+      timeline_.titles.push_back(value.get<TitleOverlay>());
+    } else {
+      if (it == timeline_.titles.end()) throw std::runtime_error("title not found");
+      if (type == "delete_title") timeline_.titles.erase(it);
+      else {
+        nlohmann::json value = *it;
+        value.update(command);
+        *it = value.get<TitleOverlay>();
+      }
+    }
+    std::stable_sort(timeline_.titles.begin(), timeline_.titles.end(), [](const auto& a, const auto& b) { return a.startUs < b.startUs; });
   }
 
   void saveProposals() {
@@ -831,11 +1224,13 @@ class EditorSession {
 
   void addTrack(const nlohmann::json& command) {
     const auto kind = command.value("kind", std::string{"video"});
+    if (kind != "video" && kind != "audio") throw std::runtime_error("track kind must be video or audio");
     Track track;
     track.kind = kind == "audio" ? TrackKind::Audio : TrackKind::Video;
     const auto requestedIndex = command.value("index", static_cast<int>(timeline_.tracks.size()));
     track.index = std::clamp(requestedIndex, 0, static_cast<int>(timeline_.tracks.size()));
-    track.id = command.value("trackId", std::string{kind.substr(0, 1) + std::to_string(track.index + 1)});
+    track.id = command.value("trackId", "track_" + stableHash(idSeed() + kind));
+    if (track.id.empty() || findTrack(track.id)) throw std::runtime_error("track ID must be unique and nonempty");
     track.name = command.value("name", std::string{kind == "audio" ? "Audio " : "Video "} + std::to_string(track.index + 1));
     timeline_.tracks.insert(timeline_.tracks.begin() + track.index, track);
     reindexTracks();
@@ -859,6 +1254,9 @@ class EditorSession {
 
   void deleteTrack(const nlohmann::json& command) {
     const auto trackId = command.value("trackId", std::string{});
+    const auto* target = findTrack(trackId);
+    if (!target) throw std::runtime_error("track not found");
+    if (target->locked) throw std::runtime_error("cannot delete a locked track");
     timeline_.tracks.erase(std::remove_if(timeline_.tracks.begin(), timeline_.tracks.end(), [&](const Track& track) {
                              return track.id == trackId;
                            }),
@@ -890,8 +1288,29 @@ class EditorSession {
     clip.trackId = track->id;
     clip.startUs = command.value("startUs", 0LL);
     clip.inUs = command.value("inUs", 0LL);
-    clip.outUs = command.value("outUs", std::max(clip.inUs + 1'000'000, media->metadata.value("durationUs", 8'000'000LL)));
+    const auto sourceDurationUs = media->metadata.value("durationUs", 0LL);
+    clip.outUs = command.value("outUs", sourceDurationUs > 0 ? sourceDurationUs : clip.inUs + 8'000'000LL);
     clip.speedPercent = normalizeSpeedPercent(command.value("speedPercent", 100.0));
+    const auto durationUs = media->metadata.value("isStillImage", false) ? 0LL : media->metadata.value("durationUs", 0LL);
+    if (clip.startUs < 0 || clip.inUs < 0 || clip.outUs <= clip.inUs || (durationUs > 0 && clip.outUs > durationUs)) {
+      throw std::runtime_error("clip timing must be nonnegative and within the source duration");
+    }
+    if (auto* existing = findClip(clip.id); existing && existing->trackId != track->id) {
+      throw std::runtime_error("clip ID already exists on another track");
+    }
+    auto properties = clipFromJson(command, track->id);
+    clip.color = properties.color;
+    clip.transform = properties.transform;
+    clip.effects = properties.effects;
+    clip.audioGainDb = properties.audioGainDb;
+    clip.audioMuted = properties.audioMuted;
+    clip.audioFadeInUs = properties.audioFadeInUs;
+    clip.audioFadeOutUs = properties.audioFadeOutUs;
+    clip.audioFadeOffsetUs = properties.audioFadeOffsetUs;
+    clip.audioFadeDurationUs = properties.audioFadeDurationUs;
+    clip.audioNormalize = properties.audioNormalize;
+    clip.audioCleanup = properties.audioCleanup;
+    clip.audioStreamIndex = properties.audioStreamIndex;
     track->clips.erase(std::remove_if(track->clips.begin(), track->clips.end(), [&](const Clip& existing) {
                          return existing.id == clip.id;
                        }),
@@ -923,6 +1342,7 @@ class EditorSession {
     }
 
     const auto nextStartUs = command.value("startUs", existingClip->startUs);
+    if (nextStartUs < 0) throw std::runtime_error("clip start cannot be negative");
     if (targetTrackId == existingClip->trackId && nextStartUs == existingClip->startUs) {
       return;
     }
@@ -934,6 +1354,16 @@ class EditorSession {
     sortTrack(*track);
   }
 
+  static void validateFadeRange(std::int64_t fadeIn, std::int64_t fadeOut, std::int64_t offset, std::int64_t duration) {
+    constexpr auto maxTime = 9'007'199'254'740'991LL;
+    if (fadeIn < 0 || fadeOut < 0 || fadeIn > maxTime || fadeOut > maxTime || offset < 0 || duration < 0 || offset > duration || duration > maxTime) throw std::runtime_error("invalid fade duration or range");
+  }
+
+  static void resetFadeRanges(Clip& clip) {
+    clip.transform.fadeOffsetUs = clip.transform.fadeDurationUs = 0;
+    clip.audioFadeOffsetUs = clip.audioFadeDurationUs = 0;
+  }
+
   void trimClip(const nlohmann::json& command) {
     auto* clip = findClip(command.value("clipId", std::string{}));
     if (!clip) {
@@ -942,12 +1372,23 @@ class EditorSession {
     ensureClipTrackEditable(clip->id, "trim_clip");
     const auto edge = command.value("edge", std::string{"end"});
     const auto timeUs = command.value("timeUs", edge == "start" ? clip->startUs : clip->outUs);
+    if (edge != "start" && edge != "end") throw std::runtime_error("trim edge must be start or end");
+    if (timeUs < 0) throw std::runtime_error("trim time cannot be negative");
     if (edge == "start") {
-      const auto deltaUs = std::max<std::int64_t>(0, timeUs) - clip->startUs;
-      clip->startUs = std::max<std::int64_t>(0, timeUs);
-      clip->inUs = std::max<std::int64_t>(0, clip->inUs + deltaUs);
+      const auto timelineDeltaUs = std::max<std::int64_t>(0, timeUs) - clip->startUs;
+      const auto sourceDeltaUs = static_cast<std::int64_t>(std::llround(
+          static_cast<double>(timelineDeltaUs) * normalizeSpeedPercent(clip->speedPercent) / 100.0));
+      const auto nextInUs = clip->inUs + sourceDeltaUs;
+      if (nextInUs < 0 || nextInUs >= clip->outUs) throw std::runtime_error("trim start is outside the source range");
+      if (clip->inUs != nextInUs) resetFadeRanges(*clip);
+      clip->startUs = timeUs;
+      clip->inUs = nextInUs;
     } else {
-      clip->outUs = std::max<std::int64_t>(clip->inUs + 250'000, timeUs);
+      const auto* media = findMedia(clip->mediaId);
+      const auto durationUs = media && !media->metadata.value("isStillImage", false) ? media->metadata.value("durationUs", 0LL) : 0LL;
+      if (timeUs <= clip->inUs || (durationUs > 0 && timeUs > durationUs)) throw std::runtime_error("trim end is outside the source range");
+      if (clip->outUs != timeUs) resetFadeRanges(*clip);
+      clip->outUs = timeUs;
     }
   }
 
@@ -962,12 +1403,25 @@ class EditorSession {
     if (!clip) {
       return;
     }
-    if (playheadUs <= clip->startUs || playheadUs >= clip->startUs + (clip->outUs - clip->inUs)) {
+    if (playheadUs <= clip->startUs || playheadUs >= clip->startUs + displayedClipDurationUs(*clip)) {
       return;
     }
 
-    const auto firstOutUs = clip->inUs + (playheadUs - clip->startUs);
+    const auto firstOutUs = clip->inUs + static_cast<std::int64_t>(std::llround(
+                                                 static_cast<double>(playheadUs - clip->startUs) *
+                                                 normalizeSpeedPercent(clip->speedPercent) / 100.0));
+    ensureClipTrackEditable(clip->id, "split_clip");
+    if (firstOutUs <= clip->inUs || firstOutUs >= clip->outUs) return;
+    const auto originalDuration = displayedClipDurationUs(*clip);
+    if (clip->transform.fadeInUs > 0 || clip->transform.fadeOutUs > 0) {
+      if (clip->transform.fadeDurationUs <= 0) clip->transform.fadeDurationUs = originalDuration;
+    }
+    if (clip->audioFadeInUs > 0 || clip->audioFadeOutUs > 0) {
+      if (clip->audioFadeDurationUs <= 0) clip->audioFadeDurationUs = originalDuration;
+    }
     Clip second = *clip;
+    if (second.transform.fadeDurationUs > 0) second.transform.fadeOffsetUs += playheadUs - clip->startUs;
+    if (second.audioFadeDurationUs > 0) second.audioFadeOffsetUs += playheadUs - clip->startUs;
     second.id = "clip_" + stableHash(idSeed() + clip->id + "split");
     second.startUs = playheadUs;
     second.inUs = firstOutUs;
@@ -985,6 +1439,7 @@ class EditorSession {
   }
 
   void applyClipLook(const nlohmann::json& command) {
+    ensureClipTrackEditable(command.value("clipId", std::string{}), "apply_clip_look");
     auto* clip = findClip(command.value("clipId", std::string{}));
     if (!clip) {
       throw std::runtime_error("clip not found");
@@ -1008,6 +1463,7 @@ class EditorSession {
   }
 
   void applyClipAudio(const nlohmann::json& command) {
+    ensureClipTrackEditable(command.value("clipId", std::string{}), "apply_audio_adjustment");
     auto* clip = findClip(command.value("clipId", std::string{}));
     if (!clip) {
       throw std::runtime_error("clip not found");
@@ -1016,8 +1472,12 @@ class EditorSession {
       const auto adjustment = command.at("adjustment");
       clip->audioGainDb = adjustment.value("gainDb", clip->audioGainDb);
       clip->audioMuted = adjustment.value("muted", clip->audioMuted);
+      const bool fadesChanged = adjustment.value("fadeInUs", clip->audioFadeInUs) != clip->audioFadeInUs || adjustment.value("fadeOutUs", clip->audioFadeOutUs) != clip->audioFadeOutUs;
+      clip->audioFadeOffsetUs = fadesChanged ? 0LL : adjustment.value("fadeOffsetUs", clip->audioFadeOffsetUs);
+      clip->audioFadeDurationUs = fadesChanged ? 0LL : adjustment.value("fadeDurationUs", clip->audioFadeDurationUs);
       clip->audioFadeInUs = adjustment.value("fadeInUs", clip->audioFadeInUs);
       clip->audioFadeOutUs = adjustment.value("fadeOutUs", clip->audioFadeOutUs);
+      validateFadeRange(clip->audioFadeInUs, clip->audioFadeOutUs, clip->audioFadeOffsetUs, clip->audioFadeDurationUs);
       clip->audioNormalize = adjustment.value("normalize", clip->audioNormalize);
       clip->audioCleanup = adjustment.value("cleanup", clip->audioCleanup);
       clip->audioStreamIndex = adjustment.value("streamIndex", clip->audioStreamIndex);
@@ -1029,10 +1489,14 @@ class EditorSession {
     if (!clip) {
       throw std::runtime_error("clip not found");
     }
-    clip->speedPercent = normalizeSpeedPercent(command.value("speedPercent", clip->speedPercent));
+    ensureClipTrackEditable(clip->id, "apply_clip_speed");
+    const auto speed = normalizeSpeedPercent(command.value("speedPercent", clip->speedPercent));
+    if (speed != clip->speedPercent) resetFadeRanges(*clip);
+    clip->speedPercent = speed;
   }
 
   void applyClipTransform(const nlohmann::json& command) {
+    ensureClipTrackEditable(command.value("clipId", std::string{}), "apply_transform");
     auto* clip = findClip(command.value("clipId", std::string{}));
     if (!clip) {
       throw std::runtime_error("clip not found");
@@ -1045,10 +1509,17 @@ class EditorSession {
       clip->transform.positionY = transform.value("positionY", clip->transform.positionY);
       clip->transform.rotation = transform.value("rotation", clip->transform.rotation);
       clip->transform.opacity = transform.value("opacity", clip->transform.opacity);
+      const bool fadesChanged = transform.value("fadeInUs", clip->transform.fadeInUs) != clip->transform.fadeInUs || transform.value("fadeOutUs", clip->transform.fadeOutUs) != clip->transform.fadeOutUs;
+      clip->transform.fadeOffsetUs = fadesChanged ? 0LL : transform.value("fadeOffsetUs", clip->transform.fadeOffsetUs);
+      clip->transform.fadeDurationUs = fadesChanged ? 0LL : transform.value("fadeDurationUs", clip->transform.fadeDurationUs);
+      clip->transform.fadeInUs = transform.value("fadeInUs", clip->transform.fadeInUs);
+      clip->transform.fadeOutUs = transform.value("fadeOutUs", clip->transform.fadeOutUs);
+      validateFadeRange(clip->transform.fadeInUs, clip->transform.fadeOutUs, clip->transform.fadeOffsetUs, clip->transform.fadeDurationUs);
     }
   }
 
   void applyClipEffects(const nlohmann::json& command) {
+    ensureClipTrackEditable(command.value("clipId", std::string{}), "apply_effect_stack");
     auto* clip = findClip(command.value("clipId", std::string{}));
     if (!clip) {
       throw std::runtime_error("clip not found");
@@ -1176,6 +1647,8 @@ class EditorSession {
     constexpr std::int64_t minTimelineDurationUs = 10'000'000;
     constexpr std::int64_t timelineTailRoomUs = 10'000'000;
     std::int64_t duration = 0;
+    for (const auto& marker : timeline_.markers) duration = std::max(duration, marker.timeUs);
+    for (const auto& title : timeline_.titles) duration = std::max(duration, title.startUs + title.durationUs);
     for (const auto& track : timeline_.tracks) {
       for (const auto& clip : track.clips) {
         duration = std::max(duration, clip.startUs + displayedClipDurationUs(clip));
@@ -1229,7 +1702,7 @@ class EditorSession {
   [[nodiscard]] Clip* findClipAt(std::int64_t playheadUs) {
     for (auto& track : timeline_.tracks) {
       for (auto& clip : track.clips) {
-        if (playheadUs > clip.startUs && playheadUs < clip.startUs + (clip.outUs - clip.inUs)) {
+        if (playheadUs > clip.startUs && playheadUs < clip.startUs + displayedClipDurationUs(clip)) {
           return &clip;
         }
       }
@@ -1327,6 +1800,8 @@ class EditorSession {
         {"muted", clip.audioMuted},
         {"fadeInUs", clip.audioFadeInUs},
         {"fadeOutUs", clip.audioFadeOutUs},
+        {"fadeOffsetUs", clip.audioFadeOffsetUs},
+        {"fadeDurationUs", clip.audioFadeDurationUs},
         {"normalize", clip.audioNormalize},
         {"cleanup", clip.audioCleanup},
         {"streamIndex", clip.audioStreamIndex},
@@ -1341,6 +1816,10 @@ class EditorSession {
         {"positionY", transform.positionY},
         {"rotation", transform.rotation},
         {"opacity", transform.opacity},
+        {"fadeInUs", transform.fadeInUs},
+        {"fadeOutUs", transform.fadeOutUs},
+        {"fadeOffsetUs", transform.fadeOffsetUs},
+        {"fadeDurationUs", transform.fadeDurationUs},
     };
   }
 
@@ -1352,6 +1831,11 @@ class EditorSession {
     transform.positionY = value.value("positionY", 0.0);
     transform.rotation = value.value("rotation", 0.0);
     transform.opacity = value.value("opacity", 1.0);
+    transform.fadeInUs = value.value("fadeInUs", 0LL);
+    transform.fadeOutUs = value.value("fadeOutUs", 0LL);
+    transform.fadeOffsetUs = value.value("fadeOffsetUs", 0LL);
+    transform.fadeDurationUs = value.value("fadeDurationUs", 0LL);
+    validateFadeRange(transform.fadeInUs, transform.fadeOutUs, transform.fadeOffsetUs, transform.fadeDurationUs);
     return transform;
   }
 
@@ -1421,27 +1905,6 @@ class EditorSession {
     };
   }
 
-  static nlohmann::json probeOrFallback(const std::string& path, const std::string& kind, const FfprobeService& ffprobeService) {
-    try {
-      return ffprobeService.probe(path).toJson();
-    } catch (...) {
-      return {
-          {"path", path},
-          {"width", 0},
-          {"height", 0},
-          {"fps", 0.0},
-          {"durationUs", kind == "audio" ? 12'000'000 : 8'000'000},
-          {"codec", "unknown"},
-          {"pixelFormat", "unknown"},
-          {"colorTransfer", "unknown"},
-          {"hdr", false},
-          {"hasAudio", kind == "audio"},
-          {"audioStreamCount", kind == "audio" ? 1 : 0},
-          {"audioStreams", kind == "audio" ? nlohmann::json::array({{{"index", 0}, {"codec", "unknown"}, {"channels", 0}, {"title", "Audio 1"}}}) : nlohmann::json::array()},
-      };
-    }
-  }
-
   static nlohmann::json intelligenceFor(const IndexedMedia& media) {
     const auto durationUs = media.metadata.value("durationUs", 0LL);
     return {
@@ -1492,7 +1955,11 @@ class EditorSession {
 
   static bool isSupportedMediaPath(const std::string& path) {
     const auto extension = extensionForPath(path);
-    return extension == "mp4" || extension == "mov" || extension == "mkv" || extension == "mp3";
+    return extension == "mp4" || extension == "mov" || extension == "mkv" || extension == "webm" || extension == "avi" || extension == "m4v" || extension == "mts" || extension == "m2ts" || extension == "png" || extension == "jpg" || extension == "jpeg" || extension == "bmp" || extension == "webp" || isAudioExtension(extension);
+  }
+
+  static bool isAudioExtension(const std::string& extension) {
+    return extension == "mp3" || extension == "wav" || extension == "flac" || extension == "m4a" || extension == "aac" || extension == "ogg" || extension == "opus" || extension == "aiff" || extension == "aif";
   }
 
   static std::string extensionForPath(const std::string& path) {
@@ -1507,7 +1974,7 @@ class EditorSession {
   }
 
   static std::string fileName(const std::string& path) {
-    const auto name = std::filesystem::path(path).filename().string();
+    const auto name = pathUtf8(std::filesystem::u8path(path).filename());
     return name.empty() ? path : name;
   }
 
@@ -1550,10 +2017,11 @@ class EditorSession {
   }
 
   static nlohmann::json parseJson(const std::string& value, const nlohmann::json& fallback) {
+    if (value.empty()) return fallback;
     try {
       return nlohmann::json::parse(value);
     } catch (...) {
-      return fallback;
+      throw std::runtime_error("project database contains invalid JSON; restore a backup before opening it");
     }
   }
 

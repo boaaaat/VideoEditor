@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <regex>
 #include <stdexcept>
@@ -19,6 +20,21 @@
   } while (false)
 
 int runTests() {
+  const auto mediaFixtures = std::filesystem::absolute("engine-core-media-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::create_directory(mediaFixtures);
+  const auto writeBmp = [](const std::filesystem::path& path, unsigned char red) {
+    constexpr int width = 64, height = 36, dataSize = width * height * 3;
+    std::vector<unsigned char> bytes(54 + dataSize, 0);
+    const auto number = [&](int offset, unsigned int value, int count = 4) { for (int i = 0; i < count; ++i) bytes[offset+i] = static_cast<unsigned char>(value >> (i*8)); };
+    bytes[0] = 'B'; bytes[1] = 'M'; number(2, bytes.size()); number(10, 54); number(14, 40);
+    number(18, width); number(22, height); number(26, 1, 2); number(28, 24, 2); number(34, dataSize);
+    for (int pixel = 54; pixel < static_cast<int>(bytes.size()); pixel += 3) bytes[pixel+2] = red;
+    std::ofstream file(path, std::ios::binary); file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+  };
+  const auto sampleA = (mediaFixtures / "sample-a.bmp").string();
+  const auto sampleB = (mediaFixtures / "sample-b.bmp").string();
+  const auto lockedSource = (mediaFixtures / "locked-media.bmp").string();
+  writeBmp(sampleA, 255); writeBmp(sampleB, 100); writeBmp(lockedSource, 50);
   const auto testDb = std::filesystem::absolute("engine-session-test.db");
   std::filesystem::remove(testDb);
 #ifdef _WIN32
@@ -122,7 +138,8 @@ int runTests() {
   request.colorMode = "HDR";
   request.audioEnabled = false;
   request.bitrateMbps = ai_editor::ExportEngine::calculateBitrateMbps(request);
-  assert(request.bitrateMbps > 100);
+  // 4K60 HDR high-quality HEVC: 16 * 4 * 2 * 1.25 * .85 * .72 = 98 Mbps.
+  assert(request.bitrateMbps == 98);
 
   ai_editor::ExportJob exportJob;
   exportJob.outputPath = request.outputPath;
@@ -166,14 +183,18 @@ int runTests() {
   const auto timelineCommand = ai_editor::ExportEngine::buildFfmpegCommand(timelineExportJob);
   assert(timelineCommand.find("C:\\media\\clip-a.mp4") != std::string::npos);
   assert(timelineCommand.find("filter_complex") != std::string::npos);
-  assert(timelineCommand.find("concat=n=3") != std::string::npos);
-  assert(timelineCommand.find("atrim=start=0.500") != std::string::npos);
+  assert(timelineCommand.find("eof_action=pass:repeatlast=0") != std::string::npos);
+  assert(timelineCommand.find("lookahead_level") == std::string::npos);
+  assert(timelineCommand.find("extra_hw_frames") == std::string::npos);
+  // Input seeking already removes the source in-point before the audio filter.
+  assert(timelineCommand.find("-ss 0.500") != std::string::npos);
+  assert(timelineCommand.find("atrim=start=0:duration=3.000") != std::string::npos);
   assert(timelineCommand.find("volume=4.00dB") != std::string::npos);
   assert(timelineCommand.find("volume=-3.00dB") != std::string::npos);
   assert(timelineCommand.find("afade=t=in") != std::string::npos);
   assert(timelineCommand.find("loudnorm") != std::string::npos);
   assert(timelineCommand.find("eq=brightness=0.1200") != std::string::npos);
-  assert(timelineCommand.find("curves=preset=medium_contrast") != std::string::npos);
+  assert(timelineCommand.find("curves=all='0/0 0.25/0.2125 0.75/0.7875 1/1'") != std::string::npos);
   assert(timelineCommand.find("overlay=x=(W-w)/2+24.0000") != std::string::npos);
   assert(timelineCommand.find("gblur=sigma=1.0000") != std::string::npos);
 
@@ -257,15 +278,15 @@ int runTests() {
       {"params",
        {
            {"type", "import_media"},
-           {"paths", {"sample-a.mp4", "sample-b.mp4"}},
+           {"paths", {sampleA, sampleB}},
        }},
   });
   assert(importResult.at("ok") == true);
   assert(importResult.at("data").at("media").size() == 2);
   const auto mediaId = importResult.at("data").at("media").at(0).at("id").get<std::string>();
-  assert(importResult.at("data").at("media").at(0).at("metadata").at("width") == 0);
-  assert(importResult.at("data").at("media").at(0).at("metadata").at("height") == 0);
-  assert(importResult.at("data").at("media").at(0).at("metadata").at("fps") == 0.0);
+  assert(importResult.at("data").at("media").at(0).at("metadata").at("width") == 64);
+  assert(importResult.at("data").at("media").at(0).at("metadata").at("height") == 36);
+  assert(importResult.at("data").at("media").at(0).at("metadata").at("isStillImage") == true);
   assert(importResult.at("data").at("media").at(0).at("intelligence").at("transcript").at("status") == "placeholder");
   assert(importResult.at("data").at("media").at(0).at("intelligence").at("sceneCuts").at("status") == "placeholder");
 
@@ -308,7 +329,7 @@ int runTests() {
       {"params",
        {
            {"type", "import_media"},
-           {"paths", {"sample-a.mp4"}},
+           {"paths", {sampleA}},
        }},
   });
   assert(reimportResult.at("ok") == true);
@@ -496,7 +517,7 @@ int runTests() {
       {"jsonrpc", "2.0"},
       {"id", 157},
       {"method", "command.execute"},
-      {"params", {{"type", "import_media"}, {"paths", {"locked-media.mp4"}}}},
+      {"params", {{"type", "import_media"}, {"paths", {lockedSource}}}},
   });
   const auto lockedMediaId = lockedMediaResult.at("data").at("media").at(0).at("id").get<std::string>();
   bool lockedAddRejected = false;
@@ -574,8 +595,288 @@ int runTests() {
     assert(reopenedProject.at("projectSettings").at("width") == 1280);
     assert(reopenedProject.at("projectSettings").at("height") == 720);
     assert(reopenedProject.at("timeline").at("tracks").size() == createdProjectTrackCount);
+    const auto stableProject = reopenedProject;
+    auto run = [&](const std::string& method, const nlohmann::json& params) {
+      return projectReloadedApp.handleRequest({{"jsonrpc", "2.0"}, {"id", 19}, {"method", method}, {"params", params}});
+    };
+    run("command.execute", {{"type", "add_marker"}, {"markerId", "switch_safety"}, {"timeUs", 1000}, {"name", "Keep me"}});
+    const auto stableState = run("project.state", {});
+    const auto stableHistory = run("command.history", {});
+    const auto brokenRoot = projectRoot / "broken";
+    std::filesystem::create_directories(brokenRoot);
+    ai_editor::ProjectManifest{1, "Broken", "project.db", "test"}.writeTo(brokenRoot / "project.aivproj");
+    // A missing database must not be silently created as an empty project.
+    bool rejected = false;
+    try { run("project.open", {{"path", brokenRoot.string()}}); } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+    assert(!std::filesystem::exists(brokenRoot / "project.db"));
+    {
+      std::ofstream corrupt(brokenRoot / "project.db", std::ios::binary);
+      corrupt << "This is not a SQLite database";
+    }
+    rejected = false;
+    try { run("project.open", {{"path", brokenRoot.string()}}); } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+    assert(run("project.state", {}) == stableState);
+    assert(run("command.history", {}) == stableHistory);
+    // A valid SQLite file can still contain a malformed project row. Loading it
+    // must roll back schema migration and leave the previous connection usable.
+    std::filesystem::remove(brokenRoot / "project.db");
+    sqlite3* malformedDb = nullptr;
+    assert(sqlite3_open((brokenRoot / "project.db").string().c_str(), &malformedDb) == SQLITE_OK);
+    assert(sqlite3_exec(malformedDb, "CREATE TABLE app_state(key TEXT PRIMARY KEY, value_json TEXT NOT NULL, updated_at TEXT NOT NULL); INSERT INTO app_state VALUES('timeline_markers','invalid json','test');", nullptr, nullptr, nullptr) == SQLITE_OK);
+    sqlite3_close(malformedDb);
+    rejected = false;
+    try { run("project.open", {{"path", brokenRoot.string()}}); } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+    assert(run("project.state", {}) == stableState);
+    assert(run("command.history", {}) == stableHistory);
+    assert(sqlite3_open((brokenRoot / "project.db").string().c_str(), &malformedDb) == SQLITE_OK);
+    sqlite3_stmt* schemaCount = nullptr;
+    assert(sqlite3_prepare_v2(malformedDb, "SELECT COUNT(*) FROM sqlite_master WHERE type='table';", -1, &schemaCount, nullptr) == SQLITE_OK);
+    assert(sqlite3_step(schemaCount) == SQLITE_ROW);
+    assert(sqlite3_column_int(schemaCount, 0) == 1);
+    sqlite3_finalize(schemaCount);
+    sqlite3_close(malformedDb);
+    auto wrongProjectSnapshot = stableState;
+    wrongProjectSnapshot["project"]["path"] = brokenRoot.string();
+    rejected = false;
+    try { run("project.save_state", wrongProjectSnapshot); } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+    assert(run("project.state", {}) == stableState);
+    run("command.undo", {});
+    assert(run("project.state", {}).at("timeline") == stableProject.at("timeline"));
   }
   std::filesystem::remove_all(projectRoot);
+
+  // Splits inside a fade retain the original timeline envelope, even at 200% speed.
+  {
+    ai_editor::EditorSession session;
+    session.replaceState({{"mediaAssets", {{{"id", "fade_media"}, {"path", "fixture.mp4"}, {"kind", "video"}, {"metadata", {{"durationUs", 12'000'000}, {"hasAudio", true}}}}}},
+      {"timeline", {{"tracks", {{{"id", "v1"}, {"kind", "video"}, {"clips", nlohmann::json::array()}}}}}}});
+    auto run = [&](nlohmann::json command) { return session.executeCommand(command); };
+    auto clips = [&]() { return session.timelineJson().at("tracks").at(0).at("clips"); };
+    run({{"type", "add_clip"}, {"clipId", "original"}, {"mediaId", "fade_media"}, {"trackId", "v1"}, {"startUs", 1'000'000}, {"outUs", 8'000'000}, {"speedPercent", 200},
+      {"transform", {{"fadeInUs", 2'000'000}, {"fadeOutUs", 2'000'000}}}, {"audio", {{"fadeInUs", 2'000'000}, {"fadeOutUs", 2'000'000}}}});
+    const auto original = session.projectStateJson();
+    run({{"type", "split_clip"}, {"clipId", "original"}, {"playheadUs", 2'000'000}});
+    const auto rightId = clips().at(1).at("id").get<std::string>();
+    assert(clips().at(0).at("audio").at("fadeDurationUs") == 4'000'000);
+    assert(clips().at(1).at("transform").at("fadeOffsetUs") == 1'000'000);
+    assert(clips().at(1).at("audio").at("fadeOffsetUs") == 1'000'000);
+    session.undoCommand(); assert(session.projectStateJson() == original); session.redoCommand();
+    run({{"type", "split_clip"}, {"clipId", rightId}, {"playheadUs", 4'000'000}});
+    assert(clips().at(2).at("audio").at("fadeOffsetUs") == 3'000'000);
+    assert(clips().at(2).at("transform").at("fadeDurationUs") == 4'000'000);
+    const auto splitState = session.projectStateJson();
+    ai_editor::EditorSession restored; restored.replaceState(splitState);
+    assert(restored.timelineJson() == session.timelineJson());
+    run({{"type", "apply_audio_adjustment"}, {"clipId", rightId}, {"adjustment", {{"gainDb", -6}}}});
+    run({{"type", "apply_transform"}, {"clipId", rightId}, {"transform", {{"positionX", 50}}}});
+    assert(clips().at(1).at("audio").at("fadeOffsetUs") == 1'000'000);
+    assert(clips().at(1).at("transform").at("fadeOffsetUs") == 1'000'000);
+    auto adjustment = clips().at(1).at("audio"); adjustment["fadeInUs"] = 500'000;
+    run({{"type", "apply_audio_adjustment"}, {"clipId", rightId}, {"adjustment", adjustment}});
+    assert(clips().at(1).at("audio").at("fadeDurationUs") == 0);
+    assert(clips().at(1).at("transform").at("fadeOffsetUs") == 1'000'000);
+    session.undoCommand();
+    const auto stable = session.projectStateJson(); const auto history = session.commandHistoryJson();
+    bool rejected = false;
+    try { run({{"type", "apply_audio_adjustment"}, {"clipId", rightId}, {"adjustment", {{"fadeOffsetUs", 5'000'000}}}}); } catch (const std::exception&) { rejected = true; }
+    assert(rejected && session.projectStateJson() == stable && session.commandHistoryJson() == history);
+    for (const auto& command : nlohmann::json::array({
+      {{"type", "apply_clip_speed"}, {"clipId", rightId}, {"speedPercent", 100}},
+      {{"type", "trim_clip"}, {"clipId", rightId}, {"edge", "end"}, {"timeUs", 5'000'000}},
+      {{"type", "set_clip_source_range"}, {"clipId", rightId}, {"inUs", 3'000'000}, {"outUs", 7'000'000}}
+    })) {
+      run(command);
+      assert(clips().at(1).at("audio").at("fadeDurationUs") == 0);
+      assert(clips().at(1).at("transform").at("fadeDurationUs") == 0);
+      session.undoCommand(); assert(session.projectStateJson() == stable);
+    }
+  }
+
+  // Compound editing must preserve the full clip look and roll back data AND history.
+  {
+    ai_editor::EditorSession session;
+    session.replaceState({
+      {"mediaAssets", {{{"id", "regression_media"}, {"path", "fixture.mp4"}, {"kind", "video"}, {"metadata", {{"durationUs", 10'000'000}, {"hasAudio", true}}}}}},
+      {"timeline", {{"tracks", {
+        {{"id", "v1"}, {"kind", "video"}, {"clips", nlohmann::json::array()}},
+        {{"id", "a1"}, {"kind", "audio"}, {"clips", nlohmann::json::array()}}
+      }}}}
+    });
+    auto run = [&](nlohmann::json command) { return session.executeCommand(command); };
+    auto state = [&]() { return session.timelineJson(); };
+    run({{"type", "add_clip"}, {"clipId", "original"}, {"mediaId", "regression_media"}, {"trackId", "v1"}, {"startUs", 0}, {"outUs", 8'000'000}, {"speedPercent", 200},
+         {"color", {{"brightness", 15}}}, {"transform", {{"opacity", 0.6}}}, {"audio", {{"gainDb", -4}}}});
+    auto original = state().at("tracks").at(0).at("clips").at(0);
+    assert(original.at("color").at("brightness") == 15);
+    assert(original.at("transform").at("opacity") == 0.6);
+    assert(original.at("audio").at("gainDb") == -4);
+    const auto beforeBatch = state();
+    const auto beforeHistory = session.commandHistoryJson();
+    bool rejected = false;
+    try {
+      run({{"type", "execute_batch"}, {"commands", {
+        {{"type", "move_clip"}, {"clipId", "original"}, {"trackId", "v1"}, {"startUs", 1'000'000}},
+        {{"type", "move_clip"}, {"clipId", "missing"}, {"trackId", "v1"}, {"startUs", 0}}
+      }}});
+    } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+    assert(state() == beforeBatch);
+    assert(session.commandHistoryJson() == beforeHistory);
+    run({{"type", "execute_batch"}, {"commands", {
+      {{"type", "split_clip"}, {"clipId", "original"}, {"playheadUs", 1'000'000}},
+      {{"type", "apply_audio_adjustment"}, {"clipId", "original"}, {"adjustment", {{"gainDb", -12}}}}
+    }}});
+    assert(session.commandHistoryJson().at("undoCount").get<int>() == beforeHistory.at("undoCount").get<int>() + 1);
+    assert(state().at("tracks").at(0).at("clips").size() == 2);
+    assert(state().at("tracks").at(0).at("clips").at(0).at("outUs") == 2'000'000);
+    session.undoCommand();
+    assert(state() == beforeBatch);
+    session.redoCommand();
+    assert(state().at("tracks").at(0).at("clips").size() == 2);
+    run({{"type", "update_track"}, {"trackId", "v1"}, {"locked", true}});
+    const auto lockedState = state();
+    const auto beforeRemove = session.projectStateJson();
+    rejected = false;
+    try { session.removeMedia({{"type", "remove_media"}, {"mediaId", "regression_media"}}); } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+    assert(session.projectStateJson() == beforeRemove);
+    for (auto command : nlohmann::json::array({
+      {{"type", "split_clip"}, {"clipId", "original"}, {"playheadUs", 500'000}},
+      {{"type", "apply_transform"}, {"clipId", "original"}, {"transform", {{"scale", 2}}}},
+      {{"type", "apply_color_adjustment"}, {"clipId", "original"}, {"adjustment", {{"brightness", 10}}}},
+      {{"type", "delete_track"}, {"trackId", "v1"}}
+    })) {
+      rejected = false;
+      try { run(command); } catch (const std::exception&) { rejected = true; }
+      assert(rejected);
+      assert(state() == lockedState);
+    }
+    run({{"type", "update_track"}, {"trackId", "v1"}, {"locked", false}});
+    const auto beforeTrim = state();
+    rejected = false;
+    try { run({{"type", "trim_clip"}, {"clipId", "original"}, {"edge", "end"}, {"timeUs", 12'000'000}}); }
+    catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+    assert(state() == beforeTrim);
+    const auto beforeSettings = session.projectStateJson();
+    run({{"type", "update_project_settings"}, {"settings", {{"width", 640}, {"height", 360}, {"fps", 24}, {"masterGainDb", -8}}}});
+    assert(session.projectStateJson().at("projectSettings").at("fps") == 24);
+    assert(state().at("fps") == 24);
+    session.undoCommand();
+    assert(session.projectStateJson() == beforeSettings);
+    session.redoCommand();
+    const auto stableState = session.projectStateJson();
+    const auto stableHistory = session.commandHistoryJson();
+    auto invalidState = stableState;
+    invalidState["timeline"]["tracks"][0]["clips"].push_back(invalidState["timeline"]["tracks"][0]["clips"][0]);
+    rejected = false;
+    try { session.replaceState(invalidState, false); } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+    assert(session.projectStateJson() == stableState);
+    assert(session.commandHistoryJson() == stableHistory);
+    ai_editor::EditorSession reopened;
+    reopened.openDatabase(session.sessionInfo().at("databasePath").get<std::string>());
+    assert(reopened.timelineJson() == state());
+    assert(reopened.projectStateJson().at("projectSettings") == stableState.at("projectSettings"));
+    assert(reopened.timelineJson().at("fps") == 24);
+    const auto beforeImport = session.projectStateJson();
+    const auto beforeImportHistory = session.commandHistoryJson();
+    rejected = false;
+    try {
+      const ai_editor::FfmpegLocator locator;
+      session.importMedia({{"type", "import_media"}, {"paths", {sampleB, "unsupported.exe"}}}, ai_editor::FfprobeService{locator});
+    } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+    assert(session.projectStateJson() == beforeImport);
+    assert(session.commandHistoryJson() == beforeImportHistory);
+  }
+
+  {
+    ai_editor::EditorSession session;
+    const auto captionDb = std::filesystem::absolute("captions-command-test.db");
+    std::filesystem::remove(captionDb);
+    session.openDatabase(captionDb.string());
+    session.executeCommand({{"type", "add_title"}, {"titleId", "keep-title"}, {"text", "Opening title"}, {"startUs", 0}});
+    const auto before = session.projectStateJson();
+    const auto historyBefore = session.commandHistoryJson();
+    const auto cues = nlohmann::json::array({{{"text", "First caption"}, {"startUs", 500'000}, {"durationUs", 1'000'000}}, {{"text", "Overlapping caption"}, {"startUs", 1'000'000}, {"durationUs", 2'000'000}}});
+    session.executeCommand({{"type", "import_captions"}, {"captions", cues}});
+    const auto imported = session.projectStateJson();
+    assert(imported.at("timeline").at("titles").size() == 3);
+    assert(imported.at("timeline").at("titles").at(1).at("kind") == "caption");
+    assert(session.commandHistoryJson().at("undoCount").get<int>() == historyBefore.at("undoCount").get<int>() + 1);
+    session.undoCommand(); assert(session.projectStateJson() == before);
+    session.redoCommand(); assert(session.projectStateJson() == imported);
+    auto invalid = cues; invalid[1]["durationUs"] = -1;
+    const auto stableHistory = session.commandHistoryJson();
+    bool rejected = false;
+    try { session.executeCommand({{"type", "import_captions"}, {"mode", "replace"}, {"captions", invalid}}); } catch (const std::exception&) { rejected = true; }
+    assert(rejected); assert(session.projectStateJson() == imported); assert(session.commandHistoryJson() == stableHistory);
+    session.executeCommand({{"type", "import_captions"}, {"mode", "replace"}, {"captions", nlohmann::json::array({cues[0]})}, {"style", {{"fontSize", 28}, {"background", false}}}});
+    const auto replaced = session.timelineJson().at("titles");
+    assert(replaced.size() == 2); assert(replaced.at(0).at("id") == "keep-title"); assert(replaced.at(1).at("fontSize") == 28); assert(replaced.at(1).at("background") == false);
+    session.undoCommand(); assert(session.projectStateJson() == imported);
+    ai_editor::EditorSession reopened;
+    reopened.openDatabase(captionDb.string());
+    assert(reopened.timelineJson() == session.timelineJson());
+  }
+
+  {
+    const ai_editor::FfmpegLocator locator;
+    const ai_editor::FfprobeService probe{locator};
+    ai_editor::EditorSession session;
+    const auto project = mediaFixtures / "project";
+    std::filesystem::create_directory(project);
+    session.openDatabase(project / "project.db", {{"path", project.string()}, {"name", "Media recovery regression"}});
+    const auto imported = session.importMedia({{"paths", {sampleA, sampleA}}, {"type", "import_media"}}, probe);
+    assert(imported.at("data").at("media").size() == 1);
+    const auto id = imported.at("data").at("media").at(0).at("id");
+    session.executeCommand({{"type", "add_clip"}, {"clipId", "relink-clip"}, {"mediaId", id}, {"trackId", "v1"}, {"startUs", 0}, {"outUs", 8'000'000}});
+    const auto before = session.projectStateJson();
+    const auto history = session.commandHistoryJson();
+    const auto corrupt = (mediaFixtures / "corrupt.mp4").string();
+    { std::ofstream file(corrupt); file << "not a video"; }
+    for (const auto& invalid : {corrupt, (mediaFixtures / "absent.mp4").string()}) {
+      bool rejected = false;
+      try { session.importMedia({{"type", "import_media"}, {"paths", {sampleB, invalid}}}, probe); } catch (const std::exception&) { rejected = true; }
+      assert(rejected); assert(session.projectStateJson() == before); assert(session.commandHistoryJson() == history);
+      rejected = false;
+      try { session.relinkMedia({{"type", "relink_media"}, {"mediaId", id}, {"path", invalid}}, probe); } catch (const std::exception&) { rejected = true; }
+      assert(rejected); assert(session.projectStateJson() == before); assert(session.commandHistoryJson() == history);
+    }
+    session.relinkMedia({{"type", "relink_media"}, {"mediaId", id}, {"path", sampleB}}, probe);
+    const auto relinked = session.projectStateJson();
+    assert(relinked.at("timeline") == before.at("timeline"));
+    assert(relinked.at("mediaAssets").at(0).at("path") == sampleB);
+    assert(relinked.at("mediaAssets").at(0).at("name") == "sample-a.bmp");
+    assert(session.commandHistoryJson().at("undoCount").get<int>() == history.at("undoCount").get<int>() + 1);
+    session.undoCommand(); assert(session.projectStateJson() == before);
+    session.redoCommand(); assert(session.projectStateJson() == relinked);
+    session.executeCommand({{"type", "update_track"}, {"trackId", "v1"}, {"locked", true}});
+    bool rejected = false;
+    try { session.relinkMedia({{"type", "relink_media"}, {"mediaId", id}, {"path", sampleA}}, probe); } catch (const std::exception&) { rejected = true; }
+    assert(rejected);
+    session.undoCommand();
+    const auto copyResult = session.importMedia({{"type", "import_media"}, {"paths", {sampleA, sampleA}}, {"copyToProject", true}}, probe).at("data").at("media");
+    assert(copyResult.size() == 1);
+    const auto copied = copyResult.at(0);
+    const auto copiedPath = std::filesystem::path(copied.at("path").get<std::string>());
+    assert(copiedPath.parent_path() == project / "media");
+    assert(std::filesystem::file_size(copiedPath) == std::filesystem::file_size(sampleA));
+    assert(copied.at("name") == "sample-a.bmp");
+    const auto beforeFailedCopy = session.projectStateJson();
+    rejected = false;
+    try { session.importMedia({{"type", "import_media"}, {"paths", {sampleB, corrupt}}, {"copyToProject", true}}, probe); } catch (const std::exception&) { rejected = true; }
+    assert(rejected); assert(session.projectStateJson() == beforeFailedCopy);
+    assert(std::distance(std::filesystem::directory_iterator(project / "media"), std::filesystem::directory_iterator{}) == 1);
+    ai_editor::EditorSession reopened;
+    reopened.openDatabase(project / "project.db");
+    assert(reopened.projectStateJson().at("mediaAssets") == session.projectStateJson().at("mediaAssets"));
+  }
 
   std::cout << "engine core tests passed\n";
   return 0;

@@ -4,6 +4,7 @@ import type { ExportCodec, ExportContainer, ExportEncoderOptions, ExportQuality,
 import { Button } from "../../components/Button";
 import { Panel } from "../../components/Panel";
 import { Toggle } from "../../components/Toggle";
+import { NumberField } from "../../components/NumberField";
 import { engineRpc } from "../../features/commands/commandClient";
 import type { LogStatus } from "../../features/logging/appLog";
 import {
@@ -50,7 +51,7 @@ const defaultEncoderOptions: ExportEncoderOptions = {
   cq: 28,
   maxBitrateMbps: 14,
   lookaheadDepth: 16,
-  lookaheadLevel: 2,
+  lookaheadLevel: 0,
   multipass: "qres",
   spatialAq: true,
   temporalAq: true,
@@ -87,13 +88,21 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
   );
   const [exportStatus, setExportStatus] = useState<ExportStatus>({ jobId: null, state: "idle", progress: 0, logs: [] });
   const loggedExportLinesRef = useRef(0);
+  const loggedJobIdRef = useRef<string | null>(null);
+  const statusMessageRef = useRef(setStatusMessage);
+  statusMessageRef.current = setStatusMessage;
+  const [rangeEnabled, setRangeEnabled] = useState(false);
+  const [rangeStartUs, setRangeStartUs] = useState(0);
+  const [rangeEndUs, setRangeEndUs] = useState<number | null>(null);
 
   const bitrateMbps = useMemo(() => calculateAutoBitrate(projectSettings, quality, codec), [codec, projectSettings, quality]);
   const peakBitrateMbps = preset === "custom"
     ? encoderOptions.maxBitrateMbps
     : Math.ceil(bitrateMbps * peakBitrateMultiplier(quality));
   const hasAudio = mediaAssets.some((asset) => asset.kind === "audio" || asset.metadata?.hasAudio);
-  const exportDurationUs = useMemo(() => getVisibleVideoDurationUs(timeline, mediaAssets), [mediaAssets, timeline]);
+  const fullDurationUs = useMemo(() => getVisibleVideoDurationUs(timeline, mediaAssets), [mediaAssets, timeline]);
+  const effectiveRangeEndUs = rangeEndUs ?? fullDurationUs;
+  const exportDurationUs = rangeEnabled ? effectiveRangeEndUs - rangeStartUs : fullDurationUs;
   const validationErrors = validateExportSettings({
     outputPath,
     codec,
@@ -107,6 +116,8 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
     gpu: gpuStatus
   });
   const av1Supported = Boolean(gpuStatus?.av1NvencAvailable);
+  if (rangeEnabled && (rangeStartUs < 0 || effectiveRangeEndUs > fullDurationUs || effectiveRangeEndUs <= rangeStartUs)) validationErrors.push("Set a range within the sequence, with the end after the start.");
+  if (!("__TAURI_INTERNALS__" in window)) validationErrors.push("Open the desktop app to render an output file.");
   const exportRunning = exportStatus.state === "running";
   const manualLookaheadAvailable = codec === "h264_nvenc" || encoderOptions.tune !== "uhq";
   const manualBFramesAvailable = codec !== "av1_nvenc" || (manualLookaheadAvailable && encoderOptions.lookaheadDepth === 0 && encoderOptions.multipass === "disabled");
@@ -120,27 +131,30 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
   }, [audioEnabled, codec, container, encoderOptions, outputPath, preset, quality]);
 
   useEffect(() => {
-    if (exportStatus.state !== "running") {
-      return;
+    let disposed = false;
+    let reportedFailure = false;
+    let timeout: number;
+    async function poll() {
+      try {
+        const status = await engineRpc<ExportStatus>("export.status");
+        if (!disposed) setExportStatus(status);
+        reportedFailure = false;
+      } catch (error) {
+        if (!disposed && !reportedFailure) statusMessageRef.current(error instanceof Error ? error.message : "Export status unavailable; reconnecting", { level: "warning", source: "export" });
+        reportedFailure = true;
+      } finally {
+        if (!disposed) timeout = window.setTimeout(poll, 500);
+      }
     }
-
-    const interval = window.setInterval(() => {
-      void engineRpc<ExportStatus>("export.status").then(setExportStatus).catch((error) => {
-        setStatusMessage(error instanceof Error ? error.message : "Export status failed", { level: "error" });
-        setExportStatus((current) => ({
-          ...current,
-          state: "error",
-          logs: [...current.logs, error instanceof Error ? error.message : "Export status failed"]
-        }));
-      });
-    }, 250);
-
-    return () => window.clearInterval(interval);
-  }, [exportStatus.state]);
+    // Include renders started by an agent or while this tab was closed.
+    void poll();
+    return () => { disposed = true; window.clearTimeout(timeout); };
+  }, []);
 
   useEffect(() => {
-    if (exportStatus.logs.length < loggedExportLinesRef.current) {
+    if (exportStatus.jobId !== loggedJobIdRef.current || exportStatus.logs.length < loggedExportLinesRef.current) {
       loggedExportLinesRef.current = 0;
+      loggedJobIdRef.current = exportStatus.jobId;
     }
 
     const nextLogs = exportStatus.logs.slice(loggedExportLinesRef.current);
@@ -264,6 +278,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
       height: projectSettings.height,
       fps: projectSettings.fps,
       durationUs: exportDurationUs,
+      ...(rangeEnabled ? { rangeStartUs, rangeEndUs: effectiveRangeEndUs } : {}),
       codec,
       container,
       quality,
@@ -468,8 +483,15 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
           </label>
           <label>
             Export duration
-            <input value={`${formatDuration(exportDurationUs)} of ${formatDuration(timelineDurationUs)} timeline`} readOnly />
+            <input value={`${formatDuration(exportDurationUs)} of ${formatDuration(fullDurationUs)} sequence`} readOnly />
           </label>
+          <div className="form-grid-wide control-stack">
+            <Toggle label="Export a time range" checked={rangeEnabled} onChange={(event) => setRangeEnabled(event.target.checked)} />
+            {rangeEnabled ? <div className="title-field-grid">
+              <NumberField label="Range start · seconds" value={rangeStartUs / 1_000_000} min={0} max={fullDurationUs / 1_000_000} step={1 / projectSettings.fps} onCommit={(value) => setRangeStartUs(Math.round(value * 1_000_000))} />
+              <NumberField label="Range end · seconds" value={effectiveRangeEndUs / 1_000_000} min={0} max={fullDurationUs / 1_000_000} step={1 / projectSettings.fps} onCommit={(value) => setRangeEndUs(Math.round(value * 1_000_000))} />
+            </div> : null}
+          </div>
           <label className="form-grid-wide">
             Output path
             <span className="output-picker-row">
@@ -535,7 +557,7 @@ export function ExportTab({ projectSettings, onProjectSettingsChange, firstMedia
               </label>
               <label>
                 Lookahead level
-                <select title={manualLookaheadAvailable ? undefined : "UHQ manages lookahead level internally."} value={encoderOptions.lookaheadLevel} disabled={!manualLookaheadAvailable} onChange={(event) => updateEncoderOptions({ lookaheadLevel: Number(event.target.value) as ExportEncoderOptions["lookaheadLevel"] })}>
+                <select title={codec === "h264_nvenc" ? "H.264 supports level 0. Lookahead frames remain adjustable." : manualLookaheadAvailable ? "Higher levels require compatible GPU hardware." : "UHQ manages lookahead level internally."} value={codec === "h264_nvenc" ? 0 : encoderOptions.lookaheadLevel} disabled={!manualLookaheadAvailable || codec === "h264_nvenc"} onChange={(event) => updateEncoderOptions({ lookaheadLevel: Number(event.target.value) as ExportEncoderOptions["lookaheadLevel"] })}>
                   {[0, 1, 2, 3].map((value) => <option key={value} value={value}>{value}</option>)}
                 </select>
               </label>
@@ -677,7 +699,7 @@ function encoderOptionsForProfile(codec: ExportCodec, quality: ExportQuality, se
     cq: selected.cq[codec],
     maxBitrateMbps: Math.max(2, Math.ceil(baseBitrateMbps * peakBitrateMultiplier(quality))),
     lookaheadDepth: selected.lookaheadDepth,
-    lookaheadLevel: quality === "pro_max" ? 3 : 2,
+    lookaheadLevel: 0,
     multipass: selected.multipass,
     spatialAq: true,
     temporalAq: selected.temporalAq,
@@ -750,7 +772,7 @@ function saveRenderPagePreferences(preferences: RenderPagePreferences) {
 
 function getVisibleVideoDurationUs(timeline: Timeline, mediaAssets: MediaAsset[]) {
   const mediaById = new Map(mediaAssets.map((asset) => [asset.id, asset]));
-  return timeline.tracks
+  const videoDurationUs = timeline.tracks
     .filter((track) => track.kind === "video" && track.visible)
     .flatMap((track) => track.clips)
     .reduce((durationUs, clip) => {
@@ -761,7 +783,13 @@ function getVisibleVideoDurationUs(timeline: Timeline, mediaAssets: MediaAsset[]
       const speedPercent = Number.isFinite(clip.speedPercent) ? Math.min(400, Math.max(25, clip.speedPercent ?? 100)) : 100;
       const displayDurationUs = Math.max(1, Math.round((clip.outUs - clip.inUs) / (speedPercent / 100)));
       return Math.max(durationUs, clip.startUs + displayDurationUs);
-    }, 0);
+    }, Math.max(0, ...(timeline.titles ?? []).map((title) => title.startUs + title.durationUs)));
+  if (videoDurationUs > 0) return videoDurationUs;
+  return timeline.tracks.filter((track) => !track.muted && (track.kind === "audio" || track.visible)).flatMap((track) => track.clips).reduce((duration, clip) => {
+    const asset = mediaById.get(clip.mediaId);
+    if (clip.audio?.muted || !(asset?.kind === "audio" || asset?.metadata?.hasAudio)) return duration;
+    return Math.max(duration, clip.startUs + Math.round((clip.outUs - clip.inUs) / ((clip.speedPercent || 100) / 100)));
+  }, 0);
 }
 
 function formatDuration(durationUs: number) {

@@ -10,6 +10,22 @@ export type ShortcutMap = Record<string, string>;
 
 export const shortcutDefinitions: ShortcutDefinition[] = [
   { id: "play_pause", group: "Playback", command: "Play / Pause", keys: "Space", editable: true },
+  { id: "step_back", group: "Playback", command: "Previous Frame", keys: "Left", editable: true },
+  { id: "step_forward", group: "Playback", command: "Next Frame", keys: "Right", editable: true },
+  { id: "go_start", group: "Playback", command: "Go to Start", keys: "Home", editable: true },
+  { id: "go_end", group: "Playback", command: "Go to End", keys: "End", editable: true },
+  { id: "previous_edit", group: "Playback", command: "Previous Edit", keys: "Up", editable: true },
+  { id: "next_edit", group: "Playback", command: "Next Edit", keys: "Down", editable: true },
+  { id: "toggle_loop", group: "Playback", command: "Loop Playback", keys: "L", editable: true },
+  { id: "select_all", group: "Timeline", command: "Select All Clips", keys: "Ctrl + A", editable: true },
+  { id: "copy", group: "Timeline", command: "Copy Clips", keys: "Ctrl + C", editable: true },
+  { id: "cut", group: "Timeline", command: "Cut Clips", keys: "Ctrl + X", editable: true },
+  { id: "paste", group: "Timeline", command: "Paste Clips", keys: "Ctrl + V", editable: true },
+  { id: "duplicate", group: "Timeline", command: "Duplicate Clips", keys: "Ctrl + D", editable: true },
+  { id: "fit_timeline", group: "Timeline", command: "Fit Timeline", keys: "F", editable: true },
+  { id: "add_marker", group: "Timeline", command: "Add Marker at Playhead", keys: "M", editable: true },
+  { id: "previous_marker", group: "Playback", command: "Previous Marker", keys: "Shift + Up", editable: true },
+  { id: "next_marker", group: "Playback", command: "Next Marker", keys: "Shift + Down", editable: true },
   { id: "split", group: "Timeline", command: "Split at Playhead", keys: "S", editable: true },
   { id: "delete", group: "Timeline", command: "Delete Selected Clip", keys: "Delete", editable: true },
   { id: "ripple_delete", group: "Timeline", command: "Ripple Delete Selected Clip", keys: "Shift + Delete", editable: true },
@@ -17,6 +33,7 @@ export const shortcutDefinitions: ShortcutDefinition[] = [
   { id: "nudge_right", group: "Timeline", command: "Nudge Clip Right", keys: "Alt + Right", editable: true },
   { id: "toggle_snapping", group: "Timeline", command: "Toggle Snapping", keys: "N", editable: true },
   { id: "zoom_timeline", group: "Timeline", command: "Timeline Zoom", keys: "Shift + Scroll", editable: false },
+  { id: "scroll_tracks", group: "Timeline", command: "Scroll Tracks Vertically", keys: "Alt + Scroll", editable: false },
   { id: "save", group: "Project", command: "Save", keys: "Ctrl + S", editable: true },
   { id: "undo", group: "Project", command: "Undo", keys: "Ctrl + Z", editable: true },
   { id: "redo", group: "Project", command: "Redo", keys: "Ctrl + Shift + Z", editable: true },
@@ -95,6 +112,11 @@ export function isTypingTarget(target: EventTarget | null) {
   }
 
   return Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+}
+
+/** Dialogs and menus own keyboard navigation even when focus is on a button. */
+export function isEditorShortcutBlocked(event: KeyboardEvent) {
+  return event.defaultPrevented || isTypingTarget(event.target) || Boolean(document.querySelector("[aria-modal='true'], [role='menu'], [data-agent-busy='true']"));
 }
 
 function normalizeEventKey(event: KeyboardEvent) {

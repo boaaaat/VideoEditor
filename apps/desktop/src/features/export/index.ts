@@ -72,9 +72,6 @@ export function validateExportSettings({
   if (colorMode === "HDR" && codec === "h264_nvenc") {
     errors.push("HDR export requires H.265 or AV1.");
   }
-  if (audioEnabled && !hasAudio) {
-    errors.push("Audio is enabled, but no imported media reports audio.");
-  }
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
     errors.push("Choose a valid output size.");
   }

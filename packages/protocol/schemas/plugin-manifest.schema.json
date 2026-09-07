@@ -2,14 +2,44 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ai-video-editor.local/schemas/plugin-manifest.schema.json",
   "type": "object",
-  "required": ["id", "name", "version", "type", "permissions"],
+  "required": [
+    "id",
+    "name",
+    "version",
+    "type",
+    "entry",
+    "permissions"
+  ],
   "properties": {
-    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$" },
-    "name": { "type": "string", "minLength": 1 },
-    "version": { "type": "string", "minLength": 1 },
-    "type": { "enum": ["typescript", "cpp"] },
-    "entry": { "type": "string" },
-    "developerModeRequired": { "type": "boolean" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "maxLength": 80
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "type": {
+      "enum": [
+        "typescript",
+        "cpp"
+      ]
+    },
+    "entry": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "developerModeRequired": {
+      "type": "boolean"
+    },
     "permissions": {
       "type": "array",
       "items": {
@@ -17,17 +47,74 @@
           "timeline.read",
           "timeline.write",
           "media.read",
-          "media.import",
           "project.read",
-          "project.write",
-          "export.create",
           "ui.panel",
           "ui.command",
-          "color.write",
-          "filesystem.projectOnly"
+          "color.write"
         ]
       },
       "uniqueItems": true
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "parameters": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "type"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._-]*$",
+            "maxLength": 80
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "type": {
+            "enum": [
+              "string",
+              "number",
+              "boolean"
+            ]
+          },
+          "default": {
+            "anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "min": {
+            "type": "number"
+          },
+          "max": {
+            "type": "number"
+          },
+          "step": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "options": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "string",
+              "maxLength": 200
+            }
+          }
+        },
+        "additionalProperties": false
+      }
     }
   },
   "additionalProperties": false

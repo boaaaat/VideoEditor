@@ -1,0 +1,9 @@
+{
+  "name": "@ai-video-editor/plugin-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "types": "./index.d.ts",
+  "scripts": { "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": { "@ai-video-editor/protocol": "workspace:*" },
+  "devDependencies": { "typescript": "^5.7.2" }
+}

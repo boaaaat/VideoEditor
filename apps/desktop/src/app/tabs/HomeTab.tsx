@@ -18,9 +18,10 @@ import {
 interface HomeTabProps {
   engineStatus: EngineStatus | null;
   recentProjects: ActiveProject[];
-  onProjectOpen: (project: ActiveProject) => void | Promise<void>;
+  onProjectOpen: (project: ActiveProject, createNew?: boolean) => void | Promise<void>;
   onRecentProjectsChange: (projects: ActiveProject[]) => void;
   onProjectDeleted: (project: ActiveProject) => void;
+  onOpenPlugins: () => void;
   setStatusMessage: LogStatus;
 }
 
@@ -30,14 +31,14 @@ interface ProjectContextMenuState {
   project: ActiveProject;
 }
 
-export function HomeTab({ engineStatus, recentProjects, onProjectOpen, onRecentProjectsChange, onProjectDeleted, setStatusMessage }: HomeTabProps) {
+export function HomeTab({ engineStatus, recentProjects, onProjectOpen, onRecentProjectsChange, onProjectDeleted, onOpenPlugins, setStatusMessage }: HomeTabProps) {
   const [projectContextMenu, setProjectContextMenu] = useState<ProjectContextMenuState | null>(null);
 
   async function createProject() {
     try {
       const project = await createProjectFromDialog();
       if (project) {
-        onProjectOpen(project);
+        await onProjectOpen(project, true);
       }
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "New project failed", { level: "error" });
@@ -48,7 +49,7 @@ export function HomeTab({ engineStatus, recentProjects, onProjectOpen, onRecentP
     try {
       const project = await openProjectFromDialog();
       if (project) {
-        onProjectOpen(project);
+        await onProjectOpen(project);
       }
     } catch (error) {
       setStatusMessage(error instanceof Error ? error.message : "Open project failed", { level: "error" });
@@ -204,10 +205,11 @@ export function HomeTab({ engineStatus, recentProjects, onProjectOpen, onRecentP
         </div>
       </Panel>
 
-      <Panel title="Installed Plugins">
+      <Panel title="Extend the editor">
         <div className="empty-state">
           <PlugZap size={24} />
-          <span>No plugins enabled yet.</span>
+          <span>Install workflow helpers, inspect permissions, and review proposed edits.</span>
+          <Button onClick={onOpenPlugins}>Manage plugins</Button>
         </div>
       </Panel>
 

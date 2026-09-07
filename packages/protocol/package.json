@@ -10,7 +10,7 @@
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node ./scripts/validate-schemas.mjs"
+    "test": "node ./scripts/validate-schemas.mjs && node --test test/*.test.mjs"
   },
   "devDependencies": {
     "ajv": "^8.17.1",

@@ -34,6 +34,7 @@ struct MediaMetadata {
   std::string colorTransfer = "unknown";
   bool hdr = false;
   bool hasAudio = false;
+  bool isStillImage = false;
   std::vector<MediaAudioStream> audioStreams;
 
   [[nodiscard]] nlohmann::json toJson() const {
@@ -52,6 +53,7 @@ struct MediaMetadata {
         {"colorTransfer", colorTransfer},
         {"hdr", hdr},
         {"hasAudio", hasAudio},
+        {"isStillImage", isStillImage},
         {"audioStreamCount", audioStreams.size()},
         {"audioStreams", audioRows},
     };

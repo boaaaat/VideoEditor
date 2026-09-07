@@ -30,6 +30,7 @@ export interface ExportEncoderOptions {
 }
 
 export interface MediaMetadata {
+  isStillImage?: boolean;
   path: string;
   width: number;
   height: number;
@@ -119,6 +120,8 @@ export interface PreviewState {
 }
 
 export interface ExportStatus {
+  rangeStartUs?: number;
+  rangeEndUs?: number;
   jobId: string | null;
   outputPath?: string;
   state: "idle" | "running" | "completed" | "cancelled" | "error";

@@ -1,0 +1,19 @@
+{
+  "name": "@ai-video-editor/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP tools for the live AI Video Editor desktop session",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node src/index.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

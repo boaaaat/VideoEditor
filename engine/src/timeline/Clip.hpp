@@ -15,6 +15,10 @@ struct ClipTransform {
   double positionY = 0.0;
   double rotation = 0.0;
   double opacity = 1.0;
+  std::int64_t fadeInUs = 0;
+  std::int64_t fadeOutUs = 0;
+  std::int64_t fadeOffsetUs = 0;
+  std::int64_t fadeDurationUs = 0;
 };
 
 struct ClipEffect {
@@ -43,6 +47,8 @@ struct Clip {
   ClipTransform transform;
   std::vector<ClipEffect> effects;
   double speedPercent = 100.0;
+  std::int64_t audioFadeOffsetUs = 0;
+  std::int64_t audioFadeDurationUs = 0;
 };
 
 }  // namespace ai_editor

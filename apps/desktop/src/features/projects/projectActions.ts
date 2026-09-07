@@ -38,7 +38,6 @@ export async function createProjectFromDialog(): Promise<ActiveProject | null> {
   }
 
   const name = getProjectNameFromPath(folder);
-  await engineRpc("project.create", { name, path: folder });
   return {
     name,
     path: folder,
@@ -65,7 +64,7 @@ export async function openProjectFromDialog(): Promise<ActiveProject | null> {
   return {
     name: getProjectNameFromPath(selection),
     manifestPath: selection,
-    path: selection.replace(/[\\/]project\.aivproj$/i, ""),
+    path: selection.replace(/[\\/][^\\/]+$/, ""),
     lastOpenedAt: new Date().toISOString()
   };
 }
@@ -83,7 +82,7 @@ export async function saveProjectSnapshot(project: ActiveProject, snapshot: Proj
   await engineRpc<ProjectSnapshot>("project.save_state", snapshot);
 }
 
-export async function loadProjectSnapshot(project: ActiveProject): Promise<ProjectSnapshot | null> {
+export async function loadProjectSnapshot(project: ActiveProject, onRecoveryError?: (message: string) => void): Promise<ProjectSnapshot | null> {
   let snapshot: ProjectSnapshot | null;
   if (!project.path) {
     return null;
@@ -93,15 +92,21 @@ export async function loadProjectSnapshot(project: ActiveProject): Promise<Proje
     snapshot = loadBrowserProjectSnapshot(project);
   } else {
     snapshot = await engineRpc<ProjectSnapshot>("project.open", project);
-    const normalizedSnapshot = normalizeSnapshotTimeline(normalizeSnapshotMediaPaths(snapshot, project.path));
-    if (isEmptyProjectSnapshot(normalizedSnapshot)) {
-      const legacySnapshot = await loadLegacyCacheSnapshot(project);
-      if (legacySnapshot && !isEmptyProjectSnapshot(legacySnapshot)) {
-        await saveProjectSnapshot(project, legacySnapshot);
-        return normalizeSnapshotTimeline(normalizeSnapshotMediaPaths(legacySnapshot, project.path));
+    // The engine has already loaded and normalized this project atomically.
+    // Optional migration must not leave the UI attached to the previous database.
+    try {
+      if (isEmptyProjectSnapshot(snapshot)) {
+        const legacySnapshot = await loadLegacyCacheSnapshot(project);
+        if (legacySnapshot && !isEmptyProjectSnapshot(legacySnapshot)) {
+          const recovered = normalizeSnapshotTimeline(normalizeSnapshotMediaPaths({ ...legacySnapshot, project: snapshot.project }, project.path));
+          await saveProjectSnapshot(project, recovered);
+          return recovered;
+        }
       }
+    } catch (error) {
+      onRecoveryError?.(`Project opened, but the legacy cache could not be recovered: ${errorMessage(error, "Invalid saved cache")}`);
     }
-    return normalizedSnapshot;
+    return snapshot;
   }
 
   return snapshot ? normalizeSnapshotTimeline(normalizeSnapshotMediaPaths(snapshot, project.path)) : null;
@@ -277,7 +282,7 @@ function normalizeSnapshotTimeline(snapshot: ProjectSnapshot): ProjectSnapshot {
 
 function isEmptyProjectSnapshot(snapshot: ProjectSnapshot) {
   const clipCount = snapshot.timeline?.tracks?.reduce((count, track) => count + track.clips.length, 0) ?? 0;
-  return (snapshot.mediaAssets?.length ?? 0) === 0 && clipCount === 0 && (snapshot.aiProposals?.length ?? 0) === 0;
+  return (snapshot.mediaAssets?.length ?? 0) === 0 && clipCount === 0 && (snapshot.timeline?.titles?.length ?? 0) === 0 && (snapshot.timeline?.markers?.length ?? 0) === 0 && (snapshot.aiProposals?.length ?? 0) === 0;
 }
 
 function normalizeSpeedPercent(value: unknown) {

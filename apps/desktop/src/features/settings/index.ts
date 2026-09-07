@@ -1,17 +1,30 @@
 import type { ExportFps, MediaMetadata, ProjectSettings } from "@ai-video-editor/protocol";
 import { calculateAutoBitrate } from "../export";
 
-export interface AppSettings {
-  linkMediaByDefault: boolean;
-  developerModePlugins: boolean;
-  futureAiAutoAccept: boolean;
+export interface EditorPreferences {
+  copyMediaToProject: boolean;
+  autosaveDelayMs: number;
 }
 
-export const defaultAppSettings: AppSettings = {
-  linkMediaByDefault: true,
-  developerModePlugins: false,
-  futureAiAutoAccept: false
+export const defaultEditorPreferences: EditorPreferences = {
+  copyMediaToProject: false,
+  autosaveDelayMs: 4500
 };
+
+const preferencesKey = "ai-video-editor.preferences.v1";
+export function loadEditorPreferences(): EditorPreferences {
+  try {
+    const stored = JSON.parse(localStorage.getItem(preferencesKey) ?? "{}");
+    return {
+      copyMediaToProject: stored.copyMediaToProject === true,
+      autosaveDelayMs: [4500, 10000, 30000].includes(stored.autosaveDelayMs) ? stored.autosaveDelayMs : 4500
+    };
+  } catch { return { ...defaultEditorPreferences }; }
+}
+
+export function saveEditorPreferences(preferences: EditorPreferences) {
+  localStorage.setItem(preferencesKey, JSON.stringify(preferences));
+}
 
 export const defaultProjectSettings: ProjectSettings = {
   resolution: "custom",

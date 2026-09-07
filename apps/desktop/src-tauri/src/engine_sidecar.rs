@@ -31,7 +31,13 @@ impl EngineSidecar {
             .filter(|path| path.is_dir())
             .unwrap_or_else(|| engine_dir.join("tools/ffmpeg/bin"));
 
-        let mut child = Command::new(&exe)
+        let mut command = Command::new(&exe);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let mut child = command
             .arg("--stdio")
             .current_dir(working_dir)
             .env("AI_VIDEO_FFMPEG_DIR", &ffmpeg_dir)
@@ -117,7 +123,7 @@ impl EngineSidecar {
     }
 }
 
-fn find_engine_executable() -> Option<PathBuf> {
+pub(crate) fn find_engine_executable() -> Option<PathBuf> {
     if let Ok(path) = env::var("AI_VIDEO_ENGINE_PATH") {
         let candidate = PathBuf::from(path);
         if candidate.is_file() {
@@ -140,6 +146,16 @@ fn engine_executable_candidates(
 ) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
+    // A previous package build can leave an old sidecar beside the dev executable.
+    // Development from this checkout must run the freshly built Debug engine.
+    if cfg!(debug_assertions) {
+        if let (Some(root), Some(executable)) = (&source_root, &desktop_executable) {
+            if executable.starts_with(root.join("apps/desktop/src-tauri/target")) {
+                candidates.push(root.join("engine/build/Debug/ai-video-engine.exe"));
+            }
+        }
+    }
+
     if let Some(desktop_dir) = desktop_executable.and_then(|path| path.parent().map(PathBuf::from))
     {
         candidates.push(desktop_dir.join("ai-video-engine.exe"));
@@ -148,8 +164,16 @@ fn engine_executable_candidates(
 
     if let Some(source_root) = source_root {
         candidates.extend([
-            source_root.join("engine/build/Release/ai-video-engine.exe"),
-            source_root.join("engine/build/Debug/ai-video-engine.exe"),
+            source_root.join(if cfg!(debug_assertions) {
+                "engine/build/Debug/ai-video-engine.exe"
+            } else {
+                "engine/build/Release/ai-video-engine.exe"
+            }),
+            source_root.join(if cfg!(debug_assertions) {
+                "engine/build/Release/ai-video-engine.exe"
+            } else {
+                "engine/build/Debug/ai-video-engine.exe"
+            }),
             source_root.join("engine/build/ai-video-engine.exe"),
             source_root.join("engine/out/ai-video-engine.exe"),
         ]);
@@ -172,6 +196,23 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn development_prefers_fresh_engine_over_stale_packaged_copy() {
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let candidates = engine_executable_candidates(
+            Some(PathBuf::from(r"C:\source\VideoEditor")),
+            Some(PathBuf::from(
+                r"C:\source\VideoEditor\apps\desktop\src-tauri\target\debug\ai-video-editor-desktop.exe",
+            )),
+        );
+        assert_eq!(
+            candidates[0],
+            PathBuf::from(r"C:\source\VideoEditor\engine\build\Debug\ai-video-engine.exe")
+        );
+    }
+
+    #[test]
     fn packaged_engine_locations_are_checked_before_checkout_builds() {
         let candidates = engine_executable_candidates(
             Some(PathBuf::from(r"C:\source\VideoEditor")),
@@ -190,7 +231,11 @@ mod tests {
         );
         assert_eq!(
             candidates[2],
-            PathBuf::from(r"C:\source\VideoEditor\engine\build\Release\ai-video-engine.exe")
+            PathBuf::from(if cfg!(debug_assertions) {
+                r"C:\source\VideoEditor\engine\build\Debug\ai-video-engine.exe"
+            } else {
+                r"C:\source\VideoEditor\engine\build\Release\ai-video-engine.exe"
+            })
         );
     }
 

@@ -1,8 +1,19 @@
-import type { AudioAdjustment, ClipEffect, ClipTransform, ColorAdjustment } from "./timeline";
+import type { AudioAdjustment, ClipEffect, ClipTransform, ColorAdjustment, TitleOverlay } from "./timeline";
 import type { ColorMode, ExportCodec, ExportContainer, ExportEncoderOptions, ExportFps, ExportQuality, ExportResolution } from "./media";
+import type { ProjectSettings } from "./media";
 
 export type CommandType =
+  | "execute_batch"
+  | "update_project_settings"
+  | "add_marker"
+  | "update_marker"
+  | "delete_marker"
+  | "add_title"
+  | "update_title"
+  | "delete_title"
+  | "import_captions"
   | "import_media"
+  | "relink_media"
   | "remove_media"
   | "add_track"
   | "update_track"
@@ -10,6 +21,8 @@ export type CommandType =
   | "add_clip"
   | "move_clip"
   | "trim_clip"
+  | "set_clip_source_range"
+  | "crossfade_clips"
   | "split_clip"
   | "delete_clip"
   | "ripple_delete_clip"
@@ -49,6 +62,12 @@ export interface AddTrackCommand {
   index?: number;
 }
 
+export interface RelinkMediaCommand {
+  type: "relink_media";
+  mediaId: string;
+  path: string;
+}
+
 export interface UpdateTrackCommand {
   type: "update_track";
   trackId: string;
@@ -72,7 +91,29 @@ export interface AddClipCommand {
   inUs?: number;
   outUs?: number;
   speedPercent?: number;
+  color?: ColorAdjustment;
+  audio?: AudioAdjustment;
+  transform?: ClipTransform;
+  effects?: ClipEffect[];
+  lut?: { lutId: string; strength: number } | null;
 }
+
+export interface ExecuteBatchCommand {
+  type: "execute_batch";
+  label?: string;
+  commands: EditorCommand[];
+}
+
+export type MarkerCommand =
+  | { type: "add_marker"; markerId?: string; timeUs: number; name?: string; color?: string }
+  | { type: "update_marker"; markerId: string; timeUs?: number; name?: string; color?: string }
+  | { type: "delete_marker"; markerId: string };
+
+export type TitleCommand =
+  | { type: "import_captions"; captions: Array<{ text: string; startUs: number; durationUs: number }>; mode?: "append" | "replace"; style?: Pick<Partial<TitleOverlay>, "fontSize" | "color" | "positionX" | "positionY" | "background"> }
+  | ({ type: "add_title"; titleId?: string; text: string; startUs: number } & Partial<Omit<TitleOverlay, "id">>)
+  | ({ type: "update_title"; titleId: string } & Partial<Omit<TitleOverlay, "id">>)
+  | { type: "delete_title"; titleId: string };
 
 export interface MoveClipCommand {
   type: "move_clip";
@@ -118,6 +159,9 @@ export interface ApplyAudioAdjustmentCommand {
   adjustment: Partial<AudioAdjustment>;
 }
 
+export interface SetClipSourceRangeCommand { type: "set_clip_source_range"; clipId: string; inUs: number; outUs: number }
+export interface CrossfadeClipsCommand { type: "crossfade_clips"; firstClipId: string; secondClipId: string; durationUs: number }
+
 export interface ApplyClipSpeedCommand {
   type: "apply_clip_speed";
   clipId: string;
@@ -144,6 +188,8 @@ export interface ApplyLutCommand {
 }
 
 export interface ExportTimelineCommand {
+  rangeStartUs?: number;
+  rangeEndUs?: number;
   type: "export_timeline";
   outputPath: string;
   resolution: ExportResolution;
@@ -165,7 +211,12 @@ export interface ExportTimelineCommand {
 }
 
 export type EditorCommand = (
+  | { type: "update_project_settings"; settings: Partial<ProjectSettings> }
+  | ExecuteBatchCommand
+  | MarkerCommand
+  | TitleCommand
   | ImportMediaCommand
+  | RelinkMediaCommand
   | RemoveMediaCommand
   | AddTrackCommand
   | UpdateTrackCommand
@@ -173,6 +224,8 @@ export type EditorCommand = (
   | AddClipCommand
   | MoveClipCommand
   | TrimClipCommand
+  | SetClipSourceRangeCommand
+  | CrossfadeClipsCommand
   | SplitClipCommand
   | DeleteClipCommand
   | RippleDeleteClipCommand

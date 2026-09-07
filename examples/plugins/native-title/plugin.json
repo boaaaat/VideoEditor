@@ -1,0 +1,13 @@
+{
+  "id": "example.native-title",
+  "name": "Native title example",
+  "version": "1.0.0",
+  "type": "cpp",
+  "entry": "native-title.dll",
+  "description": "A native SDK example that proposes a title at the playhead.",
+  "permissions": ["timeline.write", "project.read", "ui.command"],
+  "developerModeRequired": true,
+  "parameters": [
+    {"id": "text", "label": "Title text", "type": "string", "default": "Hello from C++", "required": true}
+  ]
+}

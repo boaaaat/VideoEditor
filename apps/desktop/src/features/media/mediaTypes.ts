@@ -21,7 +21,8 @@ export interface MediaAsset {
   intelligence?: MediaIntelligence;
 }
 
-export const supportedMediaExtensions = ["mp4", "mov", "mkv", "mp3"] as const;
+export const audioMediaExtensions = ["mp3", "wav", "flac", "m4a", "aac", "ogg", "opus", "aiff", "aif"] as const;
+export const supportedMediaExtensions = ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mts", "m2ts", "png", "jpg", "jpeg", "bmp", "webp", ...audioMediaExtensions] as const;
 
 export function isSupportedMediaPath(path: string) {
   const extension = getExtension(path);
@@ -37,7 +38,7 @@ export function pathToMediaAsset(path: string, metadata?: MediaMetadata): MediaA
     name,
     path,
     extension,
-    kind: extension === "mp3" ? "audio" : "video",
+    kind: (audioMediaExtensions as readonly string[]).includes(extension) ? "audio" : "video",
     importedAt: new Date().toISOString(),
     metadata
   };
@@ -83,7 +84,7 @@ export async function getMediaPreviewFrameDataUrl(asset: MediaAsset, timeUs: num
     const { invoke } = await import("@tauri-apps/api/core");
     return await invoke<string>("media_preview_frame_data_url", {
       path: asset.path,
-      timeUs: Math.max(0, Math.round(timeUs))
+      timeUs: asset.metadata?.isStillImage ? 0 : Math.max(0, Math.round(timeUs))
     });
   } catch {
     return "";
@@ -107,12 +108,12 @@ export async function getMediaWaveformDataUrl(asset: MediaAsset, startUs?: numbe
   }
 }
 
-export async function getMediaAudioPreviewSourceUrl(asset: MediaAsset, streamIndex = 0) {
+export async function getMediaAudioPreviewSourceUrl(asset: MediaAsset, streamIndex = 0, normalize = false, cleanup = false) {
   if (!("__TAURI_INTERNALS__" in window)) {
     return streamIndex <= 0 ? getMediaSourceUrl(asset.path) : "";
   }
 
-  if (streamIndex <= 0) {
+  if (streamIndex <= 0 && !normalize && !cleanup) {
     return getMediaSourceUrl(asset.path);
   }
 
@@ -120,7 +121,7 @@ export async function getMediaAudioPreviewSourceUrl(asset: MediaAsset, streamInd
     const { convertFileSrc, invoke } = await import("@tauri-apps/api/core");
     const previewPath = await invoke<string>("media_audio_preview_source", {
       path: asset.path,
-      streamIndex
+      streamIndex, normalize, cleanup
     });
     return convertFileSrc(previewPath);
   } catch {
