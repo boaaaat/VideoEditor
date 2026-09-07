@@ -386,6 +386,38 @@ class ExportEngine {
     return {{"arguments", arguments}, {"files", files}, {"timeUs", timeUs}, {"requestedTimeUs", requestedTimeUs}, {"width", std::min(job.width, maxWidth)}, {"projectWidth", job.width}, {"projectHeight", job.height}, {"fps", job.fps}};
   }
 
+  // Render the entire mix before seeking so loudness analysis and cleanup have
+  // exactly the same input history as a full export. Scaling happens after composition.
+  [[nodiscard]] static nlohmann::json compositionPlaybackPlan(const nlohmann::json& params) {
+    ExportJob job;
+    job.width = params.value("width", 1920);
+    job.height = params.value("height", 1080);
+    job.fps = params.value("fps", 30);
+    const auto maxWidth = params.value("maxWidth", 1280);
+    if (job.width < 16 || job.width > 8192 || job.height < 16 || job.height > 8192 || job.width % 2 || job.height % 2 || job.fps < 1 || job.fps > 120 || maxWidth < 16 || maxWidth > 4096 || maxWidth % 2) throw std::runtime_error("invalid playback dimensions or frame rate");
+    if (params.value("colorMode", std::string{"SDR"}) != "SDR") throw std::runtime_error("Rendered playback currently supports SDR projects only");
+    job.timeline = timelineFromJson(params);
+    job.durationUs = visibleVideoDurationUs(job.timeline);
+    if (job.durationUs <= 0) throw std::runtime_error("Add visible video, audible audio, or titles before rendering playback");
+    job.audioEnabled = params.value("audioEnabled", true);
+    job.masterGainDb = params.value("masterGainDb", 0.0);
+    job.normalizeAudio = params.value("normalizeAudio", false);
+    job.cleanupAudio = params.value("cleanupAudio", false);
+    job.resourceDirectory = params.at("resourceDirectory").get<std::string>();
+    job.outputPath = (std::filesystem::u8path(job.resourceDirectory) / "playback.mp4").string();
+    auto files = nlohmann::json::array();
+    for (std::size_t index = 0; index < job.timeline.titles.size(); ++index) {
+      files.push_back({{"name", "title_" + std::to_string(index) + ".txt"}, {"content", job.timeline.titles[index].text}});
+    }
+    std::string graph;
+    auto arguments = buildTimelineFfmpegArguments(job, "", (std::filesystem::u8path(job.resourceDirectory) / "progress.txt").string(), true, false, &graph, maxWidth, true);
+    arguments.erase(arguments.begin());
+    files.push_back({{"name", "graph.filter"}, {"content", graph}});
+    const auto width = std::min(job.width, maxWidth);
+    const auto height = static_cast<int>(std::llround(static_cast<double>(job.height) * width / job.width / 2)) * 2;
+    return {{"arguments", arguments}, {"files", files}, {"durationUs", job.durationUs}, {"width", width}, {"height", height}, {"fps", job.fps}, {"audioEnabled", job.audioEnabled}};
+  }
+
  private:
   [[nodiscard]] static std::string buildFfmpegCommand(
       const ExportJob& job,
@@ -462,7 +494,8 @@ class ExportEngine {
       bool overwrite,
       bool useCudaDecode,
       std::string* frameGraph = nullptr,
-      int frameMaxWidth = 1280) {
+      int frameMaxWidth = 1280,
+      bool motionPreview = false) {
     std::vector<const ExportTimelineClip*> videoClips;
     for (const auto& clip : job.timeline.clips) {
       const auto* media = findMedia(job.timeline.media, clip.mediaId);
@@ -552,12 +585,20 @@ class ExportEngine {
       args.insert(args.end(), {"-filter_complex_script", graphPath.string()});
     } else args.insert(args.end(), {"-filter_complex", graph});
     args.insert(args.end(), {"-map", "[outv]"});
-    if (frameGraph) {
+    if (frameGraph && !motionPreview) {
       args.insert(args.end(), {"-an", "-frames:v", "1", "-c:v", "png", "-threads", "1", "-update", "1", job.outputPath});
       return args;
     }
     if (job.audioEnabled) {
       args.insert(args.end(), {"-map", "[outa]"});
+    }
+
+    if (motionPreview) {
+      args.insert(args.end(), {"-t", formatSeconds(job.durationUs), "-r", std::to_string(job.fps), "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-threads", "2", "-pix_fmt", "yuv420p", "-color_primaries", "bt709", "-colorspace", "bt709", "-color_trc", "bt709", "-movflags", "+faststart"});
+      if (job.audioEnabled) args.insert(args.end(), {"-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-ac", "2"});
+      else args.push_back("-an");
+      args.insert(args.end(), {"-stats_period", "0.2", "-progress", progressPath, "-nostats", job.outputPath});
+      return args;
     }
 
     args.insert(args.end(), {
@@ -1283,11 +1324,9 @@ class ExportEngine {
       }
       durationUs = std::max(durationUs, clip.startUs + clipDisplayDurationUs(clip));
     }
-    if (durationUs == 0) {
-      for (const auto& clip : timeline.clips) {
-        const auto* media = findMedia(timeline.media, clip.mediaId);
-        if (media && media->hasAudio && !clip.audioMuted && !clip.trackMuted && (clip.trackKind != "video" || clip.trackVisible)) durationUs = std::max(durationUs, clip.startUs + clipDisplayDurationUs(clip));
-      }
+    for (const auto& clip : timeline.clips) {
+      const auto* media = findMedia(timeline.media, clip.mediaId);
+      if (media && media->hasAudio && !clip.audioMuted && !clip.trackMuted && (clip.trackKind != "video" || clip.trackVisible)) durationUs = std::max(durationUs, clip.startUs + clipDisplayDurationUs(clip));
     }
     return durationUs;
   }

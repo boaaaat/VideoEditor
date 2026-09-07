@@ -51,7 +51,7 @@ The desktop bridge is disabled until first enabled. It binds only to `127.0.0.1`
 | Markers and text | `add_marker`, `update_marker`, `delete_marker`, `add_title`, `update_title`, `delete_title` |
 | Captions | `import_captions`, `subtitles_import`, `subtitles_export` |
 | History | `edit_batch`, `undo`, `redo`, `history` |
-| Playback and delivery | `playback`, `export_start`, `export_status`, `export_cancel` |
+| Playback and delivery | `playback`, `playback_render`, `playback_render_status`, `playback_render_cancel`, `export_start`, `export_status`, `export_cancel` |
 | Review | `propose_edits`, `proposals_list`, `proposal_apply`, `proposal_reject` |
 | Plugins | `plugins_list`, `plugin_inspect`, `plugin_install`, `plugin_enable`, `plugin_run`, `plugin_remove`, `plugin_developer_mode` |
 
@@ -80,13 +80,19 @@ Plugin operations use `scope: "project"` by default; `"user"` applies across pro
 
 ## Export and verification
 
-`export_start` returns a job, not a completed file. Poll `export_status` until `completed`, `error`, or `cancelled`. Inspect logs on failure. The optional `rangeStartUs` and `rangeEndUs` select a timeline interval; output time starts at zero. The default duration follows visible video and titles, or audible clips when no visual content exists. Long background audio is trimmed to the visual sequence. Overwrite is false unless explicitly requested.
+`export_start` returns a job, not a completed file. Poll `export_status` until `completed`, `error`, or `cancelled`. Inspect logs on failure. The optional `rangeStartUs` and `rangeEndUs` select a timeline interval; output time starts at zero. The default duration reaches the last visible video, title, or audible clip, including audio after the last picture. Use an explicit range to trim that tail. Overwrite is false unless explicitly requested.
 
 Exports use the installed NVIDIA/FFmpeg pipeline. The editor retries hardware decoding with CPU decoding when necessary and records FFmpeg diagnostics. Source-frame inspection with `media_frame` returns the original source, before timeline transforms, titles, or effects. It must not be used as proof of final output appearance. Verify the actual exported file when appearance or audio matters.
 
 Use `timeline_frame` after visual edits to inspect the composed timeline, including visible layers, color, looks, effects, transforms, fades, titles, and captions. It returns an MCP image plus the sampled timeline time, image dimensions, and cache status. `timeUs` defaults to the current playhead without moving it; times are sampled on the project's frame grid. `maxWidth` defaults to 1280 and accepts 16–4096, preserving aspect ratio without upscaling. Frame inspection is read-only and creates no history entries.
 
-The paused desktop monitor uses this same export filter graph. Changing the timeline or source file invalidates cached frames; rapid seeking cancels outdated monitor requests. Rendering is limited to two concurrent processes, 15 seconds per frame, and a 128 MB/256-frame cache. These frames are 8-bit images and do not verify HDR display, motion, encoded-file quality, or audio. Current interactive playback uses a draft preview; check an export for final motion and sound.
+The paused desktop monitor uses this same export filter graph. Changing the timeline or source file invalidates cached frames; rapid seeking cancels outdated monitor requests. Rendering is limited to two concurrent processes, 15 seconds per frame, and a 128 MB/256-frame cache. These frames are 8-bit images and do not verify HDR display, motion, encoded-file quality, or audio.
+
+Use `playback_render` to review motion and the complete audio mix through the export filters. It returns a job ID immediately. Poll `playback_render_status` until `completed`, `failed`, or `cancelled`; a completed job includes a local H.264/AAC movie path, duration, dimensions, and cache status. `maxWidth` is an even number from 16 to 4096, default 1280. The full composition renders before downscaling, and the complete audio is processed before seeking, preserving clip and master normalization/cleanup behavior. The review encoding differs from the delivery encoder; inspect the actual export for delivery quality. HDR projects are currently rejected by this playback mode.
+
+Edit, Color, and Effects offer **Render playback**, a progress/cancel control, and **Draft** to return to immediate playback. After a timeline, source reference, or render-setting edit, the previous movie is hidden and must be rendered again. **Refresh playback** also rechecks file metadata for externally changed sources. Playback speed and monitor volume do not require rerendering. Render requests do not add undo entries or change the project. MCP render tools create a review movie without changing the visible playback mode.
+
+Playback rendering uses one background process with up to four outstanding jobs, a one-hour render limit, and a 2 GB movie/cache limit (at most 12 cached movies). Queued jobs and running processes can be cancelled with `playback_render_cancel`; closing the desktop cancels its jobs. Incomplete movies are never published. The cache validates file structure, size/mtime, source metadata, settings, and renderer versions before reuse. Job IDs are temporary; old completed job status may be evicted after 16 requests, while its cached movie remains subject to the cache limit.
 
 ## Regression checks
 
@@ -97,3 +103,5 @@ The paused desktop monitor uses this same export filter graph. Changing the time
 `node packages/mcp/test/live-composition.mjs` has the same fresh-window requirement. It compares composition frames with decoded exports for color, every current effect and look, layered transforms/fades, title text, and speed-adjusted motion. It also checks source-file cache invalidation, look strength, image sizing, and history preservation. Artifacts and comparison metrics are saved under `engine/build/mcp-composition-*`.
 
 `node packages/mcp/test/live-media-recovery.mjs` checks real source validation, Unicode paths, moved files, relink rollback and undo, project copies, save/reopen, and export. `node packages/mcp/test/live-split-fades.mjs` compares paused frames and decoded video/audio before and after repeated splits at normal and double speed with mono/stereo sources. The split check accepts a fresh window or one of its own previous fixtures. These checks use temporary projects with `remember: false`.
+
+`node packages/mcp/test/live-playback-render.mjs` compares rendered playback against export for motion, text, fades, speed, and the complete processed audio mix. It also checks cache invalidation/repair, cancellation, silent output, history preservation, and audio extending past the picture. It accepts a fresh window or one of its own fixtures and honors `AI_VIDEO_EDITOR_BRIDGE_FILE` for an isolated test session.

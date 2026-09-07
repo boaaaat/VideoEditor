@@ -784,12 +784,11 @@ function getVisibleVideoDurationUs(timeline: Timeline, mediaAssets: MediaAsset[]
       const displayDurationUs = Math.max(1, Math.round((clip.outUs - clip.inUs) / (speedPercent / 100)));
       return Math.max(durationUs, clip.startUs + displayDurationUs);
     }, Math.max(0, ...(timeline.titles ?? []).map((title) => title.startUs + title.durationUs)));
-  if (videoDurationUs > 0) return videoDurationUs;
   return timeline.tracks.filter((track) => !track.muted && (track.kind === "audio" || track.visible)).flatMap((track) => track.clips).reduce((duration, clip) => {
     const asset = mediaById.get(clip.mediaId);
     if (clip.audio?.muted || !(asset?.kind === "audio" || asset?.metadata?.hasAudio)) return duration;
     return Math.max(duration, clip.startUs + Math.round((clip.outUs - clip.inUs) / ((clip.speedPercent || 100) / 100)));
-  }, 0);
+  }, videoDurationUs);
 }
 
 function formatDuration(durationUs: number) {

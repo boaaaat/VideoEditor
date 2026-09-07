@@ -122,6 +122,7 @@ nlohmann::json EngineApp::handleRequest(const nlohmann::json& request) {
   }
 
   if (method == "composition.frame_plan") return ExportEngine::compositionFramePlan(params);
+  if (method == "composition.playback_plan") return ExportEngine::compositionPlaybackPlan(params);
 
   if (method == "export.cancel") {
     return exportEngine_.cancel();

@@ -6,6 +6,8 @@ import { IconButton } from "../../components/IconButton";
 import { TimecodeInput } from "../../components/TimecodeInput";
 import type { MediaAsset } from "../../features/media/mediaTypes";
 import { usePlaybackClock } from "../../features/timeline/usePlaybackClock";
+import { useRenderedPlayback } from "../../features/playback/useRenderedPlayback";
+import { RenderedPlayback, RenderedPlaybackControls } from "../../components/RenderedPlayback";
 import { timelineContentDurationUs } from "../../features/timeline/timing";
 import { CompositionPreview } from "./EditTab";
 
@@ -37,7 +39,8 @@ export function ColorEffectsPlayback({ timeline, mediaAssets, projectSettings, p
     });
   const durationUs = Math.max(1, timelineContentDurationUs(timeline));
   const videoMaster = videoItems.find((item) => !item.asset.metadata?.isStillImage);
-  const clock = usePlaybackClock({ playing, playheadUs, clipId: audioItems[0]?.clip.id ?? videoMaster?.clip.id ?? "",
+  const renderedPlayback = useRenderedPlayback({timeline,mediaAssets,projectSettings,projectPath}, setPlaying);
+  const clock = usePlaybackClock({ playing: playing && !renderedPlayback.enabled, playheadUs, clipId: audioItems[0]?.clip.id ?? videoMaster?.clip.id ?? "",
     durationUs, speedPercent: previewSpeedPercent, setPlaying, setPlayheadUs });
 
   useEffect(() => {
@@ -54,15 +57,16 @@ export function ColorEffectsPlayback({ timeline, mediaAssets, projectSettings, p
 
   return <div className="editor-playback-surface">
     <div className="editor-playback-preview">
-      <CompositionPreview projectSettings={projectSettings} projectPath={projectPath} videoClip={videoMaster?.clip}
+      {renderedPlayback.enabled ? <RenderedPlayback preview={renderedPlayback} playing={playing} playheadUs={playheadUs} speedPercent={previewSpeedPercent} volumePercent={previewVolumePercent} onTime={setPlayheadUs} onPlaying={setPlaying} /> : <CompositionPreview projectSettings={projectSettings} projectPath={projectPath} videoClip={videoMaster?.clip}
         timeline={timeline} mediaAssets={mediaAssets}
         videoItems={videoItems} audioItems={audioItems} titles={(timeline.titles ?? []).filter((title) => playheadUs >= title.startUs && playheadUs < title.startUs + title.durationUs)}
         playheadUs={playheadUs} playing={playing} previewQuality="Proxy" previewScale="fit"
-        previewVolumePercent={previewVolumePercent} previewSpeedPercent={previewSpeedPercent} {...clock} />
+        previewVolumePercent={previewVolumePercent} previewSpeedPercent={previewSpeedPercent} {...clock} />}
     </div>
     <div className="editor-playback-controls">
+      <RenderedPlaybackControls preview={renderedPlayback} disabled={timelineContentDurationUs(timeline) <= 0} />
       <div className="transport">
-        <IconButton label={playing ? "Pause" : "Play"} icon={playing ? <Pause size={17} /> : <Play size={17} />} onClick={togglePlayback} disabled={timeline.durationUs <= 0} />
+        <IconButton label={playing ? "Pause" : "Play"} icon={playing ? <Pause size={17} /> : <Play size={17} />} onClick={togglePlayback} disabled={timelineContentDurationUs(timeline) <= 0 || (renderedPlayback.enabled && !renderedPlayback.ready)} />
         <IconButton label="Step back one frame" icon={<StepBack size={16} />} onClick={() => seek(playheadUs - 1_000_000 / projectSettings.fps)} />
         <IconButton label="Step forward one frame" icon={<StepForward size={16} />} onClick={() => seek(playheadUs + 1_000_000 / projectSettings.fps)} />
         <TimecodeInput valueUs={playheadUs} fps={projectSettings.fps} maxUs={durationUs} onSeek={seek} />

@@ -4,7 +4,7 @@ The editing workspace includes precise trimming, multiple video/audio tracks, pi
 
 Import and export SRT/WebVTT captions from **Titles and captions**; see [subtitle interchange](docs/subtitles.md). The **Plugins** tab installs and runs JavaScript or trusted native packages with reviewable edit proposals; see the [plugin API and examples](docs/plugin-api.md).
 
-The paused monitor and MCP `timeline_frame` render the timeline through the export compositor, including layers, effects, color, fades, and text. Interactive playback currently uses a draft preview; exported video remains the check for final motion and audio.
+The paused monitor and MCP `timeline_frame` render the timeline through the export compositor, including layers, effects, color, fades, and text. **Render playback** in Edit, Color, and Effects prepares a cached SDR movie with the complete processed audio mix; **Draft** returns to immediate playback. Renders have progress and cancellation, and edits require a refreshed movie. MCP exposes the same rendering jobs. Delivery encoding and HDR still require separate verification.
 
 Imports validate source files before adding them. Missing media can be relinked without losing timeline edits, with one-step undo. MCP agents can use `media_check` and `media_relink` for the same recovery workflow, or import independent project copies. Splitting a clip preserves its audio/video fade progression, including cuts inside a fade.
 
@@ -196,4 +196,4 @@ pnpm clean
 - If Tauri packaging fails on Windows, confirm `apps/desktop/src-tauri/icons/icon.ico` exists.
 - If NVIDIA detection fails, confirm `nvidia-smi` works from PowerShell.
 
-This repository currently contains the v0.1 foundation: the app shell, protocol package, Tauri bridge, C++ sidecar skeleton, scripts, and architecture docs.
+The editor is still under active development. See [the completion checklist](docs/editor-completion-plan.md) for verified workflows and remaining work.

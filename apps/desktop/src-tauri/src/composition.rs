@@ -243,7 +243,7 @@ pub async fn composition_frame(
     .map_err(|e| e.to_string())?
 }
 
-fn cache_root() -> Result<PathBuf, String> {
+pub(super) fn cache_root() -> Result<PathBuf, String> {
     let root =
         PathBuf::from(std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA is unavailable")?)
             .join("AI Video Editor/cache/composition");
@@ -261,7 +261,7 @@ fn cache_root() -> Result<PathBuf, String> {
     }
     Ok(absolute)
 }
-fn hash_metadata(hasher: &mut Sha256, path: &Path) {
+pub(super) fn hash_metadata(hasher: &mut Sha256, path: &Path) {
     if let Ok(metadata) = fs::metadata(path) {
         hasher.update(metadata.len().to_le_bytes());
         if let Ok(time) = metadata.modified().and_then(|time| {

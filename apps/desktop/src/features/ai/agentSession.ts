@@ -6,7 +6,7 @@ import type { ProjectSnapshot } from "../projects/projectActions";
 import { validateMediaPaths } from "../projects/projectActions";
 import { timelineContentDurationUs } from "../timeline/timing";
 import { pluginInvoke, runEditorPlugin } from "../plugins/runtime";
-import { getCompositionFrame } from "../playback/composition";
+import { getCompositionFrame, compositionPlaybackParams } from "../playback/composition";
 
 export interface AgentRequest { requestId: string; method: string; params: Record<string, unknown> }
 export interface AgentContext {
@@ -38,6 +38,15 @@ export async function handleAgentRequest(request: AgentRequest, context: AgentCo
   if (method === "timeline.frame") {
     if (!context.snapshot.project.path) throw new Error("Open a project before inspecting its composition");
     return getCompositionFrame({timeline:context.snapshot.timeline,mediaAssets:context.snapshot.mediaAssets,projectSettings:context.snapshot.projectSettings,projectPath:context.snapshot.project.path,timeUs:finiteTime(params.timeUs ?? context.playheadUs),maxWidth:typeof params.maxWidth === "number" ? params.maxWidth : 1280});
+  }
+  if (method === "playback.render") {
+    if (!context.snapshot.project.path) throw new Error("Open a project before rendering playback");
+    const {invoke} = await import("@tauri-apps/api/core");
+    return invoke("composition_playback_start", {params:compositionPlaybackParams({timeline:context.snapshot.timeline,mediaAssets:context.snapshot.mediaAssets,projectSettings:context.snapshot.projectSettings,projectPath:context.snapshot.project.path,maxWidth:typeof params.maxWidth === "number" ? params.maxWidth : 1280})});
+  }
+  if (method === "playback.render_status" || method === "playback.render_cancel") {
+    const {invoke} = await import("@tauri-apps/api/core");
+    return invoke(method === "playback.render_status" ? "composition_playback_status" : "composition_playback_cancel", {jobId:params.jobId});
   }
   if (method === "media.index") return { media: context.snapshot.mediaAssets };
   if (method === "media.check") {

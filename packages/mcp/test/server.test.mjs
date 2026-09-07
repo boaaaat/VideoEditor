@@ -58,6 +58,17 @@ test('compound tools dispatch once and preserve source timing and effects', asyn
   assert.deepEqual(calls[0], { method: 'command.execute', params: { type: 'execute_batch', commands, label: 'Fixture edit' } });
 });
 
+test('playback renders are asynchronous, bounded, and separately cancellable', async (t) => {
+  const calls=[];
+  const client=await connected(t,async(method,params)=>{calls.push({method,params});return {jobId:'preview-1',state:'queued'};});
+  await client.callTool({name:'playback_render',arguments:{}});
+  await client.callTool({name:'playback_render_status',arguments:{jobId:'preview-1'}});
+  await client.callTool({name:'playback_render_cancel',arguments:{jobId:'preview-1'}});
+  assert.deepEqual(calls,[{method:'playback.render',params:{maxWidth:1280}},{method:'playback.render_status',params:{jobId:'preview-1'}},{method:'playback.render_cancel',params:{jobId:'preview-1'}}]);
+  for(const maxWidth of [0,15,17,8192]) assert.equal((await client.callTool({name:'playback_render',arguments:{maxWidth}})).isError,true);
+  assert.equal(calls.length,3);
+});
+
 test('media recovery and temporary projects retain MCP arguments and safety hints', async (t) => {
   const calls=[];
   const client=await connected(t,async(method,params)=>{calls.push({method,params});return {ok:true};});

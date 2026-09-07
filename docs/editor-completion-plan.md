@@ -17,18 +17,19 @@ The active goal covers a polished, usable editor with complete basic editing wor
 - Real source validation, transactional relinking with undo, independent project-copy imports, and missing-source inspection through MCP. Temporary agent projects can skip the recent-project list through saves and autosaves.
 - Splits preserve the original audio/video fade progression through repeated cuts. Fade timing in draft playback uses timeline time after speed adjustment. Export audio now assigns valid timestamps to delayed silence after source seeking.
 - Settings now has project canvas/frame-rate/audio controls, persistent import-copy and autosave preferences, and links to shortcuts/plugins/agents. Media cards show availability and relevant proxy/error states; routine cache details remain in a tooltip.
+- Render playback in Edit/Color/Effects uses the export compositor and complete audio mix, with background progress/cancellation, bounded validated caching, and invalidation after edits. MCP has matching render/status/cancel tools. Audio extending past the picture is retained by playback and export.
 
 ## Required work remaining
 
 - [ ] Finish visual review of the native editing workspace and its dialogs at supported window sizes; resolve layout and interaction issues.
-- [ ] Complete visual preview fidelity. Paused SDR frames are implemented and compared with exports; final-quality motion playback, audio normalization parity, and HDR handling remain.
+- [ ] Complete visual preview fidelity. Paused SDR frames and rendered SDR motion/audio are implemented and compared with exports. Native playback-control review, draft-audio limitations, and HDR handling remain.
 - [x] Replace the placeholder plugin UI with working discovery, install/enable/run/status/error flows and documented plugin contracts. Native visual review remains in the separate UI audit.
 - [ ] Audit remaining basic editing workflows, including missing-media recovery and source validation, and fill functional gaps. Caption interchange is implemented and has live regression coverage.
 - [ ] Complete AI workflow review. Agents can now inspect the resulting composition through `timeline_frame`; the final workflow audit remains.
 - [ ] Update setup/feature documentation to describe actual capabilities and remaining limitations.
 - [ ] Perform the final requirement-by-requirement build, regression, and live interaction audit.
 
-## Current evidence (2026-09-05)
+## Current evidence (2026-09-07)
 
 - The full `corepack pnpm test` pipeline passed after the media/fade phase: playback and bundle configuration, three schemas, five subtitle tests, nine MCP tests, ten Rust tests, and the rebuilt engine suite (45.20 seconds). Engine coverage now also includes real-media validation/copy rollback, relinking, fade ranges, duplicate import paths, and repeated-split undo/redo.
 - Ten Rust tests passed, including plugin approval/native-mode checks, subtitle overwrite protection, audio normalization/cleanup, source-cache invalidation, still-image metadata on relink, and rejection of incomplete cached PNGs.
@@ -41,6 +42,9 @@ The active goal covers a polished, usable editor with complete basic editing wor
 - Rebuilt engine core suite passed in 45.67 seconds after the shared compositor refactor and look-strength correction.
 - Media recovery integration passed 62 calls: Unicode paths, missing/corrupt imports, moved files, incompatible replacements, locked tracks, relink undo/redo, copy rollback, source-independent copies, save/reopen, and export. Artifacts: `engine/build/mcp-media-recovery-1788647012313/report.json`.
 - Split-fade integration passed 193 calls and 28 pixel/audio comparisons for mono/stereo sources at 100% and 200% speed. Repeated cuts inside fades preserved paused PNGs, saved state, and undo/redo. Sampled decoded video pixels matched exactly; audio RMS differences were below 1%. This exposed and fixed a channel-layout crash and invalid delayed-silence timestamps after source seeking. Artifacts: `engine/build/mcp-split-fades-1788648350178/report.json`.
+- The latest full `corepack pnpm test` run passed after rendered playback: three schemas, five subtitle tests, ten MCP tests, ten Rust tests, and the engine suite (44.77 seconds). TypeScript checks, production frontend build, and debug desktop/engine builds passed.
+- The final rendered-playback integration passed 99 MCP calls and seven video comparisons, with RGB mean absolute error 0–2.47 on a 0–255 scale. The complete decoded audio mix matched the export byte for byte, including source trims, speed, split fades, clip/master normalization, and cleanup. Cache reuse, source/edit invalidation, truncated-cache repair, cancellation, silent output, and an audible eight-second audio tail beyond the final picture passed. Artifacts: `engine/build/mcp-playback-render-1788813957786/report.json`.
+- An accidental Escape stopped Computer Use during native rendered-playback inspection. The user authorized resuming, but the tool retained its stop state for the turn. Render/play/pause/seek/loop/volume, invalidation feedback, and narrow-window layout for the new controls remain unverified visually. Resume in a fresh turn using the visible test editor.
 
 The user's goal explicitly authorizes tests. Test projects and rendered artifacts are created under `engine/build/mcp-*`; user projects are not used as fixtures.
 
@@ -48,7 +52,7 @@ Native inspection works after explicitly activating the selected editor window. 
 
 ## Next concrete checks
 
-- Finish motion preview through the shared compositor, including audio timing and normalization parity; explicitly bound unsupported HDR behavior.
+- Finish native rendered-playback interaction review. Review draft-audio behavior and explicitly bound unsupported HDR handling beyond the new SDR-only playback renderer.
 - Source validation, relinking, project copies, and split fades now have real-media regression coverage. Complete their native UI interaction review and the remaining basic-workflow audit. Verify the inspector submits the displayed crossfade duration, including values greater than half a clip.
 - Complete native populated-plugin, export/settings/marker, and missing-media dialogs. Compact Color now retains a usable monitor and scrolls its controls at short heights; check Effects with populated stacks too.
 - Temporary fixture projects now use `remember: false`; their exclusion from the native Home list is verified.

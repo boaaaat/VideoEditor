@@ -4,6 +4,7 @@ mod composition;
 mod engine_rpc;
 mod engine_sidecar;
 mod mcp_discovery;
+mod playback_render;
 mod plugins;
 mod preview_url;
 
@@ -35,6 +36,7 @@ fn main() {
         .on_window_event(|window, event| {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 agent_bridge::shutdown(window.app_handle());
+                playback_render::shutdown();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -57,6 +59,9 @@ fn main() {
             commands::engine_rpc,
             composition::composition_frame,
             composition::composition_cancel,
+            playback_render::composition_playback_start,
+            playback_render::composition_playback_status,
+            playback_render::composition_playback_cancel,
             commands::engine_status,
             commands::media_probe,
             commands::media_audio_preview_source,

@@ -16,6 +16,8 @@ import {
   type WheelEvent as ReactWheelEvent
 } from "react";
 import { usePlaybackClock } from "../../features/timeline/usePlaybackClock";
+import { useRenderedPlayback } from "../../features/playback/useRenderedPlayback";
+import { RenderedPlayback, RenderedPlaybackControls } from "../../components/RenderedPlayback";
 import {
   Eye,
   EyeOff,
@@ -282,6 +284,9 @@ export function EditTab({
   const [titleEditor, setTitleEditor] = useState<string | null>(null);
   const [previewQuality, setPreviewQuality] = useState<PreviewQuality>("Proxy");
   const [previewScale, setPreviewScale] = useState<PreviewScaleMode>("fit");
+  const previewTimeline = soloTrackIds.length ? {...timeline, tracks:timeline.tracks.map((track) => soloTrackIds.includes(track.id) ? track : {...track,visible:false,muted:true})} : timeline;
+  const renderedPlayback = useRenderedPlayback({timeline:previewTimeline,mediaAssets,projectSettings,projectPath,
+    maxWidth:Math.min(4096, Math.max(16, Math.floor(projectSettings.width / (previewQuality === "Full" ? 1 : previewQuality === "1/2" ? 2 : previewQuality === "1/4" ? 4 : Math.max(1,projectSettings.width / 1280)) / 2) * 2))}, setPlaying);
   const [timelineZoom, setTimelineZoom] = useState(72);
   const [previewHeight, setPreviewHeight] = useState(() => {
     try { const value = Number(localStorage.getItem("editor.preview-height") ?? 56); return Number.isFinite(value) ? clamp(value, 30, 75) : 56; } catch { return 56; }
@@ -359,7 +364,7 @@ export function EditTab({
     setPlayheadUs(nextPlayheadUs);
   }, []);
   const { onPlaybackClock: onMediaPlaybackClock, onPlaybackClockUnavailable: onMediaPlaybackClockUnavailable } = usePlaybackClock({
-    playing, playheadUs, clipId: playbackClockClipId, durationUs: getTimelineContentEndUs(timeline),
+    playing: playing && !renderedPlayback.enabled, playheadUs, clipId: playbackClockClipId, durationUs: getTimelineContentEndUs(timeline),
     speedPercent: previewSpeedPercent, loop: loopPlayback, setPlaying, setPlayheadUs
   });
 
@@ -2280,6 +2285,7 @@ export function EditTab({
           title="Preview"
           actions={
             <>
+              <RenderedPlaybackControls preview={renderedPlayback} disabled={getTimelineContentEndUs(timeline) === 0} />
               <select value={previewQuality} aria-label="Preview quality" onChange={(event) => setPreviewQuality(event.target.value as PreviewQuality)}>
                 {previewQualities.map((quality) => (
                   <option key={quality}>{quality}</option>
@@ -2295,8 +2301,8 @@ export function EditTab({
           }
         >
           <div className="preview-player">
-            <PreviewSurface
-              timeline={timeline}
+            {renderedPlayback.enabled ? <RenderedPlayback preview={renderedPlayback} playing={playing} playheadUs={playheadUs} speedPercent={previewSpeedPercent} volumePercent={previewVolumePercent} loop={loopPlayback} scale={previewScale} canvasWidth={projectSettings.width} onTime={setPlayheadUs} onPlaying={setPlaying} /> : <PreviewSurface
+              timeline={previewTimeline}
               mediaAssets={mediaAssets}
               titles={(timeline.titles ?? []).filter((title) => playheadUs >= title.startUs && playheadUs < title.startUs + title.durationUs)}
               videoItems={activeVideoItems}
@@ -2315,9 +2321,9 @@ export function EditTab({
               previewSpeedPercent={previewSpeedPercent}
               onPlaybackClock={onMediaPlaybackClock}
               onPlaybackClockUnavailable={onMediaPlaybackClockUnavailable}
-            />
+            />}
             <div className="transport">
-              <IconButton label={playing ? "Pause" : "Play"} icon={playing ? <Pause size={18} /> : <Play size={18} />} onClick={togglePlayback} disabled={getTimelineContentEndUs(timeline) === 0} />
+              <IconButton label={playing ? "Pause" : "Play"} icon={playing ? <Pause size={18} /> : <Play size={18} />} onClick={togglePlayback} disabled={getTimelineContentEndUs(timeline) === 0 || (renderedPlayback.enabled && !renderedPlayback.ready)} />
               <IconButton label="Step back one frame" icon={<StepBack size={17} />} onClick={() => stepPlayhead(-1)} />
               <IconButton label="Step forward one frame" icon={<StepForward size={17} />} onClick={() => stepPlayhead(1)} />
               <IconButton label={loopPlayback ? "Loop playback on" : "Loop playback off"} icon={<Repeat size={17} />} className={loopPlayback ? "icon-active" : ""} onClick={() => setLoopPlayback((value) => !value)} />
